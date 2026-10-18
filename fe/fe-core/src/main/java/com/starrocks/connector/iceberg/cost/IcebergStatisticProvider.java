@@ -27,13 +27,17 @@ import com.starrocks.sql.optimizer.OptimizerContext;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
 import com.starrocks.sql.optimizer.statistics.Statistics;
+import com.starrocks.sql.optimizer.statistics.StringBounds;
 import org.apache.iceberg.BlobMetadata;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.FileScanTask;
+import org.apache.iceberg.MetricsConfig;
+import org.apache.iceberg.MetricsModes;
 import org.apache.iceberg.PartitionData;
 import org.apache.iceberg.PartitionField;
 import org.apache.iceberg.StatisticsFile;
 import org.apache.iceberg.Table;
+import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.puffin.StandardBlobTypes;
 import org.apache.iceberg.types.Comparators;
 import org.apache.iceberg.types.Type;
@@ -63,6 +67,8 @@ import static java.util.stream.Collectors.toMap;
 public class IcebergStatisticProvider {
     private static final Logger LOG = LogManager.getLogger(IcebergStatisticProvider.class);
     public static final String NDV_PROP = "ndv";
+    // The length the default metrics mode of Iceberg, truncate(16), cuts strings to
+    private static final int DEFAULT_TRUNCATE_LENGTH = defaultTruncateLength();
 
     // table uuid -> <partition column id -> partition column values>
     private final Map<String, HashMultimap<Integer, Object>> uuidToPartitionFieldIdToValues = new HashMap<>();
@@ -247,6 +253,7 @@ public class IcebergStatisticProvider {
         Map<Integer, String> idToColumnNames = columns.stream().
                 filter(column -> !fromIcebergType(column.type()).isUnknown())
                 .collect(Collectors.toMap(Types.NestedField::fieldId, Types.NestedField::name));
+        MetricsConfig metricsConfig = null;
 
         for (Map.Entry<Integer, String> idColumn : idToColumnNames.entrySet()) {
             List<ColumnRefOperator> columnList = colRefToColumnMetaMap.keySet().stream().filter(
@@ -257,8 +264,21 @@ public class IcebergStatisticProvider {
                 continue;
             }
 
+            Column column = colRefToColumnMetaMap.get(columnList.get(0));
+            MetricsModes.MetricsMode mode = null;
+            if (column.getType().isStringType()) {
+                // The mode tells how the string bounds are cut; without it the bounds may be cut at any length
+                try {
+                    if (metricsConfig == null) {
+                        metricsConfig = MetricsConfig.forTable(nativeTable);
+                    }
+                    mode = metricsConfig.columnMode(idColumn.getValue());
+                } catch (RuntimeException e) {
+                    LOG.debug("Failed to read the metrics mode of column {}", idColumn.getValue(), e);
+                }
+            }
             columnStatistics.put(columnList.get(0), buildColumnStatistic(
-                    idColumn.getKey(), colRefToColumnMetaMap.get(columnList.get(0)), icebergFileStats, colIdToNdv));
+                    idColumn.getKey(), column, icebergFileStats, colIdToNdv, mode));
         }
 
         // when we rewrit plan, we will add some artificial columns which not eixst in iceberg table,
@@ -272,31 +292,25 @@ public class IcebergStatisticProvider {
         return columnStatistics;
     }
 
-    private ColumnStatistic buildColumnStatistic(
+    /**
+     * @param mode the metrics mode of a string column, which says how its bounds are cut; null for other columns
+     */
+    @VisibleForTesting
+    ColumnStatistic buildColumnStatistic(
             Integer fieldId,
             Column column,
             IcebergFileStats icebergStats,
-            Map<Integer, Long> colIdToNdv) {
+            Map<Integer, Long> colIdToNdv,
+            MetricsModes.MetricsMode mode) {
         ColumnStatistic.Builder builder = ColumnStatistic.builder();
 
-        if (icebergStats.canUseStats(fieldId, icebergStats.getMinValues())) {
-            if (column.getType().isStringType()) {
-                String minString = icebergStats.getMinValues().get(fieldId).toString();
-                builder.setMinString(minString);
-            } else {
-                Optional<Double> res = icebergStats.getMinValue(fieldId);
-                res.ifPresent(builder::setMinValue);
-            }
-        }
-
-        if (icebergStats.canUseStats(fieldId, icebergStats.getMaxValues())) {
-            if (column.getType().isStringType()) {
-                String maxString = icebergStats.getMaxValues().get(fieldId).toString();
-                builder.setMaxString(maxString);
-            } else {
-                Optional<Double> res = icebergStats.getMaxValue(fieldId);
-                res.ifPresent(builder::setMaxValue);
-            }
+        boolean bounds = hasBounds(fieldId, icebergStats);
+        if (bounds && column.getType().isStringType()) {
+            builder.setMinString(icebergStats.getMinValues().get(fieldId).toString());
+            builder.setMaxString(icebergStats.getMaxValues().get(fieldId).toString());
+        } else if (bounds) {
+            icebergStats.getMinValue(fieldId).ifPresent(builder::setMinValue);
+            icebergStats.getMaxValue(fieldId).ifPresent(builder::setMaxValue);
         }
 
         Long nullCount = icebergStats.getNullCounts() == null ? null : icebergStats.getNullCounts().get(fieldId);
@@ -324,21 +338,71 @@ public class IcebergStatisticProvider {
             builder.setDistinctValuesCount(Math.max(Math.min(ndv, icebergStats.getRecordCount()), 1));
             builder.setType(ColumnStatistic.StatisticType.ESTIMATE);
         } else {
-            double estimatedNdv = estimateNdvFallback(fieldId, icebergStats);
+            double estimatedNdv = estimateNdvFallback(fieldId, icebergStats, bounds);
             builder.setDistinctValuesCount(estimatedNdv);
             builder.setType(ColumnStatistic.StatisticType.ESTIMATE);
         }
 
+        if (bounds && column.getType().isStringType()) {
+            builder.setStringBounds(stringBounds(icebergStats.getMinValues().get(fieldId).toString(),
+                    icebergStats.getMaxValues().get(fieldId).toString(), mode));
+        }
         return builder.build();
+    }
+
+    /**
+     * Whether the bounds of a column hold all of its values: both bounds are known and no file left one out. A file
+     * that has values of the column without bounds for them puts the column into the corrupted statistics, and the
+     * bounds of the other files may miss its values, the upper bound as well as the lower one. A file without any
+     * metrics leaves out the bounds of every column. No bounds tell less
+     * than such bounds, but they tell nothing wrong.
+     */
+    private static boolean hasBounds(Integer fieldId, IcebergFileStats icebergStats) {
+        return icebergStats.hasValidColumnMetrics()
+                && icebergStats.canUseStats(fieldId, icebergStats.getMinValues())
+                && icebergStats.canUseStats(fieldId, icebergStats.getMaxValues())
+                && (icebergStats.getCorruptedStats() == null || !icebergStats.getCorruptedStats().contains(fieldId));
+    }
+
+    /**
+     * The bounds of a string column for the estimates of strings and casts only, see StringBounds. A truncate(L)
+     * metrics mode keeps the first L characters of a longer value and increases the last character of its upper
+     * bound by one; a full mode keeps whole values; a mode that is not known may have cut them at any length. The
+     * mode is that of the table now, and older files may have been written with the default truncate(16): a bound
+     * of 16 characters is taken as possibly cut whatever the mode says.
+     */
+    private static StringBounds stringBounds(String min, String max, MetricsModes.MetricsMode mode) {
+        int cut;
+        if (mode instanceof MetricsModes.Truncate truncate) {
+            cut = truncate.length();
+        } else if (mode instanceof MetricsModes.Full) {
+            cut = StringBounds.WHOLE;
+        } else {
+            cut = StringBounds.UNKNOWN;
+        }
+        if (cut != StringBounds.UNKNOWN && (length(min) == DEFAULT_TRUNCATE_LENGTH
+                || length(max) == DEFAULT_TRUNCATE_LENGTH)) {
+            cut = cut == StringBounds.WHOLE ? DEFAULT_TRUNCATE_LENGTH : Math.min(cut, DEFAULT_TRUNCATE_LENGTH);
+        }
+        return new StringBounds(min, max, cut, cut != StringBounds.WHOLE);
+    }
+
+    private static int defaultTruncateLength() {
+        MetricsModes.MetricsMode mode = MetricsModes.fromString(TableProperties.DEFAULT_WRITE_METRICS_MODE_DEFAULT);
+        return mode instanceof MetricsModes.Truncate truncate ? truncate.length() : 16;
+    }
+
+    private static int length(String text) {
+        return text.codePointCount(0, text.length());
     }
 
     // Estimate NDV when Puffin stats are unavailable.
     // Delegates to ConnectorNdvEstimator which implements the same three-tier strategy
     // (range → size → type-fraction) in a connector-agnostic way.
-    private double estimateNdvFallback(Integer fieldId, IcebergFileStats icebergStats) {
+    private double estimateNdvFallback(Integer fieldId, IcebergFileStats icebergStats, boolean bounds) {
         ConnectorNdvEstimator.TypeCategory category = toTypeCategory(fieldId, icebergStats);
-        Optional<Double> minVal = icebergStats.getMinValue(fieldId);
-        Optional<Double> maxVal = icebergStats.getMaxValue(fieldId);
+        Optional<Double> minVal = bounds ? icebergStats.getMinValue(fieldId) : Optional.empty();
+        Optional<Double> maxVal = bounds ? icebergStats.getMaxValue(fieldId) : Optional.empty();
         double minDouble = minVal.orElse(Double.NaN);
         double maxDouble = maxVal.orElse(Double.NaN);
 
@@ -429,7 +493,7 @@ public class IcebergStatisticProvider {
         icebergFileStats.updateStats(icebergFileStats.getMinValues(), lowerBounds, nullCounts, recordCount,
                 i -> (i > 0));
         updatePartitionedStats(icebergFileStats, partitionFields, icebergFileStats.getMinValues(), lowerBounds,
-                i -> (i > 0));
+                nullCounts, recordCount, i -> (i > 0));
     }
 
     private void updateSummaryMax(IcebergFileStats icebergFileStats,
@@ -440,7 +504,7 @@ public class IcebergStatisticProvider {
         icebergFileStats.updateStats(icebergFileStats.getMaxValues(), upperBounds, nullCounts, recordCount,
                 i -> (i < 0));
         updatePartitionedStats(icebergFileStats, partitionFields, icebergFileStats.getMaxValues(), upperBounds,
-                i -> (i < 0));
+                nullCounts, recordCount, i -> (i < 0));
     }
 
     private void updatePartitionedStats(
@@ -448,6 +512,8 @@ public class IcebergStatisticProvider {
             List<PartitionField> partitionFields,
             Map<Integer, Object> current,
             Map<Integer, Object> newStats,
+            Map<Integer, Long> nullCounts,
+            long recordCount,
             Predicate<Integer> predicate) {
         if (!icebergFileStats.hasValidColumnMetrics()) {
             return;
@@ -461,8 +527,13 @@ public class IcebergStatisticProvider {
 
             Object newValue = newStats.get(id);
             if (newValue == null) {
-                current.remove(id);
-                icebergFileStats.getCorruptedStats().add(id);
+                // A file whose values of the column are all NULL, as the file of a NULL partition, has no bounds
+                // and misses no value, as for the other columns, see IcebergFileStats.updateStats
+                Long nullCount = nullCounts == null ? null : nullCounts.get(id);
+                if (nullCount == null || nullCount != recordCount) {
+                    current.remove(id);
+                    icebergFileStats.getCorruptedStats().add(id);
+                }
                 continue;
             }
 

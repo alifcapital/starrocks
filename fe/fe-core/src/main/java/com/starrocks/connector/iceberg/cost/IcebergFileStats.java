@@ -73,10 +73,13 @@ public class IcebergFileStats {
         } else {
             this.minValues = new HashMap<>(minValues);
             this.maxValues = new HashMap<>(maxValues);
-            // we are assuming if minValues is not present, max will be not be present either.
-            this.corruptedStats = nonPartitionPrimitiveColumns.stream()
-                    .map(Types.NestedField::fieldId)
-                    .filter(id -> !minValues.containsKey(id) &&
+            // A column with values and without a bound in this file has bounds that miss values. An identity
+            // partition column is not among the columns the next files update, but the next files fill its bounds as
+            // well (see IcebergStatisticProvider.updatePartitionedStats), so this first file decides for every
+            // primitive column. A file can have a lower bound and no upper bound, when Iceberg cannot increase a cut
+            // maximum.
+            this.corruptedStats = idToTypeMapping.keySet().stream()
+                    .filter(id -> (!minValues.containsKey(id) || !maxValues.containsKey(id)) &&
                             (!nullCounts.containsKey(id) || nullCounts.get(id) != recordCount))
                     .collect(toSet());
             this.nullCounts = new HashMap<>(nullCounts);
