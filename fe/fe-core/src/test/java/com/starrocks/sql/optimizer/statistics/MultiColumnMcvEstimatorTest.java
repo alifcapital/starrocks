@@ -835,4 +835,66 @@ public class MultiColumnMcvEstimatorTest {
         // The regular combined-NDV estimation still applies.
         Assertions.assertTrue(estimateRows(predicate, statistics) > 0);
     }
+
+    private static final ColumnRefOperator CREATED_AT =
+            new ColumnRefOperator(11, VarcharType.VARCHAR, "created_at", true);
+    private static final ColumnRefOperator STATE = new ColumnRefOperator(12, VarcharType.VARCHAR, "state", true);
+    private static final double CREATED_ROWS = 397_770_593;
+
+    // ISO timestamps of created_at with string bounds, and a group (state, created_at) whose head holds 80M rows
+    private static Statistics createdAt(boolean withGroup) {
+        Statistics.Builder builder = Statistics.builder().setOutputRowCount(CREATED_ROWS)
+                .addColumnStatistic(CREATED_AT, ColumnStatistic.builder().setNullsFraction(0).setAverageRowSize(27)
+                        .setDistinctValuesCount(390_000_000).setStringBounds(new StringBounds(
+                                "2018-08-15T13:16:23.509905Z", "2026-10-07T08:58:22.946788Z", 200, false)).build())
+                .addColumnStatistic(STATE, ColumnStatistic.builder().setNullsFraction(0).setAverageRowSize(6)
+                        .setDistinctValuesCount(3).build());
+        if (withGroup) {
+            List<MultiColumnCombinedStats.McvEntry> entries = List.of(
+                    new MultiColumnCombinedStats.McvEntry(List.of("done", "2026-08-01T10:00:00.000000Z"), 50_000_000,
+                            List.of(300_000_000L, 1_000_000L)),
+                    new MultiColumnCombinedStats.McvEntry(List.of("failed", "2026-09-01T10:00:00.000000Z"),
+                            20_000_000, List.of(50_000_000L, 1_000_000L)),
+                    new MultiColumnCombinedStats.McvEntry(List.of("done", "2019-01-01T00:00:00.000000Z"), 10_000_000,
+                            List.of(300_000_000L, 1_000_000L)));
+            builder.addMultiColumnStatistics(Set.of(STATE, CREATED_AT), new MultiColumnCombinedStats(10_000,
+                    (long) CREATED_ROWS, List.of(STATE, CREATED_AT), entries, List.of(0L, 0L)));
+        }
+        return builder.build();
+    }
+
+    private static ScalarOperator createdAt(BinaryType type, LocalDateTime time) {
+        return new BinaryPredicateOperator(type, new CastOperator(DateType.DATETIME, CREATED_AT),
+                ConstantOperator.createDatetime(time));
+    }
+
+    private static double createdRows(ScalarOperator predicate, boolean withGroup) {
+        return PredicateStatisticsCalculator.statisticsCalculate(predicate, createdAt(withGroup)).getOutputRowCount();
+    }
+
+    @Test
+    public void testSidesOfOneRangeOfACastAreOneInterval() {
+        LocalDateTime from = LocalDateTime.of(2026, 8, 15, 0, 0);
+        LocalDateTime nextDay = LocalDateTime.of(2026, 8, 16, 0, 0);
+        LocalDateTime to = LocalDateTime.of(2026, 8, 18, 21, 0);
+        ScalarOperator two = Utils.compoundAnd(createdAt(BinaryType.GE, from), createdAt(BinaryType.LT, to));
+        ScalarOperator three = Utils.compoundAnd(createdAt(BinaryType.GE, from), createdAt(BinaryType.LT, to),
+                createdAt(BinaryType.GE, nextDay));
+        ScalarOperator narrower = Utils.compoundAnd(createdAt(BinaryType.GE, nextDay), createdAt(BinaryType.LT, to));
+        // No tuple of the head lies in the window, so the group leaves the estimate of the bounds as it is
+        double plain = createdRows(two, false);
+        Assertions.assertEquals(plain, createdRows(two, true), plain * 1e-9);
+        // A third side narrows the interval to the later lower side
+        double narrowed = createdRows(narrower, false);
+        Assertions.assertTrue(narrowed < plain);
+        Assertions.assertEquals(narrowed, createdRows(three, false), narrowed * 1e-9);
+        Assertions.assertEquals(narrowed, createdRows(three, true), narrowed * 1e-9);
+        // A window with a tuple of the head takes its 20M rows, and the rows the bounds give less the share that
+        // independence gives that tuple: 50M failed rows times 1M rows of that time
+        ScalarOperator september = Utils.compoundAnd(createdAt(BinaryType.GE, LocalDateTime.of(2026, 8, 25, 0, 0)),
+                createdAt(BinaryType.LT, LocalDateTime.of(2026, 9, 5, 0, 0)));
+        double bounds = createdRows(september, false);
+        double independent = 50_000_000.0 * 1_000_000 / CREATED_ROWS;
+        Assertions.assertEquals(20_000_000 + bounds - independent, createdRows(september, true), 1);
+    }
 }

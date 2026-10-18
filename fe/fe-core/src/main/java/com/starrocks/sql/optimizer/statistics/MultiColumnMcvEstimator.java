@@ -17,6 +17,7 @@ package com.starrocks.sql.optimizer.statistics;
 import com.starrocks.catalog.FunctionSet;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.sql.ast.expression.BinaryType;
+import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
@@ -280,6 +281,10 @@ public class MultiColumnMcvEstimator {
         double simpleSel = 1.0;
         double exactSel = 1.0;
         boolean hasExactSel = false;
+        // The other conjuncts of one column are estimated as one conjunction: each side of a range alone, as
+        // CAST(c AS DATETIME) >= a and CAST(c AS DATETIME) < b, keeps the whole range of the column, so the product
+        // of the sides would take the share of the range twice.
+        Map<ColumnRefOperator, List<ScalarOperator>> estimatedByColumn = new LinkedHashMap<>();
         for (ScalarOperator conjunct : conjuncts) {
             ColumnRefOperator column = evaluator.column(conjunct);
             // An expression of the column may map several values to one; only the column itself has
@@ -288,13 +293,17 @@ public class MultiColumnMcvEstimator {
                     ? shares.selectivity(conjunct, columns.indexOf(column), column.getType(),
                             statistics.getColumnStatistic(column).getNullsFraction())
                     : OptionalDouble.empty();
-            double sel = exact.isPresent() ? exact.getAsDouble()
-                    : StatisticsEstimateUtils.getPredicateSelectivity(conjunct, statistics);
-            simpleSel *= sel;
             if (exact.isPresent()) {
-                exactSel = Math.min(exactSel, sel);
+                simpleSel *= exact.getAsDouble();
+                exactSel = Math.min(exactSel, exact.getAsDouble());
                 hasExactSel = true;
+            } else {
+                estimatedByColumn.computeIfAbsent(column, ignored -> new ArrayList<>()).add(conjunct);
             }
+        }
+        for (List<ScalarOperator> estimated : estimatedByColumn.values()) {
+            simpleSel *= StatisticsEstimateUtils.getPredicateSelectivity(
+                    estimated.size() == 1 ? estimated.get(0) : Utils.compoundAnd(estimated), statistics);
         }
         double otherSel = Math.min(Math.max(0.0, 1.0 - mcvTotalSel), Math.max(0.0, simpleSel - mcvBaseSel));
         if (hasExactSel && conjuncts.size() == 1) {
