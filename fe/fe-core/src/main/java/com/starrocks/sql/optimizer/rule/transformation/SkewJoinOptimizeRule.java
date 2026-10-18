@@ -96,6 +96,12 @@ public class SkewJoinOptimizeRule extends TransformationRule {
 
     private static final String RAND_COL = "rand_col";
 
+    // We fear that a small input is salted for nothing. A few rows cannot make a hot partition, even when most of
+    // their keys are NULL or equal, and the salt forbids the commutation of the join, so the hash table is built
+    // over the large side. So the rule does not salt on statistics an input with fewer rows than this. A hint of the
+    // user is not checked against it.
+    private static final long MIN_INPUT_ROWS_TO_SALT = 10_000;
+
     public SkewJoinOptimizeRule() {
         super(RuleType.TF_SKEW_JOIN_OPTIMIZE_RULE,
                 Pattern.create(OperatorType.LOGICAL_JOIN, OperatorType.PATTERN_LEAF, OperatorType.PATTERN_LEAF));
@@ -151,6 +157,12 @@ public class SkewJoinOptimizeRule extends TransformationRule {
                 .map(colStats -> DataSkew.getColumnSkewInfo(leftChildStats, colStats, skewThresholds));
     }
 
+    // An input without a trusted estimate of its rows is not counted as small: we do not know that it is.
+    private static boolean hasTooFewRowsToSalt(Statistics inputStatistics) {
+        return !inputStatistics.isTableRowCountMayInaccurate()
+                && inputStatistics.getOutputRowCount() < MIN_INPUT_ROWS_TO_SALT;
+    }
+
     @Override
     public boolean check(OptExpression input, OptimizerContext context) {
         LogicalJoinOperator joinOperator = (LogicalJoinOperator) input.getOp();
@@ -180,7 +192,7 @@ public class SkewJoinOptimizeRule extends TransformationRule {
             return false;
         }
         Statistics leftChildStats = input.inputAt(0).getStatistics();
-        if (leftChildStats == null) {
+        if (leftChildStats == null || hasTooFewRowsToSalt(leftChildStats)) {
             return false;
         }
         final var mcvLimit = context.getSessionVariable().getSkewJoinOptimizeUseMCVCount();

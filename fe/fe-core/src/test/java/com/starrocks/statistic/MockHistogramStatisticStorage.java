@@ -298,7 +298,7 @@ public class MockHistogramStatisticStorage implements StatisticStorage {
         tableSubfield.put("col_struct.c0", new ColumnStatistic(1, 100, 0, 8, 100));
         tableSubfield.put("col_struct.c1.c11", new ColumnStatistic(1, 1000, 0, 8, 200));
         tableStatistics.put("subfield", tableSubfield);
-        tableRowCount.put("subfield", 500);
+        tableRowCount.put("subfield", 20_000);
     }
 
     private void mockSubfieldHistogramStatistics() {
@@ -306,12 +306,12 @@ public class MockHistogramStatisticStorage implements StatisticStorage {
                 new Bucket(1, 10, 10L, 3L),
                 new Bucket(11, 20, 10L, 3L),
                 new Bucket(21, 30, 10L, 3L)
-        ), ImmutableMap.of("2", 15L, "22", 14L, "32", 12L)));
+        ), ImmutableMap.of("2", 600L, "22", 560L, "32", 480L)));
         histogramStatistics.put("col_struct.c1.c11", new Histogram(Lists.newArrayList(
                 new Bucket(1, 100, 10L, 3L),
                 new Bucket(101, 200, 10L, 3L),
                 new Bucket(201, 300, 10L, 3L)
-        ), ImmutableMap.of("200", 15L, "220", 14L, "320", 12L)));
+        ), ImmutableMap.of("200", 600L, "220", 560L, "320", 480L)));
     }
 
     public void addHistogramStatistis(String fileName, Type type, int scala) {

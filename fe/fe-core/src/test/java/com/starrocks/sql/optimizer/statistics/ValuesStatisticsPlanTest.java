@@ -24,6 +24,7 @@ import com.starrocks.sql.StatementPlanner;
 import com.starrocks.sql.ast.StatementBase;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.dump.QueryDumpInfo;
+import com.starrocks.sql.optimizer.operator.physical.PhysicalHashJoinOperator;
 import com.starrocks.sql.optimizer.operator.physical.PhysicalValuesOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.parser.SqlParser;
@@ -75,16 +76,23 @@ public class ValuesStatisticsPlanTest extends PlanTestBase {
         starRocksAssert.withTable("CREATE TABLE values_pk (k bigint NOT NULL, v varchar(20), "
                 + "u varchar(36) DEFAULT (uuid())) PRIMARY KEY(k) DISTRIBUTED BY HASH(k) BUCKETS 1 "
                 + "PROPERTIES('replication_num'='1')");
+        starRocksAssert.withTable("CREATE TABLE values_skew (k varchar(20), v bigint) "
+                + "DUPLICATE KEY(k) DISTRIBUTED BY HASH(k) BUCKETS 1 PROPERTIES('replication_num'='1')");
         OlapTable table = (OlapTable) starRocksAssert.getTable("test", "values_fact");
         setTableStatistics(table, ROWS);
         table.getAllPartitions().forEach(p -> UtFrameUtils.setPartitionVersion(p, 2));
+        OlapTable skewed = (OlapTable) starRocksAssert.getTable("test", "values_skew");
+        setTableStatistics(skewed, ROWS);
+        skewed.getAllPartitions().forEach(p -> UtFrameUtils.setPartitionVersion(p, 2));
         GlobalStateMgr state = connectContext.getGlobalStateMgr();
         old = state.getStatisticStorage();
         state.setStatisticStorage(new StatisticStorage() {
             @Override
             public ColumnStatistic getColumnStatistic(Table ignored, String column) {
                 if (column.equalsIgnoreCase("k")) {
-                    return new ColumnStatistic(Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY, 0, 6, 1000);
+                    // Half of the keys of values_skew are NULL.
+                    double nulls = ignored.getName().equalsIgnoreCase("values_skew") ? 0.5 : 0;
+                    return new ColumnStatistic(Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY, nulls, 6, 1000);
                 }
                 return new ColumnStatistic(1, ROWS, 0, 8, ROWS);
             }
@@ -107,6 +115,7 @@ public class ValuesStatisticsPlanTest extends PlanTestBase {
         starRocksAssert.dropTable("values_wide");
         starRocksAssert.dropTable("values_sink");
         starRocksAssert.dropTable("values_pk");
+        starRocksAssert.dropTable("values_skew");
     }
 
     // The first operator of the physical plan that has the given class, in the order of the plan.
@@ -332,12 +341,33 @@ public class ValuesStatisticsPlanTest extends PlanTestBase {
     // We fear that the NULL share of the keys of a reference, which is now known, makes SkewJoinOptimizeRule salt
     // the join: it takes a NULL share of 0.2 as a skew.
     private void assertNoSalting(String sql) throws Exception {
+        assertSalting(sql, false);
+    }
+
+    private void assertSalting(String sql, boolean salted) throws Exception {
         boolean enabled = connectContext.getSessionVariable().isEnableStatsToOptimizeSkewJoin();
         connectContext.getSessionVariable().setEnableStatsToOptimizeSkewJoin(true);
         try {
             String plan = getCostExplain(sql);
             Assertions.assertTrue(plan.contains("JOIN"), plan);
-            Assertions.assertFalse(plan.contains("rand_col"), plan);
+            Assertions.assertEquals(salted, plan.contains("rand_col"), plan);
+        } finally {
+            connectContext.getSessionVariable().setEnableStatsToOptimizeSkewJoin(enabled);
+        }
+    }
+
+    // We expect a join of a list of a few rows to build its hash table over the list, because the list is the small
+    // side. Salting would forbid that order, so we check the order together with the absence of the salt.
+    private void assertListBuildsTheHashTable(String sql) throws Exception {
+        assertNoSalting(sql);
+        boolean enabled = connectContext.getSessionVariable().isEnableStatsToOptimizeSkewJoin();
+        connectContext.getSessionVariable().setEnableStatsToOptimizeSkewJoin(true);
+        try {
+            ExecPlan plan = getExecPlan(sql);
+            OptExpression join = find(plan.getPhysicalPlan(), PhysicalHashJoinOperator.class);
+            Assertions.assertNotNull(join, plan.getExplainString(TExplainLevel.COSTS));
+            Assertions.assertNotNull(find(join.inputAt(1), PhysicalValuesOperator.class),
+                    plan.getExplainString(TExplainLevel.COSTS));
         } finally {
             connectContext.getSessionVariable().setEnableStatsToOptimizeSkewJoin(enabled);
         }
@@ -348,6 +378,47 @@ public class ValuesStatisticsPlanTest extends PlanTestBase {
         // 1 of 6 keys is NULL, below the share of a skew.
         assertNoSalting("select count(*) from (values ('Sino', 101), (null, 102), ('Bank', 103), ('Apex', 104), "
                 + "('Zeta', 105), ('Moon', 106)) r(name, id) left join values_fact f on r.name = f.k");
+    }
+
+    // We fear that a list of a few rows left of a LEFT JOIN is salted because half of its keys are NULL: so few rows
+    // cannot make a hot partition, and the salt makes the join build its hash table over the large side.
+    @Test
+    public void testSmallListWithManyNullKeysLeftOfLeftJoinIsNotSalted() throws Exception {
+        assertListBuildsTheHashTable("select count(*) from (values ('a', 1), (null, 2), (null, 3), ('b', 4)) "
+                + "r(name, id) left join values_fact f on r.name = f.k");
+        // The same reference written as a UNION ALL of constants.
+        assertListBuildsTheHashTable("select count(*) from (select 'a' name, 1 id union all select null, 2 "
+                + "union all select null, 3 union all select 'b', 4) r left join values_fact f on r.name = f.k");
+    }
+
+    // The salt stays where it helps: half of the keys of a large left input are NULL, and the rows of the NULL key go
+    // to one partition. The rule salts an input of 10 000 rows and does not salt one of 9 999.
+    @Test
+    public void testLargeLeftInputWithManyNullKeysIsSalted() throws Exception {
+        String sql = "select count(*) from values_skew s left join values_fact f on s.k = f.k";
+        OlapTable table = (OlapTable) starRocksAssert.getTable("test", "values_skew");
+        try {
+            assertSalting(sql, true);
+            setTableStatistics(table, 10_000);
+            assertSalting(sql, true);
+            setTableStatistics(table, 9_999);
+            assertSalting(sql, false);
+        } finally {
+            setTableStatistics(table, ROWS);
+        }
+    }
+
+    // The user names the skew with a hint, so we do not second-guess it by the number of rows.
+    @Test
+    public void testHintSaltsASmallInput() throws Exception {
+        String sql = "select count(*) from values_skew s left join [skew|s.k('a')] values_fact f on s.k = f.k";
+        OlapTable table = (OlapTable) starRocksAssert.getTable("test", "values_skew");
+        setTableStatistics(table, 100);
+        try {
+            assertSalting(sql, true);
+        } finally {
+            setTableStatistics(table, ROWS);
+        }
     }
 
     @Test

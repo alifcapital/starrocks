@@ -268,7 +268,7 @@ public class SkewJoinTest extends PlanTestBase {
                 "on subfield.col_struct.c1.c11 = t3.c1";
         double threshold = connectContext.getSessionVariable().getSkewJoinDataSkewThreshold();
         try {
-            // The fixture has 500 rows, with 41 rows in its three hot values. The row count now comes
+            // The fixture has 20 000 rows, with 1640 rows in its three hot values. The row count now comes
             // through the scoped cache; use a threshold that actually admits this distribution.
             connectContext.getSessionVariable().setSkewJoinDataSkewThreshold(0.05);
             String sqlPlan = getFragmentPlan(sql);
@@ -382,7 +382,7 @@ public class SkewJoinTest extends PlanTestBase {
                             .build();
                 }
             };
-            setTableStatistics(getOlapTable("t0"), 1337);
+            setTableStatistics(getOlapTable("t0"), 13_370);
             connectContext.getGlobalStateMgr().setStatisticStorage(emptyStatisticsStorage);
             connectContext.getSessionVariable().setSkewJoinDataSkewThreshold(0.1);
             connectContext.getSessionVariable().setEnableStatsToOptimizeSkewJoin(true);
@@ -423,7 +423,7 @@ public class SkewJoinTest extends PlanTestBase {
                     if (table.getName().equalsIgnoreCase("t0") && column.equalsIgnoreCase("v1")) {
                         return ColumnStatistic.builder() //
                                 .setNullsFraction(0.3) // NULL skew
-                                .setHistogram(new Histogram(List.of(), Map.of("11", 400L, "22", 200L))) // MCV skew
+                                .setHistogram(new Histogram(List.of(), Map.of("11", 4000L, "22", 2000L))) // MCV skew
                                 .build();
                     }
 
@@ -432,8 +432,8 @@ public class SkewJoinTest extends PlanTestBase {
                             .build();
                 }
             };
-            setTableStatistics(getOlapTable("t0"), 1337);
-            setTableStatistics(getOlapTable("t1"), 1337);
+            setTableStatistics(getOlapTable("t0"), 13_370);
+            setTableStatistics(getOlapTable("t1"), 13_370);
             connectContext.getGlobalStateMgr().setStatisticStorage(emptyStatisticsStorage);
             connectContext.getSessionVariable().setSkewJoinDataSkewThreshold(0.1);
             connectContext.getSessionVariable().setEnableStatsToOptimizeSkewJoin(true);
@@ -451,7 +451,7 @@ public class SkewJoinTest extends PlanTestBase {
             assertCContains(plan, "IS NULL THEN");
 
             // In this case, the MCV should be selected since:
-            //  - 0.3 null fractions * 1337 rows < 400 rows (11) + 200 rows (22)
+            //  - 0.3 null fractions * 13370 rows < 4000 rows (11) + 2000 rows (22)
             assertCContains(plan, """
                       5:Project
                       |  <slot 9> : [11,22]
@@ -592,7 +592,7 @@ public class SkewJoinTest extends PlanTestBase {
                             .build();
                 }
             };
-            setTableStatistics(getOlapTable("t0"), 1337);
+            setTableStatistics(getOlapTable("t0"), 13_370);
             connectContext.getGlobalStateMgr().setStatisticStorage(statisticsStorage);
             connectContext.getSessionVariable().setSkewJoinDataSkewThreshold(0.1);
             connectContext.getSessionVariable().setEnableStatsToOptimizeSkewJoin(true);
