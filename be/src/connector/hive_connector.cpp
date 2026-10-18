@@ -625,6 +625,12 @@ void HiveDataSource::_init_counter(RuntimeState* state) {
                 ADD_CHILD_COUNTER(_runtime_profile, "SharedIOCount", TUnit::UNIT, prefix);
         _scanner_ctx.profile.shared_buffered_shared_io_timer =
                 ADD_CHILD_TIMER(_runtime_profile, "SharedIOTime", prefix);
+        _scanner_ctx.profile.shared_buffered_large_io_bytes =
+                ADD_CHILD_COUNTER(_runtime_profile, "SharedLargeIOBytes", TUnit::BYTES, prefix);
+        _scanner_ctx.profile.shared_buffered_large_io_count =
+                ADD_CHILD_COUNTER(_runtime_profile, "SharedLargeIOCount", TUnit::UNIT, prefix);
+        _scanner_ctx.profile.shared_buffered_large_used_bytes =
+                ADD_CHILD_COUNTER(_runtime_profile, "SharedLargeUsedBytes", TUnit::BYTES, prefix);
         _scanner_ctx.profile.shared_buffered_direct_io_bytes =
                 ADD_CHILD_COUNTER(_runtime_profile, "DirectIOBytes", TUnit::BYTES, prefix);
         _scanner_ctx.profile.shared_buffered_direct_io_count =

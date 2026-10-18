@@ -22,6 +22,7 @@
 #include <utility>
 #include <vector>
 
+#include "common/config.h"
 #include "io_test_base.h"
 #include "testutil/assert.h"
 #include "testutil/parallel_test.h"
@@ -303,6 +304,18 @@ TEST_F(SharedBufferedInputStreamTest, test_split_shared_buffer_rejects_bad_argum
     ASSERT_TRUE(c.stream->split_shared_buffer(sb, SplitCase::two_ranges()).is_invalid_argument());
 }
 
+// Sets io_coalesce_split_large_range for the scope of a test and restores it at the end.
+class SplitLargeRangeGuard {
+public:
+    explicit SplitLargeRangeGuard(bool value) : _old(config::io_coalesce_split_large_range) {
+        config::io_coalesce_split_large_range = value;
+    }
+    ~SplitLargeRangeGuard() { config::io_coalesce_split_large_range = _old; }
+
+private:
+    bool _old;
+};
+
 PARALLEL_TEST(SharedBufferedInputStreamTest, test_release) {
     size_t len = 1 * 1024 * 1024; // 1MB
     const std::string rand_string = random_string(len);
@@ -328,6 +341,8 @@ PARALLEL_TEST(SharedBufferedInputStreamTest, test_release) {
 }
 
 TEST_F(SharedBufferedInputStreamTest, test_orc) {
+    // the test expects one shared buffer for the large io range.
+    SplitLargeRangeGuard guard(false);
     size_t len = 100 * 1024 * 1024; // 1MB
     const std::string rand_string = random_string(len);
     auto in = std::make_shared<TestInputStream>(rand_string, len);
@@ -456,6 +471,407 @@ TEST_F(SharedBufferedInputStreamTest, test_orc) {
             "SharedBuffer raw_offset=22420223, raw_size=197, offset=22282240, size=262144, ref_count=2, "
             "buffer_capacity=0",
             sb.value()->debug_string());
+}
+
+// We want to see how many bytes we load for the buffers of ranges larger than max_buffer_size and how many
+// of them the readers ask for, so the large counters must change only for reads served from such a buffer.
+TEST_F(SharedBufferedInputStreamTest, test_large_buffer_counters) {
+    // this test checks the counters of a large range that is one buffer, the pieces are tested below.
+    SplitLargeRangeGuard guard(false);
+    constexpr int64_t MB = 1024 * 1024;
+    constexpr int64_t align_size = 256 * 1024;
+    const int64_t len = 32 * MB;
+    const std::string data = random_string(len);
+    auto in = std::make_shared<TestInputStream>(data, len);
+    auto sb_stream = std::make_shared<io::SharedBufferedInputStream>(in, "test", len);
+    sb_stream->set_align_size(align_size);
+    io::SharedBufferedInputStream::CoalesceOptions options;
+    options.max_dist_size = 1 * MB;
+    options.max_buffer_size = 4 * MB;
+    sb_stream->set_coalesce_options(options);
+
+    // a 10 MB range is larger than max_buffer_size, the two small ranges are far from each other and from it.
+    const int64_t large_offset = 8 * MB + 100;
+    const int64_t large_size = 10 * MB;
+    std::vector<io::SharedBufferedInputStream::IORange> ranges;
+    ranges.emplace_back(1000, 5000);
+    ranges.emplace_back(large_offset, large_size);
+    ranges.emplace_back(30 * MB, 2000);
+    ASSERT_OK(sb_stream->set_io_ranges(ranges));
+
+    ASSERT_EQ(0, sb_stream->large_io_count());
+    ASSERT_EQ(0, sb_stream->large_io_bytes());
+    ASSERT_EQ(0, sb_stream->large_used_bytes());
+
+    auto large_sb = sb_stream->find_shared_buffer(large_offset, large_size);
+    ASSERT_OK(large_sb.status());
+    ASSERT_TRUE(large_sb.value()->large);
+    // the range is aligned to [8 MB, 18 MB + 256 KB)
+    const int64_t large_aligned_size = 10 * MB + align_size;
+    ASSERT_EQ(8 * MB, large_sb.value()->offset);
+    ASSERT_EQ(large_aligned_size, large_sb.value()->size);
+    auto small_sb = sb_stream->find_shared_buffer(1000, 5000);
+    ASSERT_OK(small_sb.status());
+    ASSERT_FALSE(small_sb.value()->large);
+
+    // read a few bytes of the large range: we load the whole buffer and use only the bytes we ask for.
+    const uint8_t* buf = nullptr;
+    ASSERT_OK(sb_stream->get_bytes(&buf, 12 * MB + 7, 100, nullptr));
+    ASSERT_EQ(0, memcmp(buf, data.data() + 12 * MB + 7, 100));
+    ASSERT_EQ(large_aligned_size, sb_stream->large_io_bytes());
+    ASSERT_EQ(1, sb_stream->large_io_count());
+    ASSERT_EQ(100, sb_stream->large_used_bytes());
+    ASSERT_EQ(large_aligned_size, sb_stream->shared_io_bytes());
+
+    // reads of small buffers do not change the large counters.
+    std::string out(200, '\0');
+    ASSERT_OK(sb_stream->read_at_fully(1500, out.data(), 200));
+    ASSERT_EQ(0, memcmp(out.data(), data.data() + 1500, 200));
+    ASSERT_OK(sb_stream->get_bytes(&buf, 30 * MB + 10, 50, nullptr));
+    ASSERT_EQ(3, sb_stream->shared_io_count());
+    ASSERT_EQ(large_aligned_size, sb_stream->large_io_bytes());
+    ASSERT_EQ(1, sb_stream->large_io_count());
+    ASSERT_EQ(100, sb_stream->large_used_bytes());
+
+    // the buffer is loaded already, a second read from it only adds to the used bytes.
+    ASSERT_OK(sb_stream->read_at_fully(15 * MB, out.data(), 200));
+    ASSERT_EQ(0, memcmp(out.data(), data.data() + 15 * MB, 200));
+    ASSERT_EQ(large_aligned_size, sb_stream->large_io_bytes());
+    ASSERT_EQ(1, sb_stream->large_io_count());
+    ASSERT_EQ(300, sb_stream->large_used_bytes());
+
+    // peek reads from the loaded buffer, with and without get_bytes.
+    ASSERT_OK(sb_stream->seek(16 * MB));
+    ASSERT_OK(sb_stream->peek(30).status());
+    ASSERT_EQ(330, sb_stream->large_used_bytes());
+    ASSERT_OK(sb_stream->peek_shared_buffer(20, nullptr).status());
+    ASSERT_EQ(350, sb_stream->large_used_bytes());
+    ASSERT_EQ(large_aligned_size, sb_stream->large_io_bytes());
+    ASSERT_EQ(1, sb_stream->large_io_count());
+}
+
+// The buffers that split_shared_buffer makes from a large buffer load a part of it, so their bytes must be counted
+// as the bytes of a large buffer.
+TEST_F(SharedBufferedInputStreamTest, test_split_shared_buffer_keeps_large) {
+    // this test splits the buffer of a large range that is one buffer, the pieces are tested below.
+    SplitLargeRangeGuard guard(false);
+    constexpr int64_t KB = SplitCase::KB;
+    SplitCase c;
+    io::SharedBufferedInputStream::CoalesceOptions options;
+    options.max_buffer_size = 512 * KB;
+    c.stream->set_coalesce_options(options);
+
+    // the range of 800 KB is larger than max_buffer_size.
+    auto sb = c.register_buffer();
+    ASSERT_TRUE(sb->large);
+    ASSERT_OK(c.stream->split_shared_buffer(sb, SplitCase::two_ranges()));
+    auto first = c.stream->find_shared_buffer(50 * KB, 10 * KB);
+    ASSERT_OK(first.status());
+    ASSERT_TRUE(first.value()->large);
+    auto second = c.stream->find_shared_buffer(600 * KB, 10 * KB);
+    ASSERT_OK(second.status());
+    ASSERT_TRUE(second.value()->large);
+
+    ASSERT_NO_FATAL_FAILURE(c.read_and_check(600 * KB, 100 * KB));
+    ASSERT_EQ(1, c.stream->large_io_count());
+    ASSERT_EQ(256 * KB, c.stream->large_io_bytes());
+    ASSERT_EQ(100 * KB, c.stream->large_used_bytes());
+    ASSERT_NO_FATAL_FAILURE(c.read_and_check(50 * KB, 10 * KB));
+    ASSERT_EQ(2, c.stream->large_io_count());
+    ASSERT_EQ(512 * KB, c.stream->large_io_bytes());
+    ASSERT_EQ(110 * KB, c.stream->large_used_bytes());
+    ASSERT_EQ(c.stream->shared_io_bytes(), c.stream->large_io_bytes());
+}
+
+constexpr int64_t kMB = 1024 * 1024;
+
+// A stream over random data with align size 256 KB and max_buffer_size 4 MB.
+class SplitTestStream {
+public:
+    explicit SplitTestStream(int64_t len) : data(random_string(len)) {
+        auto in = std::make_shared<TestInputStream>(data, len);
+        sb_stream = std::make_shared<io::SharedBufferedInputStream>(in, "test", len);
+        sb_stream->set_align_size(256 * 1024);
+        io::SharedBufferedInputStream::CoalesceOptions options;
+        options.max_dist_size = 1 * kMB;
+        options.max_buffer_size = 4 * kMB;
+        sb_stream->set_coalesce_options(options);
+    }
+
+    void read_and_check(int64_t offset, int64_t count) {
+        std::string out(count, '\0');
+        ASSERT_OK(sb_stream->read_at_fully(offset, out.data(), count));
+        ASSERT_EQ(0, memcmp(out.data(), data.data() + offset, count));
+    }
+
+    std::string data;
+    std::shared_ptr<io::SharedBufferedInputStream> sb_stream;
+};
+
+// We want a reader that touches only a few pages of a large range to load only the pieces it touches.
+TEST_F(SharedBufferedInputStreamTest, test_split_large_range) {
+    SplitLargeRangeGuard guard(true);
+    SplitTestStream s(48 * kMB);
+    auto& sb_stream = s.sb_stream;
+
+    // a 20 MB range is cut into five pieces of 4 MB, each small range stays one buffer.
+    std::vector<io::SharedBufferedInputStream::IORange> ranges;
+    ranges.emplace_back(1000, 5000);
+    ranges.emplace_back(4 * kMB, 20 * kMB);
+    ranges.emplace_back(40 * kMB, 2000);
+    ASSERT_OK(sb_stream->set_io_ranges(ranges));
+    ASSERT_EQ(7, sb_stream->current_range_ref_sum());
+
+    for (int i = 0; i < 5; i++) {
+        auto piece = sb_stream->find_shared_buffer(4 * kMB + i * 4 * kMB, 4 * kMB);
+        ASSERT_OK(piece.status());
+        ASSERT_TRUE(piece.value()->large);
+        ASSERT_EQ(4 * kMB + i * 4 * kMB, piece.value()->raw_offset);
+        ASSERT_EQ(4 * kMB, piece.value()->raw_size);
+        ASSERT_EQ(4 * kMB + i * 4 * kMB, piece.value()->offset);
+        ASSERT_EQ(4 * kMB, piece.value()->size);
+        ASSERT_EQ(i < 4, piece.value()->has_next_piece);
+    }
+    auto small_1 = sb_stream->find_shared_buffer(1000, 5000);
+    ASSERT_OK(small_1.status());
+    ASSERT_FALSE(small_1.value()->large);
+    ASSERT_FALSE(small_1.value()->has_next_piece);
+    ASSERT_EQ(5000, small_1.value()->raw_size);
+    auto small_2 = sb_stream->find_shared_buffer(40 * kMB, 2000);
+    ASSERT_OK(small_2.status());
+    ASSERT_FALSE(small_2.value()->large);
+    ASSERT_FALSE(small_2.value()->has_next_piece);
+    ASSERT_EQ(2000, small_2.value()->raw_size);
+
+    // no buffer covers the whole range, but the consecutive pieces do. A range that leaves the io range is
+    // not covered.
+    ASSERT_FALSE(sb_stream->find_shared_buffer(4 * kMB, 20 * kMB).ok());
+    std::vector<io::SharedBufferedInputStream::SharedBufferPtr> pieces;
+    ASSERT_OK(sb_stream->find_shared_pieces(4 * kMB, 20 * kMB, &pieces));
+    ASSERT_EQ(5, pieces.size());
+    ASSERT_OK(sb_stream->find_shared_pieces(5 * kMB, 13 * kMB, nullptr));
+    ASSERT_FALSE(sb_stream->find_shared_pieces(2 * kMB, 4 * kMB, nullptr).ok());
+    ASSERT_FALSE(sb_stream->find_shared_pieces(20 * kMB, 6 * kMB, nullptr).ok());
+
+    // a page in the middle of the range loads only the piece [12 MB, 16 MB).
+    s.read_and_check(13 * kMB + 5, kMB);
+    ASSERT_EQ(4 * kMB, sb_stream->large_io_bytes());
+    ASSERT_EQ(1, sb_stream->large_io_count());
+    ASSERT_EQ(kMB, sb_stream->large_used_bytes());
+    ASSERT_EQ(4 * kMB, sb_stream->shared_io_bytes());
+    ASSERT_EQ(0, sb_stream->direct_io_count());
+
+    // a page that crosses the border at 16 MB loads the next piece and returns the right bytes.
+    s.read_and_check(16 * kMB - 512 * 1024, kMB);
+    ASSERT_EQ(8 * kMB, sb_stream->large_io_bytes());
+    ASSERT_EQ(2, sb_stream->large_io_count());
+    ASSERT_EQ(2 * kMB, sb_stream->large_used_bytes());
+    ASSERT_EQ(0, sb_stream->direct_io_count());
+
+    // peek cannot return a range that crosses a border, inside a loaded piece it works.
+    ASSERT_OK(sb_stream->seek(16 * kMB - 100));
+    ASSERT_FALSE(sb_stream->peek(200).ok());
+    ASSERT_OK(sb_stream->seek(14 * kMB));
+    auto peeked = sb_stream->peek(100);
+    ASSERT_OK(peeked.status());
+    ASSERT_EQ(0, memcmp(peeked.value().data(), s.data.data() + 14 * kMB, 100));
+    ASSERT_EQ(2 * kMB + 100, sb_stream->large_used_bytes());
+
+    // a piece is released when the reader is behind its end, the other pieces stay.
+    sb_stream->release_to_offset(14 * kMB);
+    ASSERT_FALSE(sb_stream->find_shared_buffer(5 * kMB, 100).ok());
+    ASSERT_FALSE(sb_stream->find_shared_buffer(9 * kMB, 100).ok());
+    ASSERT_OK(sb_stream->find_shared_buffer(13 * kMB, 100).status());
+    ASSERT_EQ(4, sb_stream->current_range_ref_sum());
+}
+
+// We expect every byte of a range to be loaded once when the readers go over the whole range, whatever the
+// size of a read is.
+TEST_F(SharedBufferedInputStreamTest, test_split_large_range_sequential) {
+    SplitLargeRangeGuard guard(true);
+    SplitTestStream s(48 * kMB);
+    std::vector<io::SharedBufferedInputStream::IORange> ranges;
+    ranges.emplace_back(4 * kMB, 20 * kMB);
+    ASSERT_OK(s.sb_stream->set_io_ranges(ranges));
+
+    const int64_t step = kMB + 12345;
+    for (int64_t offset = 4 * kMB; offset < 24 * kMB; offset += step) {
+        s.read_and_check(offset, std::min(step, 24 * kMB - offset));
+    }
+    ASSERT_EQ(5, s.sb_stream->large_io_count());
+    ASSERT_EQ(20 * kMB, s.sb_stream->large_io_bytes());
+    ASSERT_EQ(20 * kMB, s.sb_stream->large_used_bytes());
+    ASSERT_EQ(20 * kMB, s.sb_stream->shared_io_bytes());
+    ASSERT_EQ(0, s.sb_stream->shared_align_io_bytes());
+    ASSERT_EQ(0, s.sb_stream->direct_io_count());
+}
+
+// We cut at multiples of the align size, so the aligned pieces do not overlap and the sum of their sizes is
+// the size of the aligned range, also at the end of the file.
+TEST_F(SharedBufferedInputStreamTest, test_split_large_range_unaligned) {
+    SplitLargeRangeGuard guard(true);
+    const int64_t len = 14 * kMB + 150;
+    SplitTestStream s(len);
+    std::vector<io::SharedBufferedInputStream::IORange> ranges;
+    ranges.emplace_back(4 * kMB + 100, 10 * kMB);
+    ASSERT_OK(s.sb_stream->set_io_ranges(ranges));
+    ASSERT_EQ(3, s.sb_stream->current_range_ref_sum());
+
+    auto piece_1 = s.sb_stream->find_shared_buffer(4 * kMB + 100, 100);
+    ASSERT_OK(piece_1.status());
+    ASSERT_EQ(4 * kMB + 100, piece_1.value()->raw_offset);
+    ASSERT_EQ(4 * kMB - 100, piece_1.value()->raw_size);
+    ASSERT_EQ(4 * kMB, piece_1.value()->offset);
+    ASSERT_EQ(4 * kMB, piece_1.value()->size);
+    auto piece_2 = s.sb_stream->find_shared_buffer(9 * kMB, 100);
+    ASSERT_OK(piece_2.status());
+    ASSERT_EQ(8 * kMB, piece_2.value()->raw_offset);
+    ASSERT_EQ(4 * kMB, piece_2.value()->raw_size);
+    ASSERT_EQ(8 * kMB, piece_2.value()->offset);
+    ASSERT_EQ(4 * kMB, piece_2.value()->size);
+    auto piece_3 = s.sb_stream->find_shared_buffer(14 * kMB, 100);
+    ASSERT_OK(piece_3.status());
+    ASSERT_EQ(12 * kMB, piece_3.value()->raw_offset);
+    ASSERT_EQ(2 * kMB + 100, piece_3.value()->raw_size);
+    ASSERT_EQ(12 * kMB, piece_3.value()->offset);
+    ASSERT_EQ(2 * kMB + 150, piece_3.value()->size);
+    ASSERT_FALSE(piece_3.value()->has_next_piece);
+
+    for (int64_t offset = 4 * kMB + 100; offset < 14 * kMB + 100; offset += kMB) {
+        s.read_and_check(offset, kMB);
+    }
+    ASSERT_EQ(3, s.sb_stream->large_io_count());
+    ASSERT_EQ(10 * kMB + 150, s.sb_stream->large_io_bytes());
+    ASSERT_EQ(10 * kMB, s.sb_stream->large_used_bytes());
+    ASSERT_EQ(150, s.sb_stream->shared_align_io_bytes());
+    ASSERT_EQ(0, s.sb_stream->direct_io_count());
+}
+
+// With the config off a large range is one buffer.
+TEST_F(SharedBufferedInputStreamTest, test_split_large_range_disabled) {
+    SplitLargeRangeGuard guard(false);
+    SplitTestStream s(48 * kMB);
+    std::vector<io::SharedBufferedInputStream::IORange> ranges;
+    ranges.emplace_back(4 * kMB, 20 * kMB);
+    ASSERT_OK(s.sb_stream->set_io_ranges(ranges));
+    ASSERT_EQ(1, s.sb_stream->current_range_ref_sum());
+
+    auto sb = s.sb_stream->find_shared_buffer(4 * kMB, 20 * kMB);
+    ASSERT_OK(sb.status());
+    ASSERT_TRUE(sb.value()->large);
+    ASSERT_FALSE(sb.value()->has_next_piece);
+
+    s.read_and_check(13 * kMB + 5, 100);
+    ASSERT_EQ(20 * kMB, s.sb_stream->large_io_bytes());
+    ASSERT_EQ(1, s.sb_stream->large_io_count());
+    ASSERT_EQ(100, s.sb_stream->large_used_bytes());
+}
+
+// A read that crosses the border of two different io ranges is not served from the buffers, also when both
+// ranges are cut into pieces.
+TEST_F(SharedBufferedInputStreamTest, test_split_large_range_adjacent_ranges) {
+    SplitLargeRangeGuard guard(true);
+    SplitTestStream s(48 * kMB);
+    std::vector<io::SharedBufferedInputStream::IORange> ranges;
+    ranges.emplace_back(4 * kMB, 8 * kMB);
+    ranges.emplace_back(12 * kMB, 8 * kMB);
+    ASSERT_OK(s.sb_stream->set_io_ranges(ranges));
+    ASSERT_EQ(4, s.sb_stream->current_range_ref_sum());
+
+    s.read_and_check(12 * kMB - 100, 200);
+    ASSERT_EQ(1, s.sb_stream->direct_io_count());
+    ASSERT_EQ(200, s.sb_stream->direct_io_bytes());
+    ASSERT_EQ(0, s.sb_stream->large_io_count());
+    ASSERT_EQ(0, s.sb_stream->shared_io_count());
+}
+
+// The active and lazy columns path cuts a large range into pieces too.
+TEST_F(SharedBufferedInputStreamTest, test_split_large_range_active_and_lazy) {
+    SplitLargeRangeGuard guard(true);
+    SplitTestStream s(48 * kMB);
+    std::vector<io::SharedBufferedInputStream::IORange> ranges;
+    ranges.emplace_back(1000, 5000, false);
+    ranges.emplace_back(4 * kMB, 20 * kMB, true);
+    ranges.emplace_back(40 * kMB, 2000, true);
+    ASSERT_OK(s.sb_stream->set_io_ranges(ranges, false));
+    ASSERT_EQ(7, s.sb_stream->current_range_ref_sum());
+
+    auto lazy = s.sb_stream->find_shared_buffer(1000, 5000);
+    ASSERT_OK(lazy.status());
+    ASSERT_FALSE(lazy.value()->large);
+    ASSERT_OK(s.sb_stream->find_shared_pieces(4 * kMB, 20 * kMB, nullptr));
+
+    s.read_and_check(13 * kMB + 5, kMB);
+    ASSERT_EQ(4 * kMB, s.sb_stream->large_io_bytes());
+    ASSERT_EQ(1, s.sb_stream->large_io_count());
+}
+
+// split_shared_buffer cuts a piece further when the data cache holds a part of it. The new buffers keep the large
+// flag, and a read crosses from one buffer to the next only where no hole is between them, because the bytes of
+// the hole are read from the cache.
+TEST_F(SharedBufferedInputStreamTest, test_split_shared_buffer_of_a_piece) {
+    SplitLargeRangeGuard guard(true);
+    SplitTestStream s(48 * kMB);
+    auto& sb_stream = s.sb_stream;
+    std::vector<io::SharedBufferedInputStream::IORange> ranges;
+    ranges.emplace_back(4 * kMB, 20 * kMB);
+    ASSERT_OK(sb_stream->set_io_ranges(ranges));
+
+    // cut the bytes [12.5 MB, 13 MB) out of the piece [12 MB, 16 MB).
+    auto piece = sb_stream->find_shared_buffer(13 * kMB, 100);
+    ASSERT_OK(piece.status());
+    ASSERT_TRUE(piece.value()->has_next_piece);
+    std::vector<io::SharedBufferedInputStream::IORange> keep;
+    keep.emplace_back(12 * kMB, 512 * 1024);
+    keep.emplace_back(13 * kMB, 3 * kMB);
+    ASSERT_OK(sb_stream->split_shared_buffer(piece.value(), keep));
+
+    auto before = sb_stream->find_shared_buffer(10 * kMB, 100);
+    ASSERT_OK(before.status());
+    ASSERT_FALSE(before.value()->split);
+    ASSERT_TRUE(before.value()->has_next_piece);
+    // a hole follows the head, so the head has no next piece.
+    auto head = sb_stream->find_shared_buffer(12 * kMB, 512 * 1024);
+    ASSERT_OK(head.status());
+    ASSERT_TRUE(head.value()->large);
+    ASSERT_TRUE(head.value()->split);
+    ASSERT_FALSE(head.value()->has_next_piece);
+    ASSERT_EQ(12 * kMB, head.value()->raw_offset);
+    ASSERT_EQ(512 * 1024, head.value()->raw_size);
+    // the tail reaches the end of the piece, and the piece had a next piece.
+    auto tail = sb_stream->find_shared_buffer(13 * kMB, 3 * kMB);
+    ASSERT_OK(tail.status());
+    ASSERT_TRUE(tail.value()->large);
+    ASSERT_TRUE(tail.value()->split);
+    ASSERT_TRUE(tail.value()->has_next_piece);
+    ASSERT_EQ(13 * kMB, tail.value()->raw_offset);
+    ASSERT_EQ(3 * kMB, tail.value()->raw_size);
+
+    ASSERT_OK(sb_stream->find_shared_pieces(12 * kMB - 100, 200, nullptr));
+    ASSERT_OK(sb_stream->find_shared_pieces(16 * kMB - 100, 200, nullptr));
+    ASSERT_FALSE(sb_stream->find_shared_pieces(12 * kMB + 512 * 1024 - 100, 200, nullptr).ok());
+    ASSERT_FALSE(sb_stream->find_shared_pieces(13 * kMB - 100, 200, nullptr).ok());
+    ASSERT_FALSE(sb_stream->find_shared_pieces(12 * kMB + 512 * 1024, 1, nullptr).ok());
+
+    // a read from the piece before into the head is served from the buffers.
+    s.read_and_check(12 * kMB - 100, 200);
+    ASSERT_EQ(0, sb_stream->direct_io_count());
+    ASSERT_EQ(2, sb_stream->large_io_count());
+    ASSERT_EQ(4 * kMB + 512 * 1024, sb_stream->large_io_bytes());
+    ASSERT_EQ(200, sb_stream->large_used_bytes());
+
+    // a read that reaches the hole is a direct read, and it does not load a buffer.
+    s.read_and_check(13 * kMB - 100, 200);
+    ASSERT_EQ(1, sb_stream->direct_io_count());
+    ASSERT_EQ(200, sb_stream->direct_io_bytes());
+    ASSERT_EQ(2, sb_stream->large_io_count());
+
+    // a read from the tail into the next piece is served from the buffers, and the tail is loaded without the hole.
+    s.read_and_check(16 * kMB - 100, 200);
+    ASSERT_EQ(1, sb_stream->direct_io_count());
+    ASSERT_EQ(4, sb_stream->large_io_count());
+    ASSERT_EQ(4 * kMB + 512 * 1024 + 3 * kMB + 4 * kMB, sb_stream->large_io_bytes());
+    ASSERT_EQ(400, sb_stream->large_used_bytes());
 }
 
 } // namespace starrocks::io

@@ -46,6 +46,15 @@ public:
         int64_t offset;
         int64_t size;
         int64_t ref_count;
+        // The buffer is built from a single io range larger than max_buffer_size, or from a part of such a
+        // buffer (see split_shared_buffer). We keep the flag so that we can count how many bytes we load and use
+        // for such buffers.
+        bool large = false;
+        // A large io range is cut into consecutive buffers (pieces), and split_shared_buffer() can cut a piece
+        // further. The flag is set for a buffer whose bytes end where the bytes of the next buffer of the same
+        // large io range begin, so a read that crosses the end of this buffer can continue in the next one. It is
+        // false when a hole follows the buffer, because the caller reads the hole by other means.
+        bool has_next_piece = false;
         std::vector<uint8_t> buffer;
         // True for a buffer that split_shared_buffer() made. The caller of split_shared_buffer() has chosen
         // the bytes that the buffer covers, so no one needs to choose them again.
@@ -80,6 +89,10 @@ public:
     // `ranges` are sorted by offset, do not overlap, and lie inside [sb->offset, sb->offset + sb->size).
     // On an error nothing changes. On success `sb` is not registered any more and the caller does not use it again.
     Status split_shared_buffer(const SharedBufferPtr& sb, const std::vector<IORange>& ranges);
+    // find_shared_buffer needs one buffer for the whole range. A read inside a large io range can cross the
+    // border of two pieces, so we also accept a range that consecutive pieces cover together. The pieces are
+    // returned in the order of offset, `pieces` can be nullptr when the caller only checks the coverage.
+    Status find_shared_pieces(size_t offset, size_t count, std::vector<SharedBufferPtr>* pieces);
     // Get bytes from shared buffer or remote storage, when the shared_buffer is not NULL, the function
     // will use it directely instead of finding it repeatedly.
     Status get_bytes(const uint8_t** buffer, size_t offset, size_t count, SharedBufferPtr shared_buffer);
@@ -101,6 +114,11 @@ public:
     int64_t shared_io_bytes() const { return _shared_io_bytes; }
     int64_t shared_align_io_bytes() const { return _shared_align_io_bytes; }
     int64_t shared_io_timer() const { return _shared_io_timer; }
+    // Loads of the large shared buffers (see SharedBuffer::large): the number of loads, the bytes loaded
+    // and the bytes the readers asked for from them.
+    int64_t large_io_count() const { return _large_io_count; }
+    int64_t large_io_bytes() const { return _large_io_bytes; }
+    int64_t large_used_bytes() const { return _large_used_bytes; }
     int64_t direct_io_count() const { return _direct_io_count; }
     int64_t direct_io_bytes() const { return _direct_io_bytes; }
     int64_t direct_io_timer() const { return _direct_io_timer; }
@@ -117,6 +135,7 @@ private:
     void _update_estimated_mem_usage();
     Status _sort_and_check_overlap(std::vector<IORange>& ranges);
     void _merge_small_ranges(const std::vector<IORange>& ranges);
+    void _add_large_range(const IORange& range);
     Status _set_io_ranges_all_columns(const std::vector<IORange>& ranges);
     Status _set_io_ranges_active_and_lazy_columns(const std::vector<IORange>& ranges);
     const std::shared_ptr<SeekableInputStream> _stream;
@@ -129,6 +148,11 @@ private:
     int64_t _shared_io_bytes = 0;
     int64_t _shared_align_io_bytes = 0;
     int64_t _shared_io_timer = 0;
+    int64_t _large_io_count = 0;
+    int64_t _large_io_bytes = 0;
+    // Sum of the `count` of every read served from a large buffer. If the readers ask for the same bytes
+    // twice, we count them twice.
+    int64_t _large_used_bytes = 0;
     int64_t _direct_io_count = 0;
     int64_t _direct_io_bytes = 0;
     int64_t _direct_io_timer = 0;

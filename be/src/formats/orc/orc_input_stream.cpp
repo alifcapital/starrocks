@@ -57,7 +57,10 @@ bool ORCHdfsFileStream::isAlreadyCollectedInSharedBuffer(const int64_t offset, c
         return false;
     }
 
-    return _sb_stream->find_shared_buffer(offset, length).status().ok();
+    // We do not set io ranges again for a stripe that is already collected, so that shared buffers do not
+    // overlap. A stripe inside a large io range is covered by consecutive pieces and not by one buffer, so we
+    // accept the pieces too.
+    return _sb_stream->find_shared_pieces(offset, length, nullptr).ok();
 }
 
 void ORCHdfsFileStream::setIORanges(std::vector<IORange>& io_ranges) {

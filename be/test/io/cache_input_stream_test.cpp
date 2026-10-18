@@ -1026,9 +1026,25 @@ struct SkipCachedBlocksCase {
         cache_stream->set_enable_async_populate_mode(enable_async_populate);
         cache_stream->_cache = &block_cache;
         saved_coalesce_distance = config::io_coalesce_read_max_distance_size;
+        // The tests of the split by the cache state expect a large io range to be one shared buffer. The tests of
+        // the pieces of a large range turn the pieces on with enable_pieces().
+        saved_split_large_range = config::io_coalesce_split_large_range;
+        config::io_coalesce_split_large_range = false;
     }
 
-    ~SkipCachedBlocksCase() { config::io_coalesce_read_max_distance_size = saved_coalesce_distance; }
+    ~SkipCachedBlocksCase() {
+        config::io_coalesce_read_max_distance_size = saved_coalesce_distance;
+        config::io_coalesce_split_large_range = saved_split_large_range;
+    }
+
+    // An io range above `size` is cut into pieces of at most `size`. We use a multiple of the block size, so a piece
+    // ends at a block border.
+    void enable_pieces(int64_t size) {
+        config::io_coalesce_split_large_range = true;
+        auto options = sb_stream->coalesce_options();
+        options.max_buffer_size = size;
+        sb_stream->set_coalesce_options(options);
+    }
 
     // The file range [offset, offset + size) is one io range, as the parquet reader registers it.
     void set_io_range(int64_t offset, int64_t size) {
@@ -1064,6 +1080,7 @@ struct SkipCachedBlocksCase {
 
     std::string data;
     int32_t saved_coalesce_distance = 0;
+    bool saved_split_large_range = true;
     std::shared_ptr<InMemoryCacheEngine> engine;
     BlockCache block_cache;
     std::shared_ptr<CountingSeekableInputStream> remote;
@@ -1616,6 +1633,158 @@ TEST_F(CacheInputStreamTest, test_stats_merge_skip_remote_read_bytes) {
     b.skip_remote_read_bytes = 7;
     a += b;
     ASSERT_EQ(12, a.skip_remote_read_bytes);
+}
+
+// The tests below use a file of 24 blocks and the coalesce buffer size of 8 blocks, so the io range of the whole
+// file is cut into the pieces [0, 8), [8, 16) and [16, 24) blocks.
+
+TEST_F(CacheInputStreamTest, test_large_range_pieces_skip_cached_blocks_inside_a_piece) {
+    const int64_t block_count = 24;
+    SkipCachedBlocksCase c("test_large_range_pieces_skip_cached_blocks_inside_a_piece", block_size * block_count);
+    c.set_coalesce_distance(0);
+    c.enable_pieces(8 * block_size);
+    c.set_io_range(0, block_size * block_count);
+    // The cache holds the blocks 10..12 of the second piece.
+    c.cache_blocks({10, 11, 12});
+    const auto& stats = c.cache_stream->stats();
+
+    // The second piece is cut by the cache state into the runs 8..9 and 13..15, and the run of the read is loaded.
+    ASSERT_NO_FATAL_FAILURE(c.read_and_check(9 * block_size, block_size));
+    ASSERT_EQ((Reads{{8 * block_size, 2 * block_size}}), c.remote->reads);
+    ASSERT_EQ(3 * block_size, stats.skip_remote_read_bytes);
+    ASSERT_EQ(7, c.engine->exist_calls);
+    ASSERT_EQ(0, c.sb_stream->direct_io_count());
+    // The buffers made from a piece keep the large flag, so the counters see the bytes they load.
+    ASSERT_EQ(1, c.sb_stream->large_io_count());
+    ASSERT_EQ(2 * block_size, c.sb_stream->large_io_bytes());
+    ASSERT_EQ(block_size, c.sb_stream->large_used_bytes());
+
+    auto head = c.sb_stream->find_shared_buffer(8 * block_size, 2 * block_size);
+    ASSERT_OK(head.status());
+    ASSERT_TRUE(head.value()->large);
+    ASSERT_TRUE(head.value()->split);
+    ASSERT_FALSE(head.value()->has_next_piece);
+    auto tail = c.sb_stream->find_shared_buffer(13 * block_size, 3 * block_size);
+    ASSERT_OK(tail.status());
+    ASSERT_TRUE(tail.value()->large);
+    ASSERT_TRUE(tail.value()->split);
+    ASSERT_TRUE(tail.value()->has_next_piece);
+    ASSERT_FALSE(c.sb_stream->find_shared_buffer(10 * block_size, block_size).ok());
+    // The other pieces are neither cut nor loaded, and the cache was not asked about their blocks.
+    auto first = c.sb_stream->find_shared_buffer(0, 8 * block_size);
+    ASSERT_OK(first.status());
+    ASSERT_TRUE(first.value()->large);
+    ASSERT_FALSE(first.value()->split);
+    ASSERT_TRUE(first.value()->has_next_piece);
+    auto last = c.sb_stream->find_shared_buffer(16 * block_size, 8 * block_size);
+    ASSERT_OK(last.status());
+    ASSERT_FALSE(last.value()->split);
+    ASSERT_FALSE(last.value()->has_next_piece);
+
+    // The second run is loaded with one request, and the cache is not asked again. The cached blocks come from the
+    // cache.
+    ASSERT_NO_FATAL_FAILURE(c.read_and_check(14 * block_size, block_size));
+    ASSERT_NO_FATAL_FAILURE(c.read_and_check(10 * block_size, 3 * block_size));
+    ASSERT_EQ((Reads{{8 * block_size, 2 * block_size}, {13 * block_size, 3 * block_size}}), c.remote->reads);
+    ASSERT_EQ(3, stats.read_block_cache_count);
+    ASSERT_EQ(7, c.engine->exist_calls);
+    ASSERT_EQ(0, c.sb_stream->direct_io_count());
+    ASSERT_EQ(2, c.sb_stream->large_io_count());
+    ASSERT_EQ(5 * block_size, c.sb_stream->large_io_bytes());
+}
+
+TEST_F(CacheInputStreamTest, test_large_range_pieces_serve_a_remote_read_that_crosses_two_pieces) {
+    const int64_t block_count = 24;
+    SkipCachedBlocksCase c("test_large_range_pieces_serve_a_remote_read_that_crosses_two_pieces",
+                           block_size * block_count);
+    c.set_coalesce_distance(0);
+    c.enable_pieces(8 * block_size);
+    c.set_io_range(0, block_size * block_count);
+    // The cache holds the blocks 0..3 in front of the read, and the blocks 12 and 13 behind it.
+    c.cache_blocks({0, 1, 2, 3, 12, 13});
+    const auto& stats = c.cache_stream->stats();
+
+    // The blocks 6..9 are missing, and the read crosses the border of the first two pieces at the block 8. Each
+    // piece is cut by the cache state, and the pieces serve the read with no direct read: the first piece loads
+    // the blocks 4..7, and the second one loads the run 8..11.
+    ASSERT_NO_FATAL_FAILURE(c.read_and_check(6 * block_size, 4 * block_size));
+    ASSERT_EQ((Reads{{4 * block_size, 4 * block_size}, {8 * block_size, 4 * block_size}}), c.remote->reads);
+    ASSERT_EQ(0, c.sb_stream->direct_io_count());
+    ASSERT_EQ(2, c.sb_stream->shared_io_count());
+    ASSERT_EQ(6 * block_size, stats.skip_remote_read_bytes);
+    ASSERT_EQ(12, c.engine->exist_calls);
+    ASSERT_EQ(2, c.sb_stream->large_io_count());
+    ASSERT_EQ(8 * block_size, c.sb_stream->large_io_bytes());
+    ASSERT_EQ(4 * block_size, c.sb_stream->large_used_bytes());
+
+    // The run behind the cached blocks 12 and 13 is a buffer of its own, and it continues in the third piece.
+    auto tail = c.sb_stream->find_shared_buffer(14 * block_size, 2 * block_size);
+    ASSERT_OK(tail.status());
+    ASSERT_TRUE(tail.value()->split);
+    ASSERT_TRUE(tail.value()->has_next_piece);
+
+    // The read of the rest of the file crosses the border of the second and the third piece too. No cached block is
+    // downloaded, and the cache is asked about the blocks of the third piece not at all, because the read needs
+    // all of them.
+    ASSERT_NO_FATAL_FAILURE(c.read_and_check(0, block_size * block_count));
+    ASSERT_EQ((Reads{{4 * block_size, 4 * block_size},
+                     {8 * block_size, 4 * block_size},
+                     {14 * block_size, 2 * block_size},
+                     {16 * block_size, 8 * block_size}}),
+              c.remote->reads);
+    ASSERT_EQ(18 * block_size, c.remote->bytes);
+    ASSERT_EQ(0, c.sb_stream->direct_io_count());
+    ASSERT_EQ(12, c.engine->exist_calls);
+}
+
+TEST_F(CacheInputStreamTest, test_large_range_pieces_serve_a_cold_remote_read_that_crosses_two_pieces) {
+    const int64_t block_count = 24;
+    SkipCachedBlocksCase c("test_large_range_pieces_serve_a_cold_remote_read_that_crosses_two_pieces",
+                           block_size * block_count);
+    c.enable_pieces(8 * block_size);
+    c.set_io_range(0, block_size * block_count);
+    const auto& stats = c.cache_stream->stats();
+
+    // Nothing is cached, so each piece is loaded whole with one request and the read has no direct read.
+    ASSERT_NO_FATAL_FAILURE(c.read_and_check(6 * block_size, 4 * block_size));
+    ASSERT_EQ((Reads{{0, 8 * block_size}, {8 * block_size, 8 * block_size}}), c.remote->reads);
+    ASSERT_EQ(0, c.sb_stream->direct_io_count());
+    ASSERT_EQ(0, stats.skip_remote_read_bytes);
+    ASSERT_EQ(12, c.engine->exist_calls);
+    ASSERT_EQ(2, c.sb_stream->large_io_count());
+    ASSERT_EQ(16 * block_size, c.sb_stream->large_io_bytes());
+    ASSERT_EQ(4 * block_size, c.sb_stream->large_used_bytes());
+
+    // The loaded pieces serve their blocks again with no new request.
+    ASSERT_NO_FATAL_FAILURE(c.read_and_check(0, 16 * block_size));
+    ASSERT_EQ(2u, c.remote->reads.size());
+}
+
+TEST_F(CacheInputStreamTest, test_large_range_pieces_do_not_join_across_a_cached_gap) {
+    const int64_t block_count = 24;
+    SkipCachedBlocksCase c("test_large_range_pieces_do_not_join_across_a_cached_gap", block_size * block_count);
+    c.set_coalesce_distance(0);
+    c.enable_pieces(8 * block_size);
+    c.set_io_range(0, block_size * block_count);
+    // The cached block 7 is the last block of the first piece, between the missing blocks 6 and 8.
+    c.cache_blocks({7});
+    const auto& stats = c.cache_stream->stats();
+
+    // The cached block 7 is read from the cache and not downloaded. The first piece loses its last block, so it has
+    // no next piece any more, and the missing block 8 is read through the second piece.
+    ASSERT_NO_FATAL_FAILURE(c.read_and_check(6 * block_size, 3 * block_size));
+    ASSERT_EQ((Reads{{0, 7 * block_size}, {8 * block_size, 8 * block_size}}), c.remote->reads);
+    ASSERT_EQ(0, c.sb_stream->direct_io_count());
+    ASSERT_EQ(1, stats.read_block_cache_count);
+    ASSERT_EQ(block_size, stats.skip_remote_read_bytes);
+
+    auto first = c.sb_stream->find_shared_buffer(6 * block_size, block_size);
+    ASSERT_OK(first.status());
+    ASSERT_TRUE(first.value()->large);
+    ASSERT_TRUE(first.value()->split);
+    ASSERT_FALSE(first.value()->has_next_piece);
+    ASSERT_FALSE(c.sb_stream->find_shared_pieces(7 * block_size - 100, 200, nullptr).ok());
+    ASSERT_FALSE(c.sb_stream->find_shared_buffer(7 * block_size, block_size).ok());
 }
 
 } // namespace starrocks::io

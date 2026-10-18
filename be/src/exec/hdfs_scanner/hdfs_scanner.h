@@ -242,6 +242,9 @@ struct HdfsScannerProfile {
     RuntimeProfile::Counter* shared_buffered_shared_io_bytes = nullptr;
     RuntimeProfile::Counter* shared_buffered_shared_align_io_bytes = nullptr;
     RuntimeProfile::Counter* shared_buffered_shared_io_timer = nullptr;
+    RuntimeProfile::Counter* shared_buffered_large_io_count = nullptr;
+    RuntimeProfile::Counter* shared_buffered_large_io_bytes = nullptr;
+    RuntimeProfile::Counter* shared_buffered_large_used_bytes = nullptr;
     RuntimeProfile::Counter* shared_buffered_direct_io_count = nullptr;
     RuntimeProfile::Counter* shared_buffered_direct_io_bytes = nullptr;
     RuntimeProfile::Counter* shared_buffered_direct_io_timer = nullptr;

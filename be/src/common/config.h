@@ -1285,6 +1285,10 @@ CONF_mInt32(io_coalesce_read_max_buffer_size, "8388608");
 // this are read with one request, and so are two blocks without data cache that have cached blocks between them.
 CONF_mInt32(io_coalesce_read_max_distance_size, "1048576");
 CONF_mBool(io_coalesce_adaptive_lazy_active, "true");
+// We want a reader that touches only a few pages of a big column chunk not to download the whole chunk.
+// When it is true, an io range larger than io_coalesce_read_max_buffer_size is cut into pieces of at most that
+// size and each piece is loaded on its first access. When it is false, such a range is one buffer.
+CONF_mBool(io_coalesce_split_large_range, "true");
 CONF_Int32(io_tasks_per_scan_operator, "4");
 CONF_Int32(connector_io_tasks_per_scan_operator, "16");
 CONF_Int32(connector_io_tasks_min_size, "2");

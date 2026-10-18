@@ -203,6 +203,9 @@ protected:
     // [need_begin, need_end) is the range that is still to be read from remote storage, and it stays in one run.
     void _skip_cached_blocks(const SharedBufferPtr& sb, int64_t need_begin, int64_t need_end);
     bool _can_ask_cache() const;
+    // Returns the size of the part of the chunk [offset, offset + size) of a remote read that one shared buffer can
+    // serve: the chunk is cut at the end of the piece of a large io range that holds `offset`, if it crosses that end.
+    int64_t _cut_chunk_at_piece_end(int64_t offset, int64_t size);
     bool _can_ignore_populate_error(const Status& status) const;
     bool _can_try_peer_cache();
 

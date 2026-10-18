@@ -97,6 +97,35 @@ void SharedBufferedInputStream::_merge_small_ranges(const std::vector<IORange>& 
     }
 }
 
+void SharedBufferedInputStream::_add_large_range(const IORange& r) {
+    // We want a reader that touches only a few pages of a large range not to load the whole range, so we cut
+    // the range into consecutive pieces of at most max_buffer_size and load each piece on its first access.
+    // With an align size we cut at multiples of it: we expect the aligned pieces not to overlap, so no block
+    // is loaded twice. If max_buffer_size is smaller than the align size, we cannot do it and keep one buffer.
+    int64_t step = 0;
+    if (config::io_coalesce_split_large_range) {
+        step = _align_size > 0 ? _options.max_buffer_size / _align_size * _align_size : _options.max_buffer_size;
+    }
+
+    const int64_t range_end = r.offset + r.size;
+    int64_t begin = r.offset;
+    while (begin < range_end) {
+        int64_t end = range_end;
+        if (step > 0) {
+            const int64_t piece_start = _align_size > 0 ? begin / _align_size * _align_size : begin;
+            end = std::min(range_end, piece_start + step);
+        }
+        SharedBufferPtr sb(new SharedBuffer{.raw_offset = begin,
+                                            .raw_size = end - begin,
+                                            .ref_count = 1,
+                                            .large = true,
+                                            .has_next_piece = end < range_end});
+        sb->align(_align_size, _file_size);
+        _map.insert(std::make_pair(end, sb));
+        begin = end;
+    }
+}
+
 Status SharedBufferedInputStream::_set_io_ranges_all_columns(const std::vector<IORange>& ranges) {
     if (ranges.size() == 0) {
         return Status::OK();
@@ -108,9 +137,7 @@ Status SharedBufferedInputStream::_set_io_ranges_all_columns(const std::vector<I
     std::vector<IORange> small_ranges;
     for (const IORange& r : check) {
         if (r.size > _options.max_buffer_size) {
-            SharedBufferPtr sb(new SharedBuffer{.raw_offset = r.offset, .raw_size = r.size, .ref_count = 1});
-            sb->align(_align_size, _file_size);
-            _map.insert(std::make_pair(sb->raw_offset + sb->raw_size, sb));
+            _add_large_range(r);
         } else {
             small_ranges.emplace_back(r);
         }
@@ -137,9 +164,7 @@ Status SharedBufferedInputStream::_set_io_ranges_active_and_lazy_columns(const s
     for (auto index = 0; index < check.size(); ++index) {
         const IORange& r = check[index];
         if (r.size > _options.max_buffer_size) {
-            SharedBufferPtr sb(new SharedBuffer{.raw_offset = r.offset, .raw_size = r.size, .ref_count = 1});
-            sb->align(_align_size, _file_size);
-            _map.insert(std::make_pair(sb->raw_offset + sb->raw_size, sb));
+            _add_large_range(r);
         } else {
             if (r.is_active) {
                 small_active_ranges.emplace_back(r);
@@ -230,7 +255,8 @@ Status SharedBufferedInputStream::split_shared_buffer(const SharedBufferPtr& sb,
     int64_t prev_end = sb->offset;
     std::vector<SharedBufferPtr> new_buffers;
     new_buffers.reserve(ranges.size());
-    for (const IORange& r : ranges) {
+    for (size_t i = 0; i < ranges.size(); ++i) {
+        const IORange& r = ranges[i];
         const int64_t r_end = r.offset + r.size;
         const int64_t new_raw_begin = std::max(r.offset, raw_begin);
         const int64_t new_raw_end = std::min(r_end, raw_end);
@@ -245,12 +271,20 @@ Status SharedBufferedInputStream::split_shared_buffer(const SharedBufferPtr& sb,
                                                                new_raw_end, existing->second->debug_string()));
         }
         // We do not know which io ranges of `sb` fall into which new buffer, so each new buffer keeps the ref_count
-        // of `sb` as an upper bound.
+        // of `sb` as an upper bound. The new buffers load a part of `sb`, so they keep the large flag of `sb` and
+        // the bytes they load are counted as the bytes of a large buffer.
+        // The next piece of the large io range follows the new buffer only if no hole is between them: the new buffer
+        // reaches the end of `sb` and `sb` has a next piece, or the next new buffer begins where this one ends.
+        // A read does not cross a hole, because the caller reads the bytes of the hole by other means.
+        const bool has_next_piece = sb->large && (i + 1 < ranges.size() ? ranges[i + 1].offset == r_end
+                                                                        : sb->has_next_piece && r_end == end);
         new_buffers.emplace_back(new SharedBuffer{.raw_offset = new_raw_begin,
                                                   .raw_size = new_raw_end - new_raw_begin,
                                                   .offset = r.offset,
                                                   .size = r.size,
                                                   .ref_count = sb->ref_count,
+                                                  .large = sb->large,
+                                                  .has_next_piece = has_next_piece,
                                                   .split = true});
         prev_end = r_end;
     }
@@ -260,6 +294,32 @@ Status SharedBufferedInputStream::split_shared_buffer(const SharedBufferPtr& sb,
         _map.emplace(new_buffer->raw_offset + new_buffer->raw_size, new_buffer);
     }
     return Status::OK();
+}
+
+Status SharedBufferedInputStream::find_shared_pieces(size_t offset, size_t count,
+                                                     std::vector<SharedBufferPtr>* pieces) {
+    const size_t end = offset + count;
+    size_t cursor = offset;
+    // We walk over the buffers while each one starts where the previous one ends and the previous one has a next
+    // piece, so we never join buffers of different io ranges.
+    for (auto iter = _map.upper_bound(offset); iter != _map.end(); ++iter) {
+        const SharedBufferPtr& sb = iter->second;
+        const size_t sb_end = sb->offset + sb->size;
+        if (sb->offset > cursor || sb_end <= cursor) {
+            break;
+        }
+        if (pieces != nullptr) {
+            pieces->push_back(sb);
+        }
+        if (sb_end >= end) {
+            return Status::OK();
+        }
+        if (!sb->has_next_piece) {
+            break;
+        }
+        cursor = sb_end;
+    }
+    return Status::RuntimeError("bad construction of shared buffer");
 }
 
 Status SharedBufferedInputStream::get_bytes(const uint8_t** buffer, size_t offset, size_t count,
@@ -275,6 +335,10 @@ Status SharedBufferedInputStream::get_bytes(const uint8_t** buffer, size_t offse
         SCOPED_RAW_TIMER(&_shared_io_timer);
         _shared_io_count += 1;
         _shared_io_bytes += sb.size;
+        if (sb.large) {
+            _large_io_count += 1;
+            _large_io_bytes += sb.size;
+        }
         if (sb.size > sb.raw_size) {
             // after called _deduplicate_shared_buffer(), sb.size maybe is larger than sb.raw_size
             // we will count how many extra bytes we read because of alignment.
@@ -282,6 +346,9 @@ Status SharedBufferedInputStream::get_bytes(const uint8_t** buffer, size_t offse
         }
         sb.buffer.reserve(sb.size);
         RETURN_IF_ERROR(_stream->read_at_fully(sb.offset, sb.buffer.data(), sb.size));
+    }
+    if (sb.large) {
+        _large_used_bytes += count;
     }
     *buffer = sb.buffer.data() + offset - sb.offset;
     return Status::OK();
@@ -299,6 +366,23 @@ void SharedBufferedInputStream::release_to_offset(int64_t offset) {
 Status SharedBufferedInputStream::read_at_fully(int64_t offset, void* out, int64_t count) {
     auto st = find_shared_buffer(offset, count);
     if (!st.ok()) {
+        std::vector<SharedBufferPtr> pieces;
+        if (find_shared_pieces(offset, count, &pieces).ok()) {
+            // The read crosses the border of two pieces of a large range. We expect the neighbour pages to
+            // need these pieces too, so we serve the read from the pieces and do not read the bytes again
+            // with a direct io.
+            char* dst = static_cast<char*>(out);
+            int64_t cursor = offset;
+            for (const SharedBufferPtr& piece : pieces) {
+                const int64_t n = std::min<int64_t>(offset + count, piece->offset + piece->size) - cursor;
+                const uint8_t* buffer = nullptr;
+                RETURN_IF_ERROR(get_bytes(&buffer, cursor, n, piece));
+                strings::memcpy_inlined(dst, buffer, n);
+                dst += n;
+                cursor += n;
+            }
+            return Status::OK();
+        }
         SCOPED_RAW_TIMER(&_direct_io_timer);
         _direct_io_count += 1;
         _direct_io_bytes += count;
@@ -334,6 +418,10 @@ StatusOr<std::string_view> SharedBufferedInputStream::peek_shared_buffer(int64_t
                                                                          SharedBufferPtr* shared_buffer) {
     ASSIGN_OR_RETURN(auto ret, find_shared_buffer(_offset, count));
     if (ret->buffer.capacity() == 0) return Status::NotSupported("peek shared buffer empty");
+    // This path does not call get_bytes, so we count the bytes the reader gets from a large buffer here.
+    if (ret->large) {
+        _large_used_bytes += count;
+    }
     const uint8_t* buf = ret->buffer.data() + _offset - ret->offset;
     if (shared_buffer) {
         *shared_buffer = ret;

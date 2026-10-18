@@ -249,13 +249,20 @@ Status CacheInputStream::_read_blocks_from_remote(const int64_t offset, const in
 
     for (int64_t read_offset_cursor = block_start_offset; read_offset_cursor < block_end_offset;) {
         // Everytime read at most one buffer size
-        const int64_t read_size = std::min(_buffer_size, block_end_offset - read_offset_cursor);
+        int64_t read_size = std::min(_buffer_size, block_end_offset - read_offset_cursor);
         char* src = nullptr;
 
         // check [read_offset_cursor, read_size) is already in SharedBuffer
         // If existed, we can use zero copy to avoid copy data from SharedBuffer to _buffer
         SharedBufferPtr sb = nullptr;
         auto ret = _sb_stream->find_shared_buffer(read_offset_cursor, read_size);
+        if (!ret.ok()) {
+            const int64_t cut_size = _cut_chunk_at_piece_end(read_offset_cursor, read_size);
+            if (cut_size != read_size) {
+                read_size = cut_size;
+                ret = _sb_stream->find_shared_buffer(read_offset_cursor, read_size);
+            }
+        }
         if (ret.ok() && ret.value()->buffer.capacity() == 0 && !ret.value()->split && _can_ask_cache()) {
             // Loading this shared buffer downloads all of its blocks, and we fear that the cache holds some of
             // them. So we split the buffer into the runs of blocks without cache before we load it. The chunk is
@@ -359,6 +366,24 @@ void CacheInputStream::_deduplicate_shared_buffer(const SharedBufferPtr& sb) {
 
 bool CacheInputStream::_can_ask_cache() const {
     return _cache != nullptr && _cache->is_initialized();
+}
+
+// A large io range is cut into pieces, and a chunk of the read can cross the end of a piece. No shared buffer covers
+// such a chunk, so it would be read with one request of its own, and the cache would not be asked about the blocks
+// of the pieces. We want the pieces to serve the chunk like any other shared buffer, so we cut the chunk at the end
+// of the piece that holds its first byte: the rest of the chunk is the next chunk, and it finds the next piece. We
+// cut only at a block border, so the next chunk begins at a block border too, and only when the piece has a next
+// piece, because the buffers of other io ranges did not serve such a chunk before either.
+int64_t CacheInputStream::_cut_chunk_at_piece_end(int64_t offset, int64_t size) {
+    auto head = _sb_stream->find_shared_buffer(offset, 1);
+    if (!head.ok() || !head.value()->has_next_piece) {
+        return size;
+    }
+    const int64_t head_end = head.value()->offset + head.value()->size;
+    if (head_end >= offset + size || head_end % _block_size != 0) {
+        return size;
+    }
+    return head_end - offset;
 }
 
 // We fear that a shared buffer covers blocks that the cache holds: we read them from the cache anyway, so loading
