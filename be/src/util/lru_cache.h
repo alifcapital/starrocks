@@ -168,6 +168,13 @@ public:
     // longer needed.
     virtual Handle* lookup(const CacheKey& key) = 0;
 
+    // Return true if the cache holds an entry for "key". A caller that only wants to know whether an entry is there
+    // should ask this and not lookup() followed by release(): it takes no handle, so no release can erase the entry
+    // (release() erases an entry that only the cache holds when the shard is over its capacity), it counts no lookup
+    // and no hit, and it does not move the entry in the LRU list, so it changes neither what the cache reports nor
+    // what it evicts next.
+    virtual bool contains(const CacheKey& key) = 0;
+
     // Release a mapping returned by a previous Lookup().
     // REQUIRES: handle must not have been released yet.
     // REQUIRES: handle must have been returned by a method on *this.
@@ -310,6 +317,7 @@ public:
     bool update_charge_if(const CacheKey& key, uint32_t hash, size_t new_value_size,
                           bool (*pred)(void* value, const void* ctx), const void* ctx);
     Cache::Handle* lookup(const CacheKey& key, uint32_t hash);
+    bool contains(const CacheKey& key, uint32_t hash);
     void release(Cache::Handle* handle);
     void touch(const CacheKey& key, uint32_t hash);
     void erase(const CacheKey& key, uint32_t hash);
@@ -381,6 +389,7 @@ public:
     bool update_charge_if(const CacheKey& key, size_t new_value_size, bool (*pred)(void* value, const void* ctx),
                           const void* ctx) override;
     Handle* lookup(const CacheKey& key) override;
+    bool contains(const CacheKey& key) override;
     void release(Handle* handle) override;
     void touch(const CacheKey& key) override;
     void erase(const CacheKey& key) override;

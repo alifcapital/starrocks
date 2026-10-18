@@ -29,6 +29,7 @@
 #include "exprs/expr_context.h"
 #include "formats/parquet/column_reader.h"
 #include "formats/parquet/metadata.h"
+#include "formats/parquet/page_cache_io_planner.h"
 #include "formats/parquet/utils.h"
 #include "gen_cpp/parquet_types.h"
 #include "io/shared_buffered_input_stream.h"
@@ -149,6 +150,10 @@ private:
     StatusOr<Datum> _get_extended_bigint_value(SlotId slot_id) const;
     StatusOr<ColumnReaderPtr> _create_column_reader(const GroupReaderParam::Column& column);
     Status _prepare_column_readers() const;
+    // We expect the page cache to hold the pages that an earlier scan of the file read, and we fear that the shared
+    // buffers of the stream load these pages again with the pages around them. So we give the stream a planner that
+    // names the cached pages of this row group before it loads a buffer (see PageCacheIoPlanner).
+    void _setup_page_cache_io();
     // Extract dict filter columns and conjuncts
     void _process_columns_and_conjunct_ctxs();
 
@@ -242,6 +247,10 @@ private:
 
     // column readers for column chunk in row group
     std::unordered_map<SlotId, std::unique_ptr<ColumnReader>> _column_readers;
+
+    // The provider of the stream that names the cached pages of this row group. It holds the readers of the chunks, so
+    // the destructor takes it out of the stream first. Null when the page cache is not used.
+    std::unique_ptr<PageCacheIoPlanner> _page_cache_io_planner;
 
     // Column materialization layer over ColumnReaders. Predicate classification
     // still lives in GroupReader until the next refactor steps.

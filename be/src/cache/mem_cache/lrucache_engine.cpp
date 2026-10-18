@@ -54,6 +54,10 @@ bool LRUCacheEngine::exist(const std::string& key) const {
     }
 }
 
+bool LRUCacheEngine::contains(const std::string& key) const {
+    return _cache->contains(CacheKey(key));
+}
+
 Status LRUCacheEngine::remove(const std::string& key) {
     _cache->erase(CacheKey(key));
     return Status::OK();

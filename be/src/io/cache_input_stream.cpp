@@ -263,20 +263,21 @@ Status CacheInputStream::_read_blocks_from_remote(const int64_t offset, const in
                 ret = _sb_stream->find_shared_buffer(read_offset_cursor, read_size);
             }
         }
-        if (ret.ok() && ret.value()->buffer.capacity() == 0 &&
-            _sb_stream->plan_load(ret.value(), read_offset_cursor, block_end_offset - read_offset_cursor)) {
-            // The reader gets some bytes of this shared buffer elsewhere (see SharedBufferedInputStream::plan_load()),
-            // so we do not load them. We look for the buffer of the chunk again: the chunk is a part of the range
-            // that is still to be read, so it stays inside one run. The data cache is asked about the new buffer
-            // below, because the bytes of the new buffers were not chosen by the data cache.
-            ret = _sb_stream->find_shared_buffer(read_offset_cursor, read_size);
-        }
         if (ret.ok() && ret.value()->buffer.capacity() == 0 && !ret.value()->split && _can_ask_cache()) {
             // Loading this shared buffer downloads all of its blocks, and we fear that the cache holds some of
             // them. So we split the buffer into the runs of blocks without cache before we load it. The chunk is
             // a part of the range that is still to be read, so it stays inside one run. A buffer that an earlier
             // split made is not asked again, because the cache has answered for its blocks already.
             _skip_cached_blocks(ret.value(), read_offset_cursor, block_end_offset);
+            ret = _sb_stream->find_shared_buffer(read_offset_cursor, read_size);
+        }
+        if (ret.ok() && ret.value()->buffer.capacity() == 0 &&
+            _sb_stream->plan_load(ret.value(), read_offset_cursor, block_end_offset - read_offset_cursor)) {
+            // The reader gets some bytes of this shared buffer elsewhere (see SharedBufferedInputStream::plan_load()),
+            // so we do not load them. We ask after the cache split on purpose: the blocks that the cache holds are
+            // out of the buffer already, so the provider is asked about the bytes that we are about to download
+            // only, and it is not asked at all when the cache serves the whole read. We look for the buffer of the
+            // chunk again: the chunk is a part of the range that is still to be read, so it stays inside one run.
             ret = _sb_stream->find_shared_buffer(read_offset_cursor, read_size);
         }
         int64_t read_remote_ns = 0;
@@ -410,8 +411,9 @@ int64_t CacheInputStream::_cut_chunk_at_piece_end(int64_t offset, int64_t size) 
 // - If one range covers the whole buffer (the cache holds no block, or every gap is small), we keep the buffer.
 // The answer of the cache is only a hint, and a block can be evicted after the answer. No buffer covers a block
 // that we cut out, so its read goes to the cache, finds nothing, and then reads remote storage directly.
-// The caller loads the buffer of the current read right after this call, and a buffer that this function made
-// is not asked again, so the cache is asked at most once about each block of a shared buffer.
+// The caller loads the buffer of the current read right after this call (it may cut the buffer further first, see
+// SharedBufferedInputStream::plan_load(), which keeps SharedBuffer::split), and a buffer that this function made or
+// kept is not asked again, so the cache is asked at most once about each block of a shared buffer.
 void CacheInputStream::_skip_cached_blocks(const SharedBufferPtr& sb, int64_t need_begin, int64_t need_end) {
     if (sb->size <= 0 || need_begin >= need_end) {
         return;
@@ -472,6 +474,8 @@ void CacheInputStream::_skip_cached_blocks(const SharedBufferPtr& sb, int64_t ne
         kept_bytes += range.size;
     }
     if (kept_bytes == sb->size) {
+        // The cache has answered for every block of the buffer, so the buffer is not asked again.
+        sb->split = true;
         return;
     }
 

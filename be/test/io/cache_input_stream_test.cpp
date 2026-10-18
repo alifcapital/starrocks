@@ -1830,18 +1830,21 @@ public:
     void find_skip_ranges(int64_t offset, int64_t size,
                           std::vector<io::SharedBufferedInputStream::IORange>* ranges) override {
         asks += 1;
+        asked.emplace_back(offset, size);
         ranges->insert(ranges->end(), skip.begin(), skip.end());
     }
 
     std::vector<io::SharedBufferedInputStream::IORange> skip;
     int asks = 0;
+    // (offset, size) of each ask, in the order of the asks.
+    Reads asked;
 };
 
 } // namespace
 
-// The reader gets the blocks 2 and 3 from its page cache, so the provider names them. The first read of the shared buffer
-// loads the runs around them, one request for each, and the data cache is asked about the blocks of the run that is
-// loaded.
+// The reader gets the blocks 2 and 3 from its page cache, so the provider names them. The first read of the shared
+// buffer loads the runs around them, one request for each, and the data cache is asked about the blocks of the run that
+// is loaded.
 TEST_F(CacheInputStreamTest, test_shared_buffer_skips_the_ranges_that_the_provider_names) {
     const int64_t block_count = 8;
     SkipCachedBlocksCase c("test_shared_buffer_skips_the_ranges_that_the_provider_names", block_size * block_count);
@@ -1857,31 +1860,79 @@ TEST_F(CacheInputStreamTest, test_shared_buffer_skips_the_ranges_that_the_provid
     ASSERT_EQ(1, provider.asks);
     ASSERT_EQ(2 * block_size, c.sb_stream->skip_ranges_bytes());
     ASSERT_EQ(1, c.sb_stream->skip_ranges_split_count());
-    // the data cache is asked about the block that the read does not need, in the buffer that is loaded
-    ASSERT_EQ(1, c.engine->exist_calls);
+    // The data cache is asked before the provider, about the blocks that the read does not need, so the provider is
+    // asked about the bytes that the data cache does not hold. The run after the cut blocks is not asked again.
+    ASSERT_EQ(7, c.engine->exist_calls);
     ASSERT_EQ(0, stats.skip_remote_read_bytes);
 
-    // the second run is a buffer of its own, and the provider is not asked about it again
+    // the second run is a buffer of its own, and neither the provider nor the data cache is asked about it again
     ASSERT_NO_FATAL_FAILURE(c.read_and_check(5 * block_size, block_size));
     ASSERT_EQ((Reads{{0, 2 * block_size}, {4 * block_size, 4 * block_size}}), c.remote->reads);
     ASSERT_EQ(1, provider.asks);
-    ASSERT_EQ(4, c.engine->exist_calls);
+    ASSERT_EQ(7, c.engine->exist_calls);
 
     // The page cache lost the blocks 2 and 3 after the plan. No buffer covers them and the cache holds no copy of them,
-    // so one direct request reads them, with right bytes.
+    // so one request reads them, with right bytes, and it loads the cut span of the blocks.
     ASSERT_NO_FATAL_FAILURE(c.read_and_check(2 * block_size, 2 * block_size));
     ASSERT_EQ((Reads{{0, 2 * block_size}, {4 * block_size, 4 * block_size}, {2 * block_size, 2 * block_size}}),
               c.remote->reads);
-    ASSERT_EQ(1, c.sb_stream->direct_io_count());
-    ASSERT_EQ(2 * block_size, c.sb_stream->direct_io_bytes());
+    ASSERT_EQ(0, c.sb_stream->direct_io_count());
+    ASSERT_EQ(1, c.sb_stream->skip_ranges_recover_count());
+    ASSERT_EQ(2 * block_size, c.sb_stream->skip_ranges_recover_bytes());
 
     // everything is served now with no new request
     ASSERT_NO_FATAL_FAILURE(c.read_and_check(0, block_size * block_count));
     ASSERT_EQ(3u, c.remote->reads.size());
 }
 
-// The buffers that the provider cut are not marked as split, so the data cache cuts them by its blocks too. The page
-// cache holds the blocks 2 and 3, and the data cache holds the block 6.
+// The data cache serves the blocks that it holds. We expect no plan for a read that the data cache serves whole: the
+// provider is not asked and the planning takes no time.
+TEST_F(CacheInputStreamTest, test_shared_buffer_does_not_ask_the_provider_when_the_data_cache_holds_the_read) {
+    const int64_t block_count = 8;
+    SkipCachedBlocksCase c("test_shared_buffer_does_not_ask_the_provider_when_the_data_cache_holds_the_read",
+                           block_size * block_count);
+    c.set_io_range(0, block_size * block_count);
+    c.cache_blocks({0, 1, 2, 3, 4, 5, 6, 7});
+    FixedSkipRanges provider;
+    provider.skip.emplace_back(2 * block_size, 2 * block_size);
+    c.sb_stream->set_skip_ranges_provider(&provider);
+
+    ASSERT_NO_FATAL_FAILURE(c.read_and_check(0, block_size * block_count));
+    ASSERT_TRUE(c.remote->reads.empty());
+    ASSERT_EQ(0, provider.asks);
+    ASSERT_EQ(0, c.sb_stream->skip_ranges_timer());
+    ASSERT_EQ(0, c.sb_stream->skip_ranges_split_count());
+}
+
+// The data cache holds the blocks 4 to 7. The provider is asked about the first four blocks only, which the buffer is
+// about to download, and not about the blocks that the data cache serves.
+TEST_F(CacheInputStreamTest, test_shared_buffer_asks_the_provider_only_about_the_blocks_the_data_cache_lacks) {
+    const int64_t block_count = 8;
+    SkipCachedBlocksCase c("test_shared_buffer_asks_the_provider_only_about_the_blocks_the_data_cache_lacks",
+                           block_size * block_count);
+    c.set_coalesce_distance(0);
+    c.set_io_range(0, block_size * block_count);
+    c.cache_blocks({4, 5, 6, 7});
+    FixedSkipRanges provider;
+    provider.skip.emplace_back(2 * block_size, block_size);
+    c.sb_stream->set_skip_ranges_provider(&provider);
+
+    ASSERT_NO_FATAL_FAILURE(c.read_and_check(0, block_size));
+    ASSERT_EQ((Reads{{0, 4 * block_size}}), provider.asked);
+    ASSERT_EQ((Reads{{0, 2 * block_size}}), c.remote->reads);
+    ASSERT_EQ(4 * block_size, c.cache_stream->stats().skip_remote_read_bytes);
+    ASSERT_EQ(block_size, c.sb_stream->skip_ranges_bytes());
+    ASSERT_EQ(7, c.engine->exist_calls);
+
+    // the run behind the cut block is a buffer of its own, and nobody asks again
+    ASSERT_NO_FATAL_FAILURE(c.read_and_check(3 * block_size, block_size));
+    ASSERT_EQ((Reads{{0, 2 * block_size}, {3 * block_size, block_size}}), c.remote->reads);
+    ASSERT_EQ(1, provider.asks);
+    ASSERT_EQ(7, c.engine->exist_calls);
+}
+
+// The data cache cuts the buffer by its blocks first, and the provider cuts what is left. The page cache holds the
+// blocks 2 and 3, and the data cache holds the block 6.
 TEST_F(CacheInputStreamTest, test_shared_buffer_skips_the_ranges_of_the_provider_and_the_cached_blocks) {
     const int64_t block_count = 8;
     SkipCachedBlocksCase c("test_shared_buffer_skips_the_ranges_of_the_provider_and_the_cached_blocks",
@@ -1894,16 +1945,17 @@ TEST_F(CacheInputStreamTest, test_shared_buffer_skips_the_ranges_of_the_provider
     c.sb_stream->set_skip_ranges_provider(&provider);
     const auto& stats = c.cache_stream->stats();
 
+    // The data cache cuts the block 6 out of the buffer, the provider asks about the rest, and cuts the blocks 2 and 3.
     ASSERT_NO_FATAL_FAILURE(c.read_and_check(0, block_size));
     ASSERT_EQ((Reads{{0, 2 * block_size}}), c.remote->reads);
-    ASSERT_EQ(1, c.engine->exist_calls);
-
-    // The provider cut the blocks 2 and 3, and the data cache cuts the block 6 out of the rest.
-    ASSERT_NO_FATAL_FAILURE(c.read_and_check(5 * block_size, block_size));
-    ASSERT_EQ((Reads{{0, 2 * block_size}, {4 * block_size, 2 * block_size}}), c.remote->reads);
+    ASSERT_EQ(7, c.engine->exist_calls);
     ASSERT_EQ(block_size, stats.skip_remote_read_bytes);
     ASSERT_EQ(2 * block_size, c.sb_stream->skip_ranges_bytes());
-    ASSERT_EQ(4, c.engine->exist_calls);
+    ASSERT_EQ(1, provider.asks);
+
+    ASSERT_NO_FATAL_FAILURE(c.read_and_check(5 * block_size, block_size));
+    ASSERT_EQ((Reads{{0, 2 * block_size}, {4 * block_size, 2 * block_size}}), c.remote->reads);
+    ASSERT_EQ(7, c.engine->exist_calls);
     ASSERT_EQ(1, provider.asks);
 
     ASSERT_NO_FATAL_FAILURE(c.read_and_check(6 * block_size, block_size));
@@ -1913,7 +1965,7 @@ TEST_F(CacheInputStreamTest, test_shared_buffer_skips_the_ranges_of_the_provider
     ASSERT_EQ((Reads{{0, 2 * block_size}, {4 * block_size, 2 * block_size}, {7 * block_size, block_size}}),
               c.remote->reads);
     ASSERT_EQ(0, c.sb_stream->direct_io_count());
-    ASSERT_EQ(4, c.engine->exist_calls);
+    ASSERT_EQ(7, c.engine->exist_calls);
 }
 
 // The data cache reads and writes whole blocks, so a range that does not begin or end at a border of a block gives up
@@ -1935,12 +1987,13 @@ TEST_F(CacheInputStreamTest, test_shared_buffer_skips_only_the_whole_blocks_of_t
     ASSERT_FALSE(c.sb_stream->find_shared_buffer(3 * block_size, block_size).ok());
     ASSERT_TRUE(c.sb_stream->find_shared_buffer(2 * block_size, block_size).ok());
     ASSERT_TRUE(c.sb_stream->find_shared_buffer(4 * block_size, 4 * block_size).ok());
-    // The block 3 is read directly, and the run of the blocks 4 to 7 is loaded as it was cut.
+    // The block 3 is a cut span, and one request reads it. The run of the blocks 4 to 7 is loaded as it was cut.
     ASSERT_NO_FATAL_FAILURE(c.read_and_check(3 * block_size, block_size));
     ASSERT_NO_FATAL_FAILURE(c.read_and_check(4 * block_size, 4 * block_size));
     ASSERT_EQ((Reads{{0, 3 * block_size}, {3 * block_size, block_size}, {4 * block_size, 4 * block_size}}),
               c.remote->reads);
-    ASSERT_EQ(1, c.sb_stream->direct_io_count());
+    ASSERT_EQ(0, c.sb_stream->direct_io_count());
+    ASSERT_EQ(1, c.sb_stream->skip_ranges_recover_count());
 }
 
 // The provider names the bytes of the read itself: the read is not cut, and the data cache still gets its blocks.

@@ -85,6 +85,9 @@ public:
     void collect_column_io_range(std::vector<io::SharedBufferedInputStream::IORange>* ranges, int64_t* end_offset,
                                  ColumnIOTypeFlags types, bool active) override;
 
+    void collect_page_cache_io_chunks(io::SharedBufferedInputStream* stream,
+                                      std::vector<PageCacheIoChunk>* chunks) override;
+
     const tparquet::ColumnChunk* get_chunk_metadata() const override { return _chunk_metadata; }
 
     StatusOr<tparquet::OffsetIndex*> get_offset_index(const uint64_t rg_first_row) override;
@@ -114,6 +117,18 @@ private:
     // can be skipped, so the scan stops reading it for a column that has shown that (OffsetIndexSkipAdvisor). This
     // tells if the column may still read it, and it does not count anything.
     bool _may_read_offset_index_for_skip() const;
+
+    // The pages of the chunk as the planner of the page cache aware IO needs them: the dictionary page, which is the
+    // bytes before the first page of the offset index, and the pages of the index. We use the offset index only when
+    // it fits the chunk (_offset_index_fits_chunk()), as the skip does. The answer is nullptr when we do not know the
+    // pages. A column that holds its offset index already (the skip or the page selection read it) answers from it.
+    // Otherwise, with allow_load, the column reads the index, but only when the index is planned in `stream`: a read of
+    // an index that is not planned is a remote read of its own for each column, and we fear that costs more than the
+    // pages save.
+    const std::vector<PageSpan>* _page_cache_io_spans(bool allow_load, io::SharedBufferedInputStream* stream);
+
+    // True when a shared buffer of `stream` covers the offset index of the chunk.
+    bool _offset_index_is_planned(io::SharedBufferedInputStream* stream) const;
 
     // The largest column index or offset index that we read. The sizes come from the footer, and we size a
     // buffer from them, so we stop an index that no real file has.
@@ -183,6 +198,15 @@ protected:
     std::unique_ptr<ColumnOffsetIndexCtx> _offset_index_ctx;
     bool _offset_index_skip_tried = false;
     bool _offset_index_skip_enabled = false;
+    // True when _offset_index_ctx was read by _page_cache_io_spans() and not by the static page selection. The static
+    // selection has read the index for its own use, but the planner has read it for a plan that does not tell whether
+    // the offset index pays for the page skip, so the skip advice still applies to such a column.
+    bool _offset_index_read_for_page_cache_io = false;
+    // What _page_cache_io_spans() knows: nothing yet, the pages in _page_spans, or that the chunk has no offset index
+    // that we can use.
+    enum class PageSpansState { UNKNOWN, KNOWN, UNUSABLE };
+    PageSpansState _page_spans_state = PageSpansState::UNKNOWN;
+    std::vector<PageSpan> _page_spans;
     // The feedback of the scan, and the key of this column in it, set when this reader reads the offset index for the
     // skip, because the destructor reports the pages that the reader skipped, and the options and the metadata of the
     // chunk can be gone by then. Null: nothing to report.

@@ -982,8 +982,14 @@ public:
         skip_ctx = ctx;
         skip_has_dict_page = has_dict_page;
     }
+    void set_page_locations(const std::vector<tparquet::PageLocation>* locations) override {
+        ++page_locations_calls;
+        page_locations = locations;
+    }
 
     std::vector<Range<uint64_t>> read_ranges;
+    int page_locations_calls = 0;
+    const std::vector<tparquet::PageLocation>* page_locations = nullptr;
     std::vector<size_t> loaded_pages;
     bool supports_skip = true;
     int64_t skipped_pages = 0;
@@ -1593,6 +1599,224 @@ TEST_F(PageIndexTest, OffsetIndexIsPlannedAlone) {
         outside.set_page_index(0, file.column_index_length, file.bytes.size(), file.offset_index_length);
         ASSERT_TRUE(collect(outside, ColumnIOType::OFFSET_INDEX, true).empty());
     }
+}
+
+namespace {
+
+// A shared stream over the file of the test, with the offset index of the file planned as an io range.
+struct PlannedOffsetIndexStream {
+    explicit PlannedOffsetIndexStream(const PageIndexFile& file, bool planned = true)
+            : stream(std::make_shared<io::StringInputStream>(std::string(file.bytes)), "string-file",
+                     file.bytes.size()) {
+        if (planned) {
+            std::vector<io::SharedBufferedInputStream::IORange> ranges;
+            ranges.emplace_back(file.column_index_length, file.offset_index_length);
+            CHECK(stream.set_io_ranges(ranges).ok());
+        }
+    }
+    io::SharedBufferedInputStream stream;
+};
+
+} // namespace
+
+// The static page selection reads the offset index for its own use, so the index is free for the skip. The page cache
+// planner reads it for a plan that says nothing about the skip, so a column whose index the planner read keeps the
+// advice and the feedback of the scan: it gives up when it skipped no page in the first row groups, it counts no load
+// of the skip, and it reports its row group at the end.
+TEST_F(PageIndexTest, OffsetIndexThatThePageCachePlannerReadIsPartOfTheFeedback) {
+    ScopedGiveUpRowGroups guard(1);
+    Filter with_zero(10, 1);
+    with_zero[3] = 0;
+    PageIndexFile file = make_page_index_file(make_column_index(2, 2, 2), make_offset_index(contiguous_pages()));
+    PlannedOffsetIndexStream planned(file);
+    OffsetIndexSkipAdvisor advisor;
+
+    // the planner reads the index, and the skip uses it and reports that it skipped no page
+    {
+        FeedbackSkipIndexEnv env(&advisor);
+        ASSERT_TRUE(env.env().reader()->_page_cache_io_spans(true, &planned.stream) != nullptr);
+        ASSERT_EQ(1, env.stats().page_cache_io_index_loads);
+        ASSERT_TRUE(env.read(0, 10, &with_zero).ok());
+        ASSERT_TRUE(env.enabled());
+        ASSERT_EQ(0, env.stats().offset_index_skip_loads);
+        ASSERT_EQ(0, env.stats().offset_index_skip_given_up);
+        ASSERT_TRUE(env.env().reader()->_skip_advisor == &advisor);
+        ASSERT_EQ("a.b", env.env().reader()->_skip_column);
+    }
+    ASSERT_FALSE(advisor.should_load("a.b"));
+
+    // the column has given up: the index is in hand, but the skip does not use it, and the scan counts that
+    {
+        FeedbackSkipIndexEnv env(&advisor);
+        ASSERT_TRUE(env.env().reader()->_page_cache_io_spans(true, &planned.stream) != nullptr);
+        ASSERT_TRUE(env.read(0, 10, &with_zero).ok());
+        ASSERT_FALSE(env.enabled());
+        ASSERT_EQ(0, env.stats().offset_index_skip_loads);
+        ASSERT_EQ(1, env.stats().offset_index_skip_given_up);
+        ASSERT_TRUE(env.env().reader()->_skip_advisor == nullptr);
+    }
+
+    // a column that skipped a page is not given up, whoever read its index
+    OffsetIndexSkipAdvisor paying;
+    {
+        FeedbackSkipIndexEnv env(&paying);
+        ASSERT_TRUE(env.env().reader()->_page_cache_io_spans(true, &planned.stream) != nullptr);
+        ASSERT_TRUE(env.read(0, 10, &with_zero).ok());
+        ASSERT_TRUE(env.enabled());
+        env.inner()->skipped_pages = 1;
+    }
+    ASSERT_TRUE(paying.should_load("a.b"));
+
+    // an index that the selection read is still free, even when the planner is asked about the pages later
+    OffsetIndexSkipAdvisor selected;
+    selected.observe("a.b", 0);
+    {
+        FeedbackSkipIndexEnv env(&selected);
+        ASSERT_TRUE(env.env().reader()->get_offset_index(0).ok());
+        ASSERT_TRUE(env.env().reader()->_page_cache_io_spans(false, nullptr) != nullptr);
+        ASSERT_EQ(0, env.stats().page_cache_io_index_loads);
+        ASSERT_TRUE(env.read(0, 10, &with_zero).ok());
+        ASSERT_TRUE(env.enabled());
+        ASSERT_TRUE(env.env().reader()->_skip_advisor == nullptr);
+    }
+}
+
+// The planner of the page cache aware IO asks a column for the pages of its chunk, and the pages come from the offset
+// index. A column that holds the index answers from it. A column that does not hold it reads it only when the planner
+// allows that and the index is planned in the shared stream: a read of an index that is not planned is a remote read of
+// its own. The answer of a column does not change after the first one, so the index is read once.
+TEST_F(PageIndexTest, PageCacheIoSpansComeFromTheOffsetIndexOfTheChunk) {
+    PageIndexFile file = make_page_index_file(make_column_index(2, 2, 2), make_offset_index(contiguous_pages()));
+    auto make_env = [&](bool with_dict) {
+        auto env = std::make_unique<IndexEnv>(file.bytes);
+        env->set_page_index(0, file.column_index_length, file.column_index_length, file.offset_index_length);
+        env->set_row_group_rows(10);
+        env->chunk()->meta_data.data_page_offset = 100;
+        env->chunk()->meta_data.total_compressed_size = 100;
+        if (with_dict) {
+            env->chunk()->meta_data.__set_dictionary_page_offset(60);
+            env->chunk()->meta_data.total_compressed_size = 140;
+        }
+        return env;
+    };
+    auto expect_spans = [](const std::vector<PageSpan>* spans, const std::vector<std::pair<int64_t, int64_t>>& want) {
+        ASSERT_TRUE(spans != nullptr);
+        ASSERT_EQ(want.size(), spans->size());
+        for (size_t i = 0; i < want.size(); ++i) {
+            ASSERT_EQ(want[i].first, (*spans)[i].offset) << i;
+            ASSERT_EQ(want[i].second, (*spans)[i].size) << i;
+        }
+    };
+
+    PlannedOffsetIndexStream planned(file);
+    PlannedOffsetIndexStream not_planned(file, false);
+    {
+        auto env = make_env(false);
+        auto recording = std::make_unique<RecordingStoredColumnReader>();
+        RecordingStoredColumnReader* inner = recording.get();
+        env->reader()->_reader = std::move(recording);
+
+        // the column holds no index, and the planner does not allow a read, or the index is not planned
+        ASSERT_TRUE(env->reader()->_page_cache_io_spans(false, &planned.stream) == nullptr);
+        ASSERT_TRUE(env->reader()->_page_cache_io_spans(true, nullptr) == nullptr);
+        ASSERT_TRUE(env->reader()->_page_cache_io_spans(true, &not_planned.stream) == nullptr);
+        ASSERT_EQ(0, env->stats().page_cache_io_index_loads);
+        ASSERT_TRUE(env->reader()->_offset_index_ctx == nullptr);
+        ASSERT_EQ(0, inner->page_locations_calls);
+
+        // the index is planned: the column reads it once
+        auto* spans = env->reader()->_page_cache_io_spans(true, &planned.stream);
+        ASSERT_NO_FATAL_FAILURE(expect_spans(spans, {{100, 50}, {150, 50}}));
+        ASSERT_EQ(1, env->stats().page_cache_io_index_loads);
+        // the page reader of the chunk gets the sizes of the pages, so a header read stays inside its page
+        ASSERT_EQ(1, inner->page_locations_calls);
+        ASSERT_EQ(&env->reader()->_offset_index_ctx->offset_index.page_locations, inner->page_locations);
+        ASSERT_EQ(spans, env->reader()->_page_cache_io_spans(false, nullptr));
+        ASSERT_EQ(spans, env->reader()->_page_cache_io_spans(true, &planned.stream));
+        ASSERT_EQ(1, env->stats().page_cache_io_index_loads);
+        ASSERT_EQ(1, inner->page_locations_calls);
+    }
+    // the bytes before the first page of the index are the dictionary page
+    {
+        auto env = make_env(true);
+        auto* spans = env->reader()->_page_cache_io_spans(true, &planned.stream);
+        ASSERT_NO_FATAL_FAILURE(expect_spans(spans, {{60, 40}, {100, 50}, {150, 50}}));
+    }
+    // a column that holds its offset index already answers from it, with no read and no stream
+    {
+        auto env = make_env(false);
+        ASSERT_TRUE(env->reader()->get_offset_index(0).ok());
+        auto* spans = env->reader()->_page_cache_io_spans(false, nullptr);
+        ASSERT_NO_FATAL_FAILURE(expect_spans(spans, {{100, 50}, {150, 50}}));
+        ASSERT_EQ(0, env->stats().page_cache_io_index_loads);
+    }
+    // an index that does not fit the chunk is not used, and it is not read again
+    {
+        auto env = make_env(false);
+        env->chunk()->meta_data.data_page_offset = 101;
+        env->chunk()->meta_data.total_compressed_size = 99;
+        ASSERT_TRUE(env->reader()->_page_cache_io_spans(true, &planned.stream) == nullptr);
+        ASSERT_EQ(1, env->stats().page_cache_io_index_loads);
+        ASSERT_TRUE(env->reader()->_page_cache_io_spans(true, &planned.stream) == nullptr);
+        ASSERT_TRUE(env->reader()->_page_cache_io_spans(false, nullptr) == nullptr);
+        ASSERT_EQ(1, env->stats().page_cache_io_index_loads);
+    }
+    // an index that is not valid, and a chunk without an index
+    {
+        PageIndexFile bad = make_page_index_file(
+                make_column_index(2, 2, 2),
+                make_offset_index({make_page_location(100, 50, 0), make_page_location(150, 50, 0)}));
+        PlannedOffsetIndexStream bad_stream(bad);
+        IndexEnv env(bad.bytes);
+        env.set_page_index(0, bad.column_index_length, bad.column_index_length, bad.offset_index_length);
+        env.set_row_group_rows(10);
+        env.chunk()->meta_data.data_page_offset = 100;
+        env.chunk()->meta_data.total_compressed_size = 100;
+        ASSERT_TRUE(env.reader()->_page_cache_io_spans(true, &bad_stream.stream) == nullptr);
+        ASSERT_TRUE(env.reader()->_page_cache_io_spans(true, &bad_stream.stream) == nullptr);
+        // the read failed, and a read that failed is not a load
+        ASSERT_EQ(0, env.stats().page_cache_io_index_loads);
+
+        IndexEnv no_index(file.bytes);
+        ASSERT_TRUE(no_index.reader()->_page_cache_io_spans(true, &planned.stream) == nullptr);
+        ASSERT_EQ(0, no_index.stats().page_cache_io_index_loads);
+    }
+}
+
+// The planner gets a chunk from each column that reads one: the bytes of the chunk, and the pages through the column.
+TEST_F(PageIndexTest, ColumnCollectsItsChunkForTheFileReaderPlanner) {
+    PageIndexFile file = make_page_index_file(make_column_index(2, 2, 2), make_offset_index(contiguous_pages()));
+    PlannedOffsetIndexStream planned(file);
+    IndexEnv env(file.bytes);
+    env.set_page_index(0, file.column_index_length, file.column_index_length, file.offset_index_length);
+    env.set_row_group_rows(10);
+    env.chunk()->meta_data.data_page_offset = 100;
+    env.chunk()->meta_data.total_compressed_size = 100;
+
+    std::vector<PageCacheIoChunk> chunks;
+    env.reader()->collect_page_cache_io_chunks(&planned.stream, &chunks);
+    ASSERT_EQ(1U, chunks.size());
+    ASSERT_EQ(100, chunks[0].begin);
+    ASSERT_EQ(200, chunks[0].end);
+    ASSERT_TRUE(chunks[0].pages(false) == nullptr);
+    const std::vector<PageSpan>* spans = chunks[0].pages(true);
+    ASSERT_TRUE(spans != nullptr);
+    ASSERT_EQ(2U, spans->size());
+
+    // the chunk begins at its dictionary page
+    chunks.clear();
+    env.chunk()->meta_data.__set_dictionary_page_offset(60);
+    env.chunk()->meta_data.total_compressed_size = 140;
+    env.reader()->collect_page_cache_io_chunks(&planned.stream, &chunks);
+    ASSERT_EQ(1U, chunks.size());
+    ASSERT_EQ(60, chunks[0].begin);
+    ASSERT_EQ(200, chunks[0].end);
+
+    // a chunk without bytes is not collected
+    chunks.clear();
+    env.chunk()->meta_data.total_compressed_size = 0;
+    env.reader()->collect_page_cache_io_chunks(&planned.stream, &chunks);
+    ASSERT_TRUE(chunks.empty());
 }
 
 // A predicate keeps nine rows of one page of a file with pages of 1000 values. The page index does not narrow the

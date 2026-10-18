@@ -162,6 +162,10 @@ bool StoragePageCache::lookup(const std::string& key, PageCacheHandle* handle) {
     return true;
 }
 
+bool StoragePageCache::contains(const std::string& key) const {
+    return _cache->contains(key);
+}
+
 Status StoragePageCache::insert(const std::string& key, std::vector<uint8_t>* data, const MemCacheWriteOptions& opts,
                                 PageCacheHandle* handle) {
 #ifndef BE_TEST

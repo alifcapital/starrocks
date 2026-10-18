@@ -16,17 +16,27 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <functional>
 #include <iostream>
 #include <limits>
+#include <memory>
+#include <string>
 #include <tuple>
 #include <utility>
 #include <vector>
 
+#include "cache/cache_options.h"
+#include "cache/datacache.h"
+#include "cache/mem_cache/lrucache_engine.h"
+#include "cache/mem_cache/page_cache.h"
 #include "column/column_helper.h"
+#include "common/config.h"
 #include "exec/hdfs_scanner/hdfs_scanner.h"
 #include "formats/parquet/column_chunk_reader.h"
 #include "formats/parquet/column_reader.h"
 #include "formats/parquet/metadata.h"
+#include "formats/parquet/page_cache_io_planner.h"
 #include "formats/parquet/parquet_test_util/recording_input_stream.h"
 #include "formats/parquet/schema.h"
 #include "formats/parquet/stored_column_reader.h"
@@ -35,6 +45,7 @@
 #include "io/shared_buffered_input_stream.h"
 #include "io/string_input_stream.h"
 #include "runtime/types.h"
+#include "testutil/assert.h"
 #include "util/thrift_util.h"
 namespace starrocks::parquet {
 
@@ -577,6 +588,286 @@ TEST_F(ParquetColumnChunkReaderTest, ChunkTypeDiffersFromSchema) {
     Status st = StoredColumnReader::create(opts, &field, &chunk, &reader);
     ASSERT_TRUE(st.ok()) << st.to_string();
     ASSERT_TRUE(reader != nullptr);
+}
+
+// A column chunk of six data pages A to F, each a header and a body of its own letter, read twice through a page reader
+// that uses the page cache. The first read fills the page cache. Before the second read the page cache loses some of
+// the pages, and the shared buffer of the stream loads only the runs of these pages, when the planner of the page cache
+// aware IO is on.
+class ParquetPageCacheIoTest : public testing::Test {
+public:
+    static constexpr int kPages = 6;
+    static constexpr size_t kBodySize = 4000;
+    static constexpr const char* kFileName = "page-cache-io-file";
+    static constexpr int64_t kModificationTime = 1000;
+
+    void SetUp() override {
+        _saved_distance = config::io_coalesce_read_max_distance_size;
+        _saved_enable = config::parquet_page_cache_aware_io_enable;
+        // the runs of pages are far smaller than the default distance, so we make every cached page a gap
+        config::io_coalesce_read_max_distance_size = 0;
+        config::parquet_page_cache_aware_io_enable = true;
+
+        MemCacheOptions options{.mem_space_size = 100 * 1024 * 1024};
+        _engine = std::make_shared<LRUCacheEngine>();
+        ASSERT_OK(_engine->init(options));
+        _page_cache = std::make_shared<StoragePageCache>(_engine.get());
+        _prev_page_cache = DataCache::GetInstance()->page_cache_ptr();
+        DataCache::GetInstance()->set_page_cache(_page_cache);
+
+        for (int i = 0; i < kPages; ++i) {
+            auto header = make_data_page_header(10);
+            header.compressed_page_size = kBodySize;
+            header.uncompressed_page_size = kBodySize;
+            std::string page = make_page(header, kBodySize);
+            std::fill(page.end() - kBodySize, page.end(), static_cast<char>('a' + i));
+            tparquet::PageLocation location;
+            location.offset = _chunk.size();
+            location.compressed_page_size = page.size();
+            location.first_row_index = i * 10;
+            _locations.push_back(location);
+            _spans.push_back(PageSpan{location.offset, location.compressed_page_size});
+            _chunk += page;
+        }
+
+        _file = std::make_unique<RandomAccessFile>(std::make_shared<io::StringInputStream>(std::string(_chunk)),
+                                                   kFileName);
+        _opts.stats = &_stats;
+        _opts.file = _file.get();
+        _opts.file_meta_data = &_file_meta;
+        _opts.use_file_pagecache = true;
+        _opts.modification_time = kModificationTime;
+        _opts.file_size = _chunk.size();
+        _opts.datacache_options = &_datacache_options;
+    }
+
+    void TearDown() override {
+        config::io_coalesce_read_max_distance_size = _saved_distance;
+        config::parquet_page_cache_aware_io_enable = _saved_enable;
+        DataCache::GetInstance()->set_page_cache(_prev_page_cache);
+    }
+
+protected:
+    // A shared stream over a recording copy of the chunk.
+    struct Scan {
+        std::shared_ptr<RecordingInputStream> remote;
+        std::unique_ptr<io::SharedBufferedInputStream> stream;
+        std::unique_ptr<PageCacheIoPlanner> planner;
+    };
+
+    // With a planner the stream does not load the pages that the page cache holds. has_layout: the column of the chunk
+    // knows the pages of the chunk.
+    void open_scan(Scan* scan, bool with_planner, bool has_layout = true) {
+        scan->remote = std::make_shared<RecordingInputStream>(_chunk);
+        scan->stream = std::make_unique<io::SharedBufferedInputStream>(scan->remote, kFileName, _chunk.size());
+        ASSERT_OK(scan->stream->set_io_ranges({io::SharedBufferedInputStream::IORange(0, _chunk.size())}));
+        if (with_planner) {
+            scan->planner = std::make_unique<PageCacheIoPlanner>(
+                    _page_cache.get(),
+                    ParquetUtils::get_file_cache_key(CacheType::PAGE, kFileName, kModificationTime, _chunk.size()));
+            PageCacheIoChunk chunk;
+            chunk.begin = 0;
+            chunk.end = _chunk.size();
+            chunk.pages = [this, has_layout](bool) { return has_layout ? &_spans : nullptr; };
+            scan->planner->add_chunk(chunk);
+            scan->stream->set_skip_ranges_provider(scan->planner.get());
+        }
+    }
+
+    // Reads the pages of the chunk one after the other, as the column reader does, and checks the bytes of each page.
+    // before_page(i) runs before the page i is read.
+    void read_pages(io::SeekableInputStream* stream, const std::function<void(int)>& before_page = nullptr,
+                    bool with_page_sizes = true) {
+        PageReader reader(stream, 0, _chunk.size(), kPages * 10, _opts, tparquet::CompressionCodec::UNCOMPRESSED);
+        if (with_page_sizes) {
+            reader.set_page_locations(&_locations);
+        }
+        for (int i = 0; i < kPages; ++i) {
+            if (before_page) {
+                before_page(i);
+            }
+            ASSERT_OK(reader.next_header());
+            auto data = reader.read_and_decompress_page_data();
+            ASSERT_OK(data.status());
+            ASSERT_EQ(std::string(kBodySize, static_cast<char>('a' + i)),
+                      std::string(data.value().data, data.value().size))
+                    << "page " << i;
+            if (i + 1 < kPages) {
+                ASSERT_OK(reader.next_page());
+            }
+        }
+    }
+
+    std::string key_of(int page) const {
+        std::string key = PageReader::make_page_cache_key(
+                ParquetUtils::get_file_cache_key(CacheType::PAGE, kFileName, kModificationTime, _chunk.size()));
+        PageReader::set_page_cache_key_offset(&key, _locations[page].offset);
+        return key;
+    }
+
+    // [begin, end) of the page in the file.
+    std::pair<int64_t, int64_t> page_range(int page) const {
+        return {_spans[page].offset, _spans[page].offset + _spans[page].size};
+    }
+
+    // The first read: it fills the page cache with every page, with one request for the chunk.
+    void fill_page_cache() {
+        Scan scan;
+        ASSERT_NO_FATAL_FAILURE(open_scan(&scan, false));
+        ASSERT_NO_FATAL_FAILURE(read_pages(scan.stream.get()));
+        ASSERT_EQ(1u, scan.remote->ranges().size());
+        ASSERT_EQ(0, _stats.page_cache_read_counter);
+        ASSERT_EQ(kPages, _stats.page_cache_write_counter);
+        _stats = HdfsScannerStats();
+    }
+
+    // The page cache loses the pages.
+    void lose_pages(const std::vector<int>& pages) {
+        for (int page : pages) {
+            ASSERT_OK(_engine->remove(key_of(page)));
+        }
+    }
+
+    std::shared_ptr<LRUCacheEngine> _engine;
+    std::shared_ptr<StoragePageCache> _page_cache;
+    std::shared_ptr<StoragePageCache> _prev_page_cache;
+    std::string _chunk;
+    std::vector<tparquet::PageLocation> _locations;
+    std::vector<PageSpan> _spans;
+    std::unique_ptr<RandomAccessFile> _file;
+    HdfsScannerStats _stats;
+    FileMetaData _file_meta;
+    DataCacheOptions _datacache_options;
+    ColumnReaderOptions _opts;
+    int32_t _saved_distance = 0;
+    bool _saved_enable = true;
+};
+
+// The page cache holds B, C and E when the chunk is read again. The pages A, D and F are loaded with one request each,
+// and the cached pages are not downloaded. The bytes of every page are the same as in the first read.
+TEST_F(ParquetPageCacheIoTest, SecondReadLoadsOnlyThePagesThatThePageCacheMisses) {
+    ASSERT_NO_FATAL_FAILURE(fill_page_cache());
+    ASSERT_NO_FATAL_FAILURE(lose_pages({0, 3, 5}));
+
+    Scan scan;
+    ASSERT_NO_FATAL_FAILURE(open_scan(&scan, true));
+    ASSERT_NO_FATAL_FAILURE(read_pages(scan.stream.get()));
+    using Ranges = std::vector<std::pair<int64_t, int64_t>>;
+    ASSERT_EQ((Ranges{page_range(0), page_range(3), page_range(5)}), scan.remote->ranges());
+    ASSERT_EQ(3, _stats.page_cache_read_counter);
+    ASSERT_EQ(3, _stats.page_cache_write_counter);
+    ASSERT_EQ(3 * static_cast<int64_t>(_spans[0].size), scan.stream->skip_ranges_bytes());
+    ASSERT_EQ(1, scan.stream->skip_ranges_split_count());
+    ASSERT_EQ(3, scan.stream->shared_io_count());
+    ASSERT_EQ(3 * static_cast<int64_t>(_spans[0].size), scan.stream->shared_io_bytes());
+    ASSERT_EQ(0, scan.stream->direct_io_count());
+}
+
+// With the config off the first miss loads the whole chunk, as before.
+TEST_F(ParquetPageCacheIoTest, ConfigOffLoadsTheWholeChunk) {
+    ASSERT_NO_FATAL_FAILURE(fill_page_cache());
+    ASSERT_NO_FATAL_FAILURE(lose_pages({0, 3, 5}));
+
+    config::parquet_page_cache_aware_io_enable = false;
+    Scan scan;
+    ASSERT_NO_FATAL_FAILURE(open_scan(&scan, true));
+    ASSERT_NO_FATAL_FAILURE(read_pages(scan.stream.get()));
+    ASSERT_EQ(1u, scan.remote->ranges().size());
+    ASSERT_EQ(0, scan.remote->ranges()[0].first);
+    ASSERT_EQ(static_cast<int64_t>(_chunk.size()), scan.remote->ranges()[0].second);
+    ASSERT_EQ(3, _stats.page_cache_read_counter);
+    ASSERT_EQ(0, scan.stream->skip_ranges_bytes());
+    ASSERT_EQ(0, scan.stream->skip_ranges_split_count());
+}
+
+// A column that does not know the pages of its chunk is read as before.
+TEST_F(ParquetPageCacheIoTest, ChunkWithoutPagesLoadsTheWholeChunk) {
+    ASSERT_NO_FATAL_FAILURE(fill_page_cache());
+    ASSERT_NO_FATAL_FAILURE(lose_pages({0, 3, 5}));
+
+    Scan scan;
+    ASSERT_NO_FATAL_FAILURE(open_scan(&scan, true, false));
+    ASSERT_NO_FATAL_FAILURE(read_pages(scan.stream.get()));
+    ASSERT_EQ(1u, scan.remote->ranges().size());
+    ASSERT_EQ(3, _stats.page_cache_read_counter);
+    ASSERT_EQ(0, scan.stream->skip_ranges_split_count());
+}
+
+// The page cache can lose a page after the planner looked at it. The page is not in a buffer, but it lies in a cut
+// span, so the reader gets it with one request for the rest of the span, and the bytes are right.
+TEST_F(ParquetPageCacheIoTest, PageThatTheCacheLostAfterThePlanIsReadWithItsSpan) {
+    ASSERT_NO_FATAL_FAILURE(fill_page_cache());
+    ASSERT_NO_FATAL_FAILURE(lose_pages({0, 3, 5}));
+
+    Scan scan;
+    ASSERT_NO_FATAL_FAILURE(open_scan(&scan, true));
+    // The first read of the chunk plans its buffer, which cuts the pages B, C and E out. Then the cache loses C.
+    ASSERT_NO_FATAL_FAILURE(read_pages(scan.stream.get(), [&](int page) {
+        if (page == 2) {
+            ASSERT_OK(_engine->remove(key_of(2)));
+        }
+    }));
+    // C missed the page cache, so it was read from the file with one request, and B and E were not
+    ASSERT_EQ(2, _stats.page_cache_read_counter);
+    ASSERT_EQ(0, scan.stream->direct_io_count());
+    ASSERT_EQ(1, scan.stream->skip_ranges_recover_count());
+    ASSERT_EQ(page_range(2).second - page_range(2).first, scan.stream->skip_ranges_recover_bytes());
+    ASSERT_TRUE(scan.remote->touched(page_range(2).first, page_range(2).second));
+    ASSERT_FALSE(scan.remote->touched(page_range(1).first, page_range(1).second));
+    ASSERT_FALSE(scan.remote->touched(page_range(4).first, page_range(4).second));
+    ASSERT_TRUE(scan.remote->touched(page_range(0).first, page_range(0).second));
+    ASSERT_TRUE(scan.remote->touched(page_range(3).first, page_range(3).second));
+    ASSERT_TRUE(scan.remote->touched(page_range(5).first, page_range(5).second));
+}
+
+// The page cache loses B and C, which the planner cut out together. The header and the body of B and of C cost four
+// reads without the recovery, and cost one request for the two pages with it.
+TEST_F(ParquetPageCacheIoTest, PagesOfOneSpanThatTheCacheLostAreReadWithOneRequest) {
+    ASSERT_NO_FATAL_FAILURE(fill_page_cache());
+    ASSERT_NO_FATAL_FAILURE(lose_pages({0, 3, 5}));
+
+    Scan scan;
+    ASSERT_NO_FATAL_FAILURE(open_scan(&scan, true));
+    ASSERT_NO_FATAL_FAILURE(read_pages(scan.stream.get(), [&](int page) {
+        if (page == 1) {
+            ASSERT_OK(_engine->remove(key_of(1)));
+            ASSERT_OK(_engine->remove(key_of(2)));
+        }
+    }));
+    // only E came from the page cache
+    ASSERT_EQ(1, _stats.page_cache_read_counter);
+    ASSERT_EQ(0, scan.stream->direct_io_count());
+    ASSERT_EQ(1, scan.stream->skip_ranges_recover_count());
+    ASSERT_EQ(page_range(2).second - page_range(1).first, scan.stream->skip_ranges_recover_bytes());
+    // the runs A, D and F, and the span of B and C
+    ASSERT_EQ(4, scan.stream->shared_io_count());
+    ASSERT_FALSE(scan.remote->touched(page_range(4).first, page_range(4).second));
+}
+
+// A reader that does not know the sizes of the pages reads the header of a page with the default size, which is larger
+// than a page here, so the read reaches into the pages that the stream cut out. Such a read is direct, and every page
+// still has the right bytes. This is why the column gives the sizes of the pages to its page reader.
+TEST_F(ParquetPageCacheIoTest, ReaderWithoutPageSizesStillReadsRightBytes) {
+    ASSERT_NO_FATAL_FAILURE(fill_page_cache());
+    ASSERT_NO_FATAL_FAILURE(lose_pages({0, 3, 5}));
+
+    Scan scan;
+    ASSERT_NO_FATAL_FAILURE(open_scan(&scan, true));
+    ASSERT_NO_FATAL_FAILURE(read_pages(scan.stream.get(), nullptr, false));
+    ASSERT_EQ(3, _stats.page_cache_read_counter);
+    ASSERT_GE(scan.stream->direct_io_count(), 1);
+}
+
+// A page cache that holds every page: no page is read from the file at all.
+TEST_F(ParquetPageCacheIoTest, PageCacheThatHoldsEveryPageReadsNothing) {
+    ASSERT_NO_FATAL_FAILURE(fill_page_cache());
+
+    Scan scan;
+    ASSERT_NO_FATAL_FAILURE(open_scan(&scan, true));
+    ASSERT_NO_FATAL_FAILURE(read_pages(scan.stream.get()));
+    ASSERT_TRUE(scan.remote->ranges().empty());
+    ASSERT_EQ(kPages, _stats.page_cache_read_counter);
+    ASSERT_EQ(0, scan.stream->shared_io_count());
 }
 
 } // namespace starrocks::parquet

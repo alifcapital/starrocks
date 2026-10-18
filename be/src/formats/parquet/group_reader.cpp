@@ -26,6 +26,7 @@
 #include <utility>
 
 #include "agent/master_info.h"
+#include "cache/datacache.h"
 #include "column/chunk.h"
 #include "column/column_helper.h"
 #include "column/column_viewer.h"
@@ -73,6 +74,11 @@ GroupReader::GroupReader(GroupReaderParam& param, int row_group_number, SkipRows
 
 GroupReader::~GroupReader() {
     if (_param.sb_stream) {
+        // The stream may have been given to another row group already.
+        if (_page_cache_io_planner != nullptr &&
+            _param.sb_stream->skip_ranges_provider() == _page_cache_io_planner.get()) {
+            _param.sb_stream->set_skip_ranges_provider(nullptr);
+        }
         _param.sb_stream->release_to_offset(_end_offset);
     }
     // If GroupReader is filtered by statistics, it's _has_prepared = false
@@ -148,6 +154,7 @@ Status GroupReader::prepare() {
         }
         _set_end_offset(end_offset);
         RETURN_IF_ERROR(_param.sb_stream->set_io_ranges(ranges, coalesce_lazy));
+        _setup_page_cache_io();
     }
 
     RETURN_IF_ERROR(_column_materializer->rewrite_dict_conjuncts_to_predicate(&_is_group_filtered));
@@ -1122,6 +1129,32 @@ Status GroupReader::_prepare_column_readers() const {
         }
     }
     return Status::OK();
+}
+
+void GroupReader::_setup_page_cache_io() {
+    if (!config::parquet_page_cache_aware_io_enable || _param.scanner_ctx == nullptr || _param.file == nullptr ||
+        !_param.scanner_ctx->options.use_file_pagecache || _page_cache_io_planner != nullptr) {
+        return;
+    }
+    StoragePageCache* page_cache = DataCache::GetInstance()->page_cache();
+    if (page_cache == nullptr) {
+        return;
+    }
+    std::vector<PageCacheIoChunk> chunks;
+    for (const auto& [slot_id, column_reader] : _column_readers) {
+        column_reader->collect_page_cache_io_chunks(_param.sb_stream, &chunks);
+    }
+    if (chunks.empty()) {
+        return;
+    }
+    // The page reader builds the key of the file from the same values.
+    _page_cache_io_planner = std::make_unique<PageCacheIoPlanner>(
+            page_cache, ParquetUtils::get_file_cache_key(CacheType::PAGE, _param.file->filename(),
+                                                         _param.modification_time, _param.file_size));
+    for (PageCacheIoChunk& chunk : chunks) {
+        _page_cache_io_planner->add_chunk(std::move(chunk));
+    }
+    _param.sb_stream->set_skip_ranges_provider(_page_cache_io_planner.get());
 }
 
 void GroupReader::_process_columns_and_conjunct_ctxs() {

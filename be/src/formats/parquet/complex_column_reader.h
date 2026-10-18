@@ -47,6 +47,11 @@ public:
         _element_reader->collect_column_io_range(ranges, end_offset, types, active);
     }
 
+    void collect_page_cache_io_chunks(io::SharedBufferedInputStream* stream,
+                                      std::vector<PageCacheIoChunk>* chunks) override {
+        _element_reader->collect_page_cache_io_chunks(stream, chunks);
+    }
+
     void select_offset_index(const SparseRange<uint64_t>& range, const uint64_t rg_first_row) override {
         _element_reader->select_offset_index(range, rg_first_row);
     }
@@ -110,6 +115,16 @@ public:
         }
         if (_value_reader != nullptr) {
             _value_reader->collect_column_io_range(ranges, end_offset, types, active);
+        }
+    }
+
+    void collect_page_cache_io_chunks(io::SharedBufferedInputStream* stream,
+                                      std::vector<PageCacheIoChunk>* chunks) override {
+        if (_key_reader != nullptr) {
+            _key_reader->collect_page_cache_io_chunks(stream, chunks);
+        }
+        if (_value_reader != nullptr) {
+            _value_reader->collect_page_cache_io_chunks(stream, chunks);
         }
     }
 
@@ -212,6 +227,15 @@ public:
         }
     }
 
+    void collect_page_cache_io_chunks(io::SharedBufferedInputStream* stream,
+                                      std::vector<PageCacheIoChunk>* chunks) override {
+        for (const auto& pair : _child_readers) {
+            if (pair.second != nullptr) {
+                pair.second->collect_page_cache_io_chunks(stream, chunks);
+            }
+        }
+    }
+
     void select_offset_index(const SparseRange<uint64_t>& range, const uint64_t rg_first_row) override {
         for (const auto& pair : _child_readers) {
             if (pair.second != nullptr) {
@@ -307,6 +331,16 @@ public:
         }
         if (_value_reader != nullptr) {
             _value_reader->collect_column_io_range(ranges, end_offset, types, active);
+        }
+    }
+
+    void collect_page_cache_io_chunks(io::SharedBufferedInputStream* stream,
+                                      std::vector<PageCacheIoChunk>* chunks) override {
+        if (_metadata_reader != nullptr) {
+            _metadata_reader->collect_page_cache_io_chunks(stream, chunks);
+        }
+        if (_value_reader != nullptr) {
+            _value_reader->collect_page_cache_io_chunks(stream, chunks);
         }
     }
 

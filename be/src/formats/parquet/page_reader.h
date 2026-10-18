@@ -17,6 +17,7 @@
 #include <stddef.h>
 
 #include <cstdint>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -44,6 +45,14 @@ public:
                const ColumnReaderOptions& opts, const tparquet::CompressionCodec::type codec);
 
     ~PageReader() = default;
+
+    // The page cache holds a page under the key of its file (ParquetUtils::get_file_cache_key) followed by the offset
+    // of the page in the file. Whoever looks pages up without a PageReader, for example to find the pages that the page
+    // cache holds before a read, builds the keys with these two functions, so the keys are the same.
+    static constexpr size_t kPageCacheFileKeySize = 14;
+    // The key of the page at the offset 0. `file_key` is the key of the file.
+    static std::string make_page_cache_key(const std::string& file_key);
+    static void set_page_cache_key_offset(std::string* key, uint64_t page_offset);
 
     // Try to parse header starts from current _offset. Caller should assure that
     // _offset locates at the start of page header. If _offset doesn't locate the

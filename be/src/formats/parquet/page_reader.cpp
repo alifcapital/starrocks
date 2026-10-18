@@ -298,17 +298,24 @@ StatusOr<std::string_view> PageReader::_peek(size_t size) {
     return ret;
 }
 
+std::string PageReader::make_page_cache_key(const std::string& file_key) {
+    std::string key = file_key;
+    key.resize(kPageCacheFileKeySize + sizeof(uint64_t));
+    return key;
+}
+
+void PageReader::set_page_cache_key_offset(std::string* key, uint64_t page_offset) {
+    memcpy(key->data() + kPageCacheFileKeySize, &page_offset, sizeof(page_offset));
+}
+
 void PageReader::_init_page_cache_key() {
     auto& filename = _opts.file->filename();
-    std::string key =
-            ParquetUtils::get_file_cache_key(CacheType::PAGE, filename, _opts.modification_time, _opts.file_size);
-    _page_cache_key.resize(22);
-    char* data = _page_cache_key.data();
-    memcpy(data, key.data(), key.size());
+    _page_cache_key = make_page_cache_key(
+            ParquetUtils::get_file_cache_key(CacheType::PAGE, filename, _opts.modification_time, _opts.file_size));
 }
 
 std::string& PageReader::_current_page_cache_key() {
-    memcpy(_page_cache_key.data() + 14, &_offset, sizeof(_offset));
+    set_page_cache_key_offset(&_page_cache_key, _offset);
     return _page_cache_key;
 }
 

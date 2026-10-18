@@ -245,6 +245,11 @@ Cache::Handle* LRUCache::lookup(const CacheKey& key, uint32_t hash) {
     return reinterpret_cast<Cache::Handle*>(e);
 }
 
+bool LRUCache::contains(const CacheKey& key, uint32_t hash) {
+    std::lock_guard l(_mutex);
+    return _table.lookup(key, hash) != nullptr;
+}
+
 void LRUCache::release(Cache::Handle* handle) {
     if (handle == nullptr) {
         return;
@@ -568,6 +573,11 @@ bool ShardedLRUCache::update_charge_if(const CacheKey& key, size_t new_value_siz
 Cache::Handle* ShardedLRUCache::lookup(const CacheKey& key) {
     const uint32_t hash = _hash_slice(key);
     return _shards[_shard(hash)].lookup(key, hash);
+}
+
+bool ShardedLRUCache::contains(const CacheKey& key) {
+    const uint32_t hash = _hash_slice(key);
+    return _shards[_shard(hash)].contains(key, hash);
 }
 
 void ShardedLRUCache::release(Handle* handle) {

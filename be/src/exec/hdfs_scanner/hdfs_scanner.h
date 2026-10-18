@@ -138,6 +138,11 @@ struct HdfsScannerStats {
     // given up on them (OffsetIndexSkipAdvisor).
     int64_t offset_index_skip_loads = 0;
     int64_t offset_index_skip_given_up = 0;
+    // The offset indexes that columns read for the page cache aware IO, because the page cache held a page of a chunk
+    // of the row group whose offset the footer gives. Only the reads that succeeded count, and a column that held its
+    // offset index already does not count. The time is the time of these reads, failed ones too.
+    int64_t page_cache_io_index_loads = 0;
+    int64_t page_cache_io_index_load_ns = 0;
     // page index
     int64_t rows_before_page_index = 0;
     int64_t page_index_ns = 0;
@@ -245,6 +250,13 @@ struct HdfsScannerProfile {
     RuntimeProfile::Counter* shared_buffered_large_io_count = nullptr;
     RuntimeProfile::Counter* shared_buffered_large_io_bytes = nullptr;
     RuntimeProfile::Counter* shared_buffered_large_used_bytes = nullptr;
+    RuntimeProfile::Counter* shared_buffered_page_cache_skip_bytes = nullptr;
+    RuntimeProfile::Counter* shared_buffered_page_cache_named_bytes = nullptr;
+    RuntimeProfile::Counter* shared_buffered_page_cache_split_count = nullptr;
+    RuntimeProfile::Counter* shared_buffered_page_cache_plan_count = nullptr;
+    RuntimeProfile::Counter* shared_buffered_page_cache_plan_timer = nullptr;
+    RuntimeProfile::Counter* shared_buffered_page_cache_recover_count = nullptr;
+    RuntimeProfile::Counter* shared_buffered_page_cache_recover_bytes = nullptr;
     RuntimeProfile::Counter* shared_buffered_direct_io_count = nullptr;
     RuntimeProfile::Counter* shared_buffered_direct_io_bytes = nullptr;
     RuntimeProfile::Counter* shared_buffered_direct_io_timer = nullptr;

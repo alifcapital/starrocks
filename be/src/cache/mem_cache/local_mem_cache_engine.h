@@ -78,7 +78,15 @@ public:
     // The handle must have not been released yet.
     virtual const void* value(MemCacheHandlePtr handle) = 0;
 
+    // Look the key up and release the handle at once. This is a counted lookup: it counts a lookup and a hit, it moves
+    // the entry to the newest end of the LRU list, and when the shard is over its capacity at that release, the
+    // release erases the entry that the call reports as present.
     virtual bool exist(const std::string& key) const = 0;
+
+    // Return true if the cache holds the key. A caller that only probes should call this and not exist(): it takes
+    // no handle, so there is no release that can erase the entry, it counts no lookup and no hit, and it does not
+    // refresh the recency of the entry.
+    virtual bool contains(const std::string& key) const = 0;
 
     // Remove data from cache.
     virtual Status remove(const std::string& key) = 0;

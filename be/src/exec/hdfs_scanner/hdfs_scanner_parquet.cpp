@@ -113,6 +113,8 @@ void HdfsParquetScanner::do_update_counter(HdfsScannerProfile* profile) {
     RuntimeProfile::Counter* page_skip_by_offset_index_undecoded_bytes = nullptr;
     RuntimeProfile::Counter* offset_index_skip_loads = nullptr;
     RuntimeProfile::Counter* offset_index_skip_given_up = nullptr;
+    RuntimeProfile::Counter* page_cache_io_index_loads = nullptr;
+    RuntimeProfile::Counter* page_cache_io_index_load_timer = nullptr;
     // round-by-round
     RuntimeProfile::Counter* group_min_round_cost = nullptr;
     // page index
@@ -195,6 +197,9 @@ void HdfsParquetScanner::do_update_counter(HdfsScannerProfile* profile) {
             ADD_CHILD_COUNTER(root, "OffsetIndexSkipLoadCounter", TUnit::UNIT, kParquetProfileSectionPrefix);
     offset_index_skip_given_up =
             ADD_CHILD_COUNTER(root, "OffsetIndexSkipGivenUpCounter", TUnit::UNIT, kParquetProfileSectionPrefix);
+    page_cache_io_index_loads =
+            ADD_CHILD_COUNTER(root, "PageCacheIOIndexLoadCounter", TUnit::UNIT, kParquetProfileSectionPrefix);
+    page_cache_io_index_load_timer = ADD_CHILD_TIMER(root, "PageCacheIOIndexLoadTime", kParquetProfileSectionPrefix);
     group_min_round_cost = root->AddLowWaterMarkCounter(
             "GroupMinRound", TUnit::UNIT, RuntimeProfile::Counter::create_strategy(TCounterAggregateType::AVG),
             kParquetProfileSectionPrefix);
@@ -260,6 +265,8 @@ void HdfsParquetScanner::do_update_counter(HdfsScannerProfile* profile) {
     COUNTER_UPDATE(page_skip_by_offset_index_undecoded_bytes, _app_stats.page_skip_by_offset_index_undecoded_bytes);
     COUNTER_UPDATE(offset_index_skip_loads, _app_stats.offset_index_skip_loads);
     COUNTER_UPDATE(offset_index_skip_given_up, _app_stats.offset_index_skip_given_up);
+    COUNTER_UPDATE(page_cache_io_index_loads, _app_stats.page_cache_io_index_loads);
+    COUNTER_UPDATE(page_cache_io_index_load_timer, _app_stats.page_cache_io_index_load_ns);
     COUNTER_SET(group_min_round_cost, _app_stats.group_min_round_cost);
     do_update_deletion_vector_filter_counter(root);
     COUNTER_UPDATE(rows_before_page_index, _app_stats.rows_before_page_index);

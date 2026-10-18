@@ -1279,6 +1279,12 @@ CONF_mInt64(parquet_compound_predicate_defer_min_observed_rows, "4096");
 CONF_mBool(parquet_reader_enable_adpative_bloom_filter, "true");
 CONF_Double(parquet_page_cache_decompress_threshold, "1.5");
 CONF_mBool(enable_adjustment_page_cache_skip, "true");
+// The page cache serves a page without a read of the stream, but a shared io buffer that holds a column chunk loads the
+// bytes of all its pages when the first page that misses the page cache is read. When this is true, the reader looks
+// in the page cache for the pages of such a buffer (it needs the offset index of the column) before the buffer is
+// loaded, and loads only the runs of pages that the page cache does not hold. Two runs with a gap of at most
+// io_coalesce_read_max_distance_size are still loaded with one request.
+CONF_mBool(parquet_page_cache_aware_io_enable, "true");
 
 CONF_mInt32(io_coalesce_read_max_buffer_size, "8388608");
 // The bytes that we accept to download in vain to save one request: two io ranges that are not farther apart than

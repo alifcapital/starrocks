@@ -298,8 +298,11 @@ void RawColumnReader::_enable_offset_index_skip() {
     }
     // We fear that the read of the offset index is wasted in every row group of a column that skips no page, so a
     // column that the scan has given up on does not read it. An index that the static page selection has already read
-    // costs nothing more, so the scan neither stops it nor counts it.
-    if (_offset_index_ctx == nullptr) {
+    // costs nothing more, so the scan neither stops it nor counts it. An index that the page cache planner has read is
+    // the same for the cost of this read, but the scan still has to learn from the column whether the skip pays, so the
+    // advice and the feedback work for it as for a column that reads the index here. Only a read here counts as a load
+    // for the skip.
+    if (_offset_index_ctx == nullptr || _offset_index_read_for_page_cache_io) {
         OffsetIndexSkipAdvisor* advisor = _opts.offset_index_skip_advisor;
         if (advisor != nullptr) {
             _skip_column = offset_index_feedback_key(get_chunk_metadata()->meta_data);
@@ -309,7 +312,9 @@ void RawColumnReader::_enable_offset_index_skip() {
             }
             _skip_advisor = advisor;
         }
-        _opts.stats->offset_index_skip_loads += 1;
+        if (_offset_index_ctx == nullptr) {
+            _opts.stats->offset_index_skip_loads += 1;
+        }
     }
     // The index is optional, so an error leaves the column on the path that reads page by page. get_offset_index()
     // logs an index that is not valid, and we ask only once.
@@ -407,6 +412,85 @@ bool RawColumnReader::_offset_index_fits_chunk() const {
         }
     }
     return true;
+}
+
+void RawColumnReader::collect_page_cache_io_chunks(io::SharedBufferedInputStream* stream,
+                                                   std::vector<PageCacheIoChunk>* chunks) {
+    const tparquet::ColumnMetaData& column_metadata = get_chunk_metadata()->meta_data;
+    PageCacheIoChunk chunk;
+    chunk.begin = column_metadata.__isset.dictionary_page_offset ? column_metadata.dictionary_page_offset
+                                                                 : column_metadata.data_page_offset;
+    if (chunk.begin < 0 || column_metadata.total_compressed_size <= 0) {
+        return;
+    }
+    chunk.end = chunk.begin + column_metadata.total_compressed_size;
+    if (column_metadata.__isset.dictionary_page_offset) {
+        chunk.first_data_page = column_metadata.data_page_offset;
+    }
+    chunk.pages = [this, stream](bool allow_load) { return _page_cache_io_spans(allow_load, stream); };
+    chunks->push_back(std::move(chunk));
+}
+
+bool RawColumnReader::_offset_index_is_planned(io::SharedBufferedInputStream* stream) const {
+    const tparquet::ColumnChunk& chunk = *get_chunk_metadata();
+    if (stream == nullptr || !chunk.__isset.offset_index_offset || !chunk.__isset.offset_index_length ||
+        chunk.offset_index_offset < 0 || chunk.offset_index_length <= 0) {
+        return false;
+    }
+    return stream->find_shared_buffer(chunk.offset_index_offset, chunk.offset_index_length).ok();
+}
+
+const std::vector<PageSpan>* RawColumnReader::_page_cache_io_spans(bool allow_load,
+                                                                   io::SharedBufferedInputStream* stream) {
+    if (_page_spans_state == PageSpansState::KNOWN) {
+        return &_page_spans;
+    }
+    if (_page_spans_state == PageSpansState::UNUSABLE) {
+        return nullptr;
+    }
+    if (_offset_index_ctx == nullptr) {
+        if (!allow_load || !_offset_index_is_planned(stream)) {
+            return nullptr;
+        }
+        // The index is optional, so an error leaves the column on the path that loads its chunk whole.
+        // get_offset_index() logs an index that is not valid, and we ask only once.
+        Status st;
+        {
+            SCOPED_RAW_TIMER(&_opts.stats->page_cache_io_index_load_ns);
+            st = get_offset_index(_opts.first_row_index).status();
+        }
+        if (!st.ok()) {
+            _page_spans_state = PageSpansState::UNUSABLE;
+            return nullptr;
+        }
+        _opts.stats->page_cache_io_index_loads += 1;
+        _offset_index_read_for_page_cache_io = true;
+    }
+    if (!_offset_index_fits_chunk()) {
+        _page_spans_state = PageSpansState::UNUSABLE;
+        return nullptr;
+    }
+
+    const tparquet::ColumnMetaData& column_metadata = get_chunk_metadata()->meta_data;
+    const int64_t chunk_start = column_metadata.__isset.dictionary_page_offset ? column_metadata.dictionary_page_offset
+                                                                               : column_metadata.data_page_offset;
+    const auto& pages = _offset_index_ctx->offset_index.page_locations;
+    _page_spans.reserve(pages.size() + 1);
+    // the bytes before the first data page are the dictionary page
+    if (pages.front().offset > chunk_start) {
+        _page_spans.push_back(PageSpan{chunk_start, pages.front().offset - chunk_start});
+    }
+    for (const tparquet::PageLocation& page : pages) {
+        _page_spans.push_back(PageSpan{page.offset, page.compressed_page_size});
+    }
+    _page_spans_state = PageSpansState::KNOWN;
+    // We fear that a page header read of the default size from a small page takes bytes of the next page, which the
+    // stream may have cut out because the page cache holds it, and then the read goes direct. So the page reader gets
+    // the sizes of the pages, and a header read stays inside its page.
+    if (_reader != nullptr) {
+        _reader->set_page_locations(&pages);
+    }
+    return &_page_spans;
 }
 
 bool RawColumnReader::column_all_pages_dict_encoded() const {

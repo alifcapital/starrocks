@@ -82,6 +82,10 @@ public:
 
     virtual void set_page_num(size_t page_num) {}
 
+    // The pages of the offset index of the chunk, which must outlive the reader. The page reader uses them to read a
+    // page header with no more bytes than its page has, whether the reader skips pages or not.
+    virtual void set_page_locations(const std::vector<tparquet::PageLocation>* page_locations) {}
+
     virtual void set_page_change_on_record_boundry() {}
 
     // A reader that supports offset index skipping, when it reads a range under a filter, finds the pages that hold
@@ -125,6 +129,10 @@ public:
     Status load_specific_page(size_t cur_page_idx, uint64_t offset, uint64_t first_row) override;
 
     void set_page_num(size_t page_num) override { _reader->set_page_num(page_num); }
+
+    void set_page_locations(const std::vector<tparquet::PageLocation>* page_locations) override {
+        _reader->set_page_locations(page_locations);
+    }
 
     bool supports_offset_index_skip() const override { return _can_skip_pages(); }
 

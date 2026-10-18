@@ -33,6 +33,9 @@ public:
     void collect_column_io_range(std::vector<io::SharedBufferedInputStream::IORange>* ranges, int64_t* end_offset,
                                  ColumnIOTypeFlags types, bool active) override;
 
+    void collect_page_cache_io_chunks(io::SharedBufferedInputStream* stream,
+                                      std::vector<PageCacheIoChunk>* chunks) override;
+
     void select_offset_index(const SparseRange<uint64_t>& range, const uint64_t rg_first_row) override;
 
 protected:

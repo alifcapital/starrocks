@@ -184,6 +184,30 @@ TEST_F(StoragePageCacheTest, normal) {
     }
 }
 
+// A probe of the page cache is not a lookup: it counts no lookup and no hit, and it takes no handle.
+TEST_F(StoragePageCacheTest, contains_is_not_counted) {
+    std::string key("abc0");
+    {
+        auto data = std::make_unique<std::vector<uint8_t>>(1024);
+        PageCacheHandle handle;
+        MemCacheWriteOptions opts;
+        ASSERT_OK(_page_cache->insert(key, data.get(), opts, &handle));
+        data.release();
+    }
+
+    ASSERT_EQ(0, _page_cache->get_lookup_count());
+    ASSERT_EQ(0, _page_cache->get_hit_count());
+    ASSERT_TRUE(_page_cache->contains(key));
+    ASSERT_FALSE(_page_cache->contains("def0"));
+    ASSERT_EQ(0, _page_cache->get_lookup_count());
+    ASSERT_EQ(0, _page_cache->get_hit_count());
+
+    PageCacheHandle handle;
+    ASSERT_TRUE(_page_cache->lookup(key, &handle));
+    ASSERT_EQ(1, _page_cache->get_lookup_count());
+    ASSERT_EQ(1, _page_cache->get_hit_count());
+}
+
 TEST_F(StoragePageCacheTest, metrics) {
     std::string key1("abc0");
     std::string key2("def0");

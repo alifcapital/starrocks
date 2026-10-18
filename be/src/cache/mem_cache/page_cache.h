@@ -88,6 +88,12 @@ public:
     // Return true if entry is found, otherwise return false.
     bool lookup(const std::string& key, PageCacheHandle* handle);
 
+    // Return true if the cache holds the page. We want a caller that only probes pages (for example, to find the pages
+    // that it will not read from a file) not to change what the cache reports or evicts, so the probe takes no handle,
+    // it counts no lookup and no hit, it does not refresh the recency of the page, and no release of a handle can
+    // erase the page that it names. The page is not pinned, and it can be evicted right after the answer.
+    bool contains(const std::string& key) const;
+
     // Insert a page with key into this cache.
     // Given handle will be set to valid reference.
     // This function is thread-safe, and when two clients insert two same key

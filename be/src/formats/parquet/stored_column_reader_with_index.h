@@ -65,6 +65,10 @@ public:
         return _inner_reader->get_dict_values(dict_codes, nulls, column);
     }
 
+    void set_page_locations(const std::vector<tparquet::PageLocation>* page_locations) override {
+        _inner_reader->set_page_locations(page_locations);
+    }
+
     bool supports_offset_index_skip() const override { return _inner_reader->supports_offset_index_skip(); }
 
     void set_offset_index_skip(const ColumnOffsetIndexCtx* ctx, bool has_dict_page) override {

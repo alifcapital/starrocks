@@ -52,6 +52,13 @@ void IcebergRowLineageReader::collect_column_io_range(std::vector<io::SharedBuff
     }
 }
 
+void IcebergRowLineageReader::collect_page_cache_io_chunks(io::SharedBufferedInputStream* stream,
+                                                           std::vector<PageCacheIoChunk>* chunks) {
+    if (_delegate != nullptr) {
+        _delegate->collect_page_cache_io_chunks(stream, chunks);
+    }
+}
+
 void IcebergRowLineageReader::select_offset_index(const SparseRange<uint64_t>& range, const uint64_t rg_first_row) {
     if (_delegate != nullptr) {
         _delegate->select_offset_index(range, rg_first_row);

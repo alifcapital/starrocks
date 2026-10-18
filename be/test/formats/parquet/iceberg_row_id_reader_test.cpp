@@ -84,6 +84,18 @@ public:
     void select_offset_index(const SparseRange<uint64_t>& range, const uint64_t rg_first_row) override {}
 };
 
+// A column reader that reads one chunk of the file and gives it to the planner of the page cache aware IO.
+class MockChunkReader : public MockNullPhysicalReader {
+public:
+    void collect_page_cache_io_chunks(io::SharedBufferedInputStream* stream,
+                                      std::vector<PageCacheIoChunk>* chunks) override {
+        PageCacheIoChunk chunk;
+        chunk.begin = 100;
+        chunk.end = 300;
+        chunks->push_back(chunk);
+    }
+};
+
 // ==================== Basic read_range tests ====================
 
 TEST_F(IcebergRowIdReaderTest, TestReadRangeWithoutFilter) {
@@ -181,6 +193,31 @@ TEST_F(IcebergRowIdReaderTest, TestNoOpMethods) {
 
     SparseRange<uint64_t> sparse_range;
     reader.select_offset_index(sparse_range, 100);
+}
+
+// The row lineage readers read the physical column of the file, when the file has it, so their chunk is read from
+// the file and the planner has to know it. A reader without the physical column reads no chunk.
+TEST_F(IcebergRowIdReaderTest, TestCollectPageCacheIoChunksOfTheDelegate) {
+    std::vector<PageCacheIoChunk> chunks;
+    IcebergRowIdReader without_delegate(1000);
+    without_delegate.collect_page_cache_io_chunks(nullptr, &chunks);
+    ASSERT_TRUE(chunks.empty());
+
+    IcebergRowIdReader row_id(std::make_unique<MockChunkReader>(), 1000);
+    row_id.collect_page_cache_io_chunks(nullptr, &chunks);
+    ASSERT_EQ(1U, chunks.size());
+    ASSERT_EQ(100, chunks[0].begin);
+    ASSERT_EQ(300, chunks[0].end);
+
+    chunks.clear();
+    IcebergLastUpdatedSequenceNumberReader sequence_number(std::make_unique<MockChunkReader>(), true, kNullDatum);
+    sequence_number.collect_page_cache_io_chunks(nullptr, &chunks);
+    ASSERT_EQ(1U, chunks.size());
+
+    chunks.clear();
+    IcebergLastUpdatedSequenceNumberReader sequence_number_without_delegate(kNullDatum);
+    sequence_number_without_delegate.collect_page_cache_io_chunks(nullptr, &chunks);
+    ASSERT_TRUE(chunks.empty());
 }
 
 // ==================== Zone map filter tests ====================

@@ -102,6 +102,25 @@ TEST_F(LRUCacheEngineTest, test_insert_lookup) {
     _check_not_found(30);
 }
 
+// contains() is not a lookup: the cache counts no lookup and no hit for it. exist() looks the entry up, so it counts.
+TEST_F(LRUCacheEngineTest, test_contains_is_not_counted) {
+    _insert_data();
+    const size_t lookups = _cache->lookup_count();
+    const size_t hits = _cache->hit_count();
+
+    ASSERT_TRUE(_cache->contains(_int_to_string(6, 30)));
+    ASSERT_FALSE(_cache->contains(_int_to_string(6, 254)));
+    ASSERT_EQ(lookups, _cache->lookup_count());
+    ASSERT_EQ(hits, _cache->hit_count());
+
+    ASSERT_TRUE(_cache->exist(_int_to_string(6, 30)));
+    ASSERT_EQ(lookups + 1, _cache->lookup_count());
+    ASSERT_EQ(hits + 1, _cache->hit_count());
+
+    ASSERT_OK(_cache->remove(_int_to_string(6, 30)));
+    ASSERT_FALSE(_cache->contains(_int_to_string(6, 30)));
+}
+
 TEST_F(LRUCacheEngineTest, test_value) {
     _insert_data();
 

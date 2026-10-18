@@ -33,6 +33,7 @@ public:
     Status lookup(const std::string& key, MemCacheHandlePtr* handle, MemCacheReadOptions* options) override;
 
     bool exist(const std::string& key) const override;
+    bool contains(const std::string& key) const override;
     Status remove(const std::string& key) override;
 
     Status update_mem_quota(size_t quota_bytes) override;

@@ -381,6 +381,11 @@ static int lookup_cache(Cache* cache, int key) {
     return result;
 }
 
+static bool contains_cache(Cache* cache, int key) {
+    std::string encoded;
+    return cache->contains(EncodeKey(&encoded, key));
+}
+
 static void insert_cache(Cache* cache, int key, int value, size_t charge,
                          CachePriority priority = CachePriority::NORMAL) {
     std::string encoded;
@@ -534,6 +539,92 @@ TEST_F(CacheTest, UpdateChargeIfIgnoresMissingKeyAndRejectedPredicate) {
     ASSERT_TRUE(update_charge_cache(cache.get(), 100, 101, value_equals,
                                     reinterpret_cast<const void*>(static_cast<intptr_t>(1000))));
     ASSERT_EQ(base_usage + 100, cache->get_memory_usage());
+}
+
+// contains() is not a lookup: it counts no lookup and no hit, and it does not move the entry to the newest end of the
+// LRU list, so it does not change which entry the next insert evicts.
+TEST_F(CacheTest, ContainsDoesNotCountAndDoesNotPromote) {
+    const size_t entry_charge = entry_charge_for_int_key();
+    const auto keys = find_int_keys_in_same_shard();
+    std::unique_ptr<Cache> cache(new_lru_cache(entry_charge * 2 * kNumShards));
+
+    insert_cache(cache.get(), keys[0], 1000, 1);
+    insert_cache(cache.get(), keys[1], 2000, 1);
+    const size_t lookups = cache->get_lookup_count();
+    const size_t hits = cache->get_hit_count();
+
+    ASSERT_TRUE(contains_cache(cache.get(), keys[0]));
+    ASSERT_TRUE(contains_cache(cache.get(), keys[1]));
+    ASSERT_FALSE(contains_cache(cache.get(), keys[2]));
+    ASSERT_EQ(lookups, cache->get_lookup_count());
+    ASSERT_EQ(hits, cache->get_hit_count());
+
+    // keys[0] is still the oldest entry, so the insert evicts it and keeps keys[1]
+    insert_cache(cache.get(), keys[2], 3000, 1);
+    ASSERT_EQ(std::vector<int>({keys[0]}), _deleted_keys);
+    ASSERT_FALSE(contains_cache(cache.get(), keys[0]));
+    ASSERT_TRUE(contains_cache(cache.get(), keys[1]));
+    ASSERT_TRUE(contains_cache(cache.get(), keys[2]));
+}
+
+// A lookup moves the entry to the newest end of the LRU list and counts, which is what contains() must not do.
+TEST_F(CacheTest, LookupPromotesAndCountsUnlikeContains) {
+    const size_t entry_charge = entry_charge_for_int_key();
+    const auto keys = find_int_keys_in_same_shard();
+    std::unique_ptr<Cache> cache(new_lru_cache(entry_charge * 2 * kNumShards));
+
+    insert_cache(cache.get(), keys[0], 1000, 1);
+    insert_cache(cache.get(), keys[1], 2000, 1);
+    const size_t lookups = cache->get_lookup_count();
+    const size_t hits = cache->get_hit_count();
+
+    ASSERT_EQ(1000, lookup_cache(cache.get(), keys[0]));
+    ASSERT_EQ(lookups + 1, cache->get_lookup_count());
+    ASSERT_EQ(hits + 1, cache->get_hit_count());
+
+    insert_cache(cache.get(), keys[2], 3000, 1);
+    ASSERT_EQ(std::vector<int>({keys[1]}), _deleted_keys);
+}
+
+// An entry that a reader holds is in the cache, and an erased entry is not.
+TEST_F(CacheTest, ContainsSeesPinnedAndErasedEntries) {
+    std::unique_ptr<Cache> cache(new_lru_cache(kCacheSize));
+    std::string insert_key;
+    std::string erase_key;
+    Cache::Handle* handle = cache->insert(EncodeKey(&insert_key, 7), EncodeValue(70), 1, &CacheTest::Deleter);
+    ASSERT_TRUE(contains_cache(cache.get(), 7));
+    cache->erase(EncodeKey(&erase_key, 7));
+    ASSERT_FALSE(contains_cache(cache.get(), 7));
+    cache->release(handle);
+    ASSERT_FALSE(contains_cache(cache.get(), 7));
+}
+
+// release() erases an entry that only the cache holds when the shard is over its capacity. A probe made of a lookup and
+// a release can be that last release, and then the probe erases the entry that it reports (here the capacity shrinks
+// between the two calls). contains() takes no handle, so the cache has no release that it could trigger.
+TEST_F(CacheTest, LookupThenReleaseCanEraseTheProbedEntryButContainsCannot) {
+    std::unique_ptr<Cache> cache(new_lru_cache(kCacheSize));
+    insert_cache(cache.get(), 1, 10, 1);
+    insert_cache(cache.get(), 2, 20, 1);
+    ASSERT_EQ(0U, cache->get_release_evict_count());
+
+    std::string key;
+    Cache::Handle* handle = cache->lookup(EncodeKey(&key, 1));
+    ASSERT_NE(nullptr, handle);
+    cache->set_capacity(0);
+    ASSERT_TRUE(contains_cache(cache.get(), 1));
+    ASSERT_FALSE(contains_cache(cache.get(), 2));
+    ASSERT_EQ(0U, cache->get_release_evict_count());
+    cache->release(handle);
+    ASSERT_FALSE(contains_cache(cache.get(), 1));
+    ASSERT_EQ(1U, cache->get_release_evict_count());
+
+    cache->set_capacity(kCacheSize);
+    insert_cache(cache.get(), 3, 30, 1);
+    for (int i = 0; i < 3; i++) {
+        ASSERT_TRUE(contains_cache(cache.get(), 3));
+    }
+    ASSERT_EQ(1U, cache->get_release_evict_count());
 }
 
 TEST_F(CacheTest, UpdateChargeIfRefreshesRecencyBeforeEvicting) {

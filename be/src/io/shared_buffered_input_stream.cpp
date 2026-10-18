@@ -49,14 +49,19 @@ std::string SharedBufferedInputStream::SharedBuffer::debug_string() const {
 
 namespace {
 
-// Sorts the ranges, clips them to [begin, end), drops the empty ones, and joins the ones that overlap or touch.
+// Sorts the ranges, clips them to [begin, end), drops the empty ones, and joins the ones that overlap or touch. We
+// expect the provider to answer in the order of the file for most buffers, so the sort runs only for a range list that
+// is not in order.
 std::vector<SharedBufferedInputStream::IORange> normalize_ranges(std::vector<SharedBufferedInputStream::IORange> ranges,
                                                                  int64_t begin, int64_t end) {
-    std::sort(ranges.begin(), ranges.end(),
-              [](const SharedBufferedInputStream::IORange& a, const SharedBufferedInputStream::IORange& b) {
-                  return a.offset < b.offset;
-              });
+    auto by_offset = [](const SharedBufferedInputStream::IORange& a, const SharedBufferedInputStream::IORange& b) {
+        return a.offset < b.offset;
+    };
+    if (!std::is_sorted(ranges.begin(), ranges.end(), by_offset)) {
+        std::sort(ranges.begin(), ranges.end(), by_offset);
+    }
     std::vector<SharedBufferedInputStream::IORange> result;
+    result.reserve(ranges.size());
     for (const auto& range : ranges) {
         const int64_t range_begin = std::max(range.offset, begin);
         const int64_t range_end = std::min(range.offset + range.size, end);
@@ -72,20 +77,18 @@ std::vector<SharedBufferedInputStream::IORange> normalize_ranges(std::vector<Sha
     return result;
 }
 
-// The ranges of [begin, end) that a buffer loads when the reader gets `skips` from elsewhere. [raw_begin, raw_end) is
-// the part of the buffer that some read asked for, and the rest of the buffer is padding for the alignment.
+// The ranges of [begin, end) that a buffer loads when the reader gets `skips` from elsewhere. `skips` are normalized
+// to [begin, end) (see normalize_ranges()).
 // - The bytes of [need_begin, need_end) are never cut.
 // - With an align size we cut only at the borders of the blocks, because the data cache reads and writes whole blocks:
 //   a skip range gives up its partial blocks at both ends, and a block with one byte to load is loaded whole.
-// - A run of bytes to load that lies in the padding only is dropped, because no read asks for it.
 // - Two runs are joined while the gap between them is at most max_gap and the joined range is at most
 //   max_buffer_size. A run that is larger than max_buffer_size by itself stays one range.
 std::vector<SharedBufferedInputStream::IORange> kept_ranges(
-        int64_t begin, int64_t end, int64_t raw_begin, int64_t raw_end, int64_t align_size,
-        const std::vector<SharedBufferedInputStream::IORange>& skips, int64_t need_begin, int64_t need_end,
-        int64_t max_gap, int64_t max_buffer_size) {
+        int64_t begin, int64_t end, int64_t align_size, const std::vector<SharedBufferedInputStream::IORange>& skips,
+        int64_t need_begin, int64_t need_end, int64_t max_gap, int64_t max_buffer_size) {
     std::vector<SharedBufferedInputStream::IORange> cuts;
-    for (const auto& skip : normalize_ranges(skips, begin, end)) {
+    for (const auto& skip : skips) {
         const int64_t skip_end = skip.offset + skip.size;
         if (need_begin >= need_end || need_end <= skip.offset || need_begin >= skip_end) {
             cuts.push_back(skip);
@@ -116,7 +119,7 @@ std::vector<SharedBufferedInputStream::IORange> kept_ranges(
 
     std::vector<SharedBufferedInputStream::IORange> runs;
     auto add_run = [&](int64_t run_begin, int64_t run_end) {
-        if (run_begin < run_end && run_begin < raw_end && run_end > raw_begin) {
+        if (run_begin < run_end) {
             runs.emplace_back(run_begin, run_end - run_begin);
         }
     };
@@ -403,10 +406,13 @@ Status SharedBufferedInputStream::split_shared_buffer(const SharedBufferPtr& sb,
 // and goes direct, so a byte that the provider named but the reader needs after all costs one more request and is
 // never wrong.
 bool SharedBufferedInputStream::plan_load(const SharedBufferPtr& sb, int64_t need_offset, int64_t need_size) {
-    if (_skip_ranges_provider == nullptr || sb->planned || sb->buffer.capacity() != 0 || sb->size <= 0) {
+    if (_skip_ranges_provider == nullptr || sb->planned || sb->buffer.capacity() != 0 || sb->size <= 0 ||
+        !_skip_ranges_provider->enabled()) {
         return false;
     }
     sb->planned = true;
+    _skip_ranges_plan_count += 1;
+    SCOPED_RAW_TIMER(&_skip_ranges_timer);
 
     std::vector<IORange> skips;
     _skip_ranges_provider->find_skip_ranges(sb->offset, sb->size, &skips);
@@ -420,13 +426,17 @@ bool SharedBufferedInputStream::plan_load(const SharedBufferPtr& sb, int64_t nee
     if (skips.empty() || sb->buffer.capacity() != 0) {
         return false;
     }
-    for (const auto& named : normalize_ranges(skips, sb->offset, sb->offset + sb->size)) {
+    skips = normalize_ranges(std::move(skips), sb->offset, sb->offset + sb->size);
+    if (skips.empty()) {
+        return false;
+    }
+    for (const auto& named : skips) {
         _skip_ranges_named_bytes += named.size;
     }
 
-    const std::vector<IORange> ranges = kept_ranges(
-            sb->offset, sb->offset + sb->size, sb->raw_offset, sb->raw_offset + sb->raw_size, _align_size, skips,
-            need_offset, need_offset + need_size, config::io_coalesce_read_max_distance_size, _options.max_buffer_size);
+    const std::vector<IORange> ranges =
+            kept_ranges(sb->offset, sb->offset + sb->size, _align_size, skips, need_offset, need_offset + need_size,
+                        config::io_coalesce_read_max_distance_size, _options.max_buffer_size);
     int64_t kept_bytes = 0;
     for (const auto& range : ranges) {
         kept_bytes += range.size;
@@ -436,15 +446,89 @@ bool SharedBufferedInputStream::plan_load(const SharedBufferPtr& sb, int64_t nee
     }
 
     const int64_t skipped_bytes = sb->size - kept_bytes;
-    Status st = split_shared_buffer(sb, ranges, false);
+    Status st = split_shared_buffer(sb, ranges, sb->split);
     if (!st.ok()) {
         // The buffer is loaded whole then, which costs bytes but returns the right data.
         LOG(WARNING) << "Failed to split a shared buffer of " << _filename << ": " << st.message();
         return false;
     }
+    _record_cut_spans(*sb, ranges);
     _skip_ranges_bytes += skipped_bytes;
     _skip_ranges_split_count += 1;
     return true;
+}
+
+void SharedBufferedInputStream::_record_cut_spans(const SharedBuffer& sb, const std::vector<IORange>& ranges) {
+    // The reader asks for the bytes of the raw range only, so the bytes outside it are not worth a recovery.
+    const int64_t raw_begin = sb.raw_offset;
+    const int64_t raw_end = sb.raw_offset + sb.raw_size;
+    auto add = [&](int64_t begin, int64_t end) {
+        begin = std::max(begin, raw_begin);
+        end = std::min(end, raw_end);
+        if (begin < end) {
+            _cut_spans[end] = begin;
+        }
+    };
+    int64_t cursor = sb.offset;
+    for (const IORange& range : ranges) {
+        add(cursor, range.offset);
+        cursor = range.offset + range.size;
+    }
+    add(cursor, sb.offset + sb.size);
+}
+
+// A read that no buffer covers lies in a cut span when the provider named the page and then lost it: a direct read
+// of a page costs a request for the header and a request for the body, and the pages that follow cost the same. We
+// read the span from the read to its end with one request instead, and the buffer serves the pages that follow. The
+// buffer is not larger than max_buffer_size, with an align size it ends at a border of a block (unless the read
+// ends later), and it never covers bytes of another buffer.
+SharedBufferedInputStream::SharedBufferPtr SharedBufferedInputStream::_recover_cut_span(int64_t offset, int64_t count) {
+    if (_cut_spans.empty() || count <= 0) {
+        return nullptr;
+    }
+    // the first span that ends after the offset
+    auto span = _cut_spans.upper_bound(offset);
+    if (span == _cut_spans.end() || span->second > offset || span->first < offset + count) {
+        return nullptr;
+    }
+    const int64_t span_begin = span->second;
+    const int64_t span_end = span->first;
+    int64_t end = std::min(span_end, offset + std::max(count, _options.max_buffer_size));
+    if (end < span_end && _align_size > 0) {
+        end = std::max(offset + count, end / _align_size * _align_size);
+    }
+    auto next = _map.upper_bound(offset);
+    if (next != _map.end()) {
+        if (next->second->offset <= offset) {
+            return nullptr;
+        }
+        end = std::min(end, next->second->offset);
+        if (end < offset + count) {
+            return nullptr;
+        }
+    }
+    if (_map.find(end) != _map.end()) {
+        return nullptr;
+    }
+
+    SharedBufferPtr sb(new SharedBuffer{.raw_offset = offset,
+                                        .raw_size = end - offset,
+                                        .offset = offset,
+                                        .size = end - offset,
+                                        .ref_count = 1,
+                                        .split = true,
+                                        .planned = true});
+    _map.emplace(end, sb);
+    _cut_spans.erase(span);
+    if (span_begin < offset) {
+        _cut_spans.emplace(offset, span_begin);
+    }
+    if (end < span_end) {
+        _cut_spans.emplace(span_end, end);
+    }
+    _skip_ranges_recover_count += 1;
+    _skip_ranges_recover_bytes += end - offset;
+    return sb;
 }
 
 bool SharedBufferedInputStream::_plan_pieces(std::vector<SharedBufferPtr>* pieces, size_t offset, size_t count) {
@@ -525,11 +609,13 @@ Status SharedBufferedInputStream::get_bytes(const uint8_t** buffer, size_t offse
 
 void SharedBufferedInputStream::release() {
     _map.clear();
+    _cut_spans.clear();
 }
 
 void SharedBufferedInputStream::release_to_offset(int64_t offset) {
     auto it = _map.upper_bound(offset);
     _map.erase(_map.begin(), it);
+    _cut_spans.erase(_cut_spans.begin(), _cut_spans.upper_bound(offset));
 }
 
 Status SharedBufferedInputStream::read_at_fully(int64_t offset, void* out, int64_t count) {
@@ -554,6 +640,12 @@ Status SharedBufferedInputStream::read_at_fully(int64_t offset, void* out, int64
                 dst += n;
                 cursor += n;
             }
+            return Status::OK();
+        }
+        if (SharedBufferPtr recovered = _recover_cut_span(offset, count); recovered != nullptr) {
+            const uint8_t* buffer = nullptr;
+            RETURN_IF_ERROR(get_bytes(&buffer, offset, count, recovered));
+            strings::memcpy_inlined(out, buffer, count);
             return Status::OK();
         }
         SCOPED_RAW_TIMER(&_direct_io_timer);

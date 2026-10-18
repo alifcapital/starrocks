@@ -30,6 +30,7 @@
 #include "common/status.h"
 #include "common/statusor.h"
 #include "formats/parquet/metadata.h"
+#include "formats/parquet/page_cache_io_planner.h"
 #include "formats/parquet/types.h"
 #include "formats/parquet/utils.h"
 #include "io/shared_buffered_input_stream.h"
@@ -176,6 +177,11 @@ public:
 
     virtual void collect_column_io_range(std::vector<io::SharedBufferedInputStream::IORange>* ranges,
                                          int64_t* end_offset, ColumnIOTypeFlags types, bool active) = 0;
+
+    // Appends the column chunks that this reader reads, for the planner of the page cache aware IO. `stream` is the
+    // shared stream that holds the io ranges of the chunks. A reader that reads no chunk appends nothing.
+    virtual void collect_page_cache_io_chunks(io::SharedBufferedInputStream* stream,
+                                              std::vector<PageCacheIoChunk>* chunks) {}
 
     // For field which type is complex, the filed physical_column_index in file meta is not same with the column index
     // in row_group's column metas
