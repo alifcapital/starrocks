@@ -20,6 +20,7 @@
 #include <memory>
 
 #include "column/vectorized_fwd.h"
+#include "common/compiler_util.h"
 #include "common/status.h"
 #include "gen_cpp/parquet_types.h"
 #include "utils.h"
@@ -130,6 +131,25 @@ protected:
     // this first and give back its error. The decoder knows neither the file nor the column, and the caller that
     // does adds them. A batch without NULL rows is fine for a column that is not nullable.
     Status _check_nulls_fit(const NullInfos& null_infos, const Column* dst, size_t count) const;
+
+    // Cuts `dst` back to `size` rows: the data, the offsets of a binary column, the null column of a nullable
+    // column, and its has_null flag.
+    static void _truncate(Column* dst, size_t size);
+
+    // Runs `append`, which adds the rows of a batch to `dst`, and gives `dst` back as it was when `append` returns an
+    // error. We fear a page that is short or corrupt in the middle of a batch: the rows that were appended before
+    // the error were not decoded, the offsets of a binary column may not match its bytes, and the next use of the
+    // column reads garbage. A decoder that fails after it changed the column uses this, or checks the whole batch
+    // against the page before it changes the column. The position of the decoder is not part of this.
+    template <typename Append>
+    static Status _append_or_rollback(Column* dst, Append&& append) {
+        const size_t size = dst->size();
+        Status status = append();
+        if (UNLIKELY(!status.ok())) {
+            _truncate(dst, size);
+        }
+        return status;
+    }
 
     // Tells whether to use `filter`. The decoder passes the largest share of the rows that the filter may keep for
     // the filtered decode to pay off, `max_share`. We expect the filtered decode to be slower than the plain one

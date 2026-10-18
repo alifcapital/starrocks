@@ -271,8 +271,12 @@ public:
         size_t cur_size = dst->size();
         dst->resize(count + cur_size);
         T* data = reinterpret_cast<T*>(dst->mutable_raw_data()) + cur_size;
-        RETURN_IF_ERROR(GetInternal(data, count));
-        return Status::OK();
+        Status status = GetInternal(data, count);
+        if (UNLIKELY(!status.ok())) {
+            // The rows that were decoded before the error are not a batch, so the column is cut back.
+            _truncate(dst, cur_size);
+        }
+        return status;
     }
 
     Status next_batch(size_t count, uint8_t* dst) override {

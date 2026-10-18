@@ -305,170 +305,189 @@ public:
     Status next_batch_with_nulls(size_t count, const NullInfos& null_infos, ColumnContentType content_type, Column* dst,
                                  const FilterData* filter) override {
         RETURN_IF_ERROR(_check_nulls_fit(null_infos, dst, count));
-        const uint8_t* __restrict is_nulls = null_infos.nulls_data();
-        // fill null data
-        size_t null_cnt = null_infos.num_nulls;
-        if (dst->is_nullable()) {
-            NullColumn* null_column = down_cast<NullableColumn*>(dst)->null_column_raw_ptr();
-            auto& null_data = null_column->get_data();
-            size_t prev_num_rows = null_data.size();
-            raw::stl_vector_resize_uninitialized(&null_data, count + prev_num_rows);
-            uint8_t* __restrict__ dst_nulls = null_data.data() + prev_num_rows;
-            memcpy(dst_nulls, is_nulls, count);
-            down_cast<NullableColumn*>(dst)->set_has_null(null_cnt > 0);
-        }
-
-        if (_use_filter(filter, _max_filter_share)) {
-            return _next_batch_with_nulls_filtered(count, count - null_cnt, is_nulls, filter, dst);
-        }
-
-        size_t max_size = 0;
-        size_t read_count = count - null_cnt;
-        // Reusable members rather than VLAs: a data page may hold ~1M values and
-        // StoredColumnReaderImpl::_read() hands the whole page over in one call, so stack
-        // arrays sized by read_count overflow the thread stack.
-        _temp_lengths.resize(read_count + 1);
-        _temp_datas.resize(read_count + 1);
-        uint32_t* lengths = _temp_lengths.data();
-        char** datas = _temp_datas.data();
-        size_t i = 0;
-        size_t cursor = _offset;
-        // We fear a corrupt page: a length prefix or a value that does not fit in the page would make us read
-        // and copy memory after the page. So the loop condition checks that the prefix fits, and the value
-        // is checked once its length is known.
-        for (i = 0; (i < read_count) & (cursor + sizeof(uint32_t) <= _data.size); ++i) {
-            uint32_t length = decode_fixed32_le(reinterpret_cast<const uint8_t*>(_data.data) + cursor);
-            cursor += sizeof(int32_t);
-            if (UNLIKELY(length > _data.size - cursor)) {
-                return _out_of_bounds_error(cursor, count);
-            }
-            datas[i] = _data.data + cursor;
-            cursor += length;
-            lengths[i] = length;
-            max_size = max_size > length ? max_size : length;
-        }
-
-        _offset = cursor;
-        if (i < read_count) {
-            return Status::InternalError(fmt::format("error: null_cnt {} i:{} read_cnt:{}", null_cnt, i, read_count));
-        }
-        // fill offset data
-        auto* binary_column = ColumnHelper::get_binary_column(dst);
-        {
-            auto& offsets = binary_column->get_offset();
-            auto& bytes = binary_column->get_bytes();
-            size_t prev_offsets = offsets.size();
-            raw::stl_vector_resize_uninitialized(&offsets, count + prev_offsets);
-            size_t offset = bytes.size();
-            size_t cnt = 0;
-            for (size_t i = 0; i < count; ++i) {
-                offset += is_nulls[i] ? 0 : lengths[cnt++];
-                offsets[prev_offsets + i] = offset;
+        // We fear a page that is short or corrupt in the middle of the batch, after the NULL flags and some offsets
+        // were written. So the column and the position of the decoder are given back as they were on an error.
+        const size_t entry_offset = _offset;
+        Status status = _append_or_rollback(dst, [&]() -> Status {
+            const uint8_t* __restrict is_nulls = null_infos.nulls_data();
+            // fill null data
+            size_t null_cnt = null_infos.num_nulls;
+            if (dst->is_nullable()) {
+                NullColumn* null_column = down_cast<NullableColumn*>(dst)->null_column_raw_ptr();
+                auto& null_data = null_column->get_data();
+                size_t prev_num_rows = null_data.size();
+                raw::stl_vector_resize_uninitialized(&null_data, count + prev_num_rows);
+                uint8_t* __restrict__ dst_nulls = null_data.data() + prev_num_rows;
+                memcpy(dst_nulls, is_nulls, count);
+                down_cast<NullableColumn*>(dst)->set_has_null(null_cnt > 0);
             }
 
-            binary_column->get_bytes().reserve(offset);
-        }
+            if (_use_filter(filter, _max_filter_share)) {
+                return _next_batch_with_nulls_filtered(count, count - null_cnt, is_nulls, filter, dst);
+            }
 
-        if (read_count == 0) {
+            size_t max_size = 0;
+            size_t read_count = count - null_cnt;
+            // Reusable members rather than VLAs: a data page may hold ~1M values and
+            // StoredColumnReaderImpl::_read() hands the whole page over in one call, so stack
+            // arrays sized by read_count overflow the thread stack.
+            _temp_lengths.resize(read_count + 1);
+            _temp_datas.resize(read_count + 1);
+            uint32_t* lengths = _temp_lengths.data();
+            char** datas = _temp_datas.data();
+            size_t i = 0;
+            size_t cursor = _offset;
+            // We fear a corrupt page: a length prefix or a value that does not fit in the page would make us read
+            // and copy memory after the page. So the loop condition checks that the prefix fits, and the value
+            // is checked once its length is known.
+            for (i = 0; (i < read_count) & (cursor + sizeof(uint32_t) <= _data.size); ++i) {
+                uint32_t length = decode_fixed32_le(reinterpret_cast<const uint8_t*>(_data.data) + cursor);
+                cursor += sizeof(int32_t);
+                if (UNLIKELY(length > _data.size - cursor)) {
+                    return _out_of_bounds_error(cursor, count);
+                }
+                datas[i] = _data.data + cursor;
+                cursor += length;
+                lengths[i] = length;
+                max_size = max_size > length ? max_size : length;
+            }
+
+            _offset = cursor;
+            if (i < read_count) {
+                return Status::InternalError(
+                        fmt::format("error: null_cnt {} i:{} read_cnt:{}", null_cnt, i, read_count));
+            }
+            // fill offset data
+            auto* binary_column = ColumnHelper::get_binary_column(dst);
+            {
+                auto& offsets = binary_column->get_offset();
+                auto& bytes = binary_column->get_bytes();
+                size_t prev_offsets = offsets.size();
+                raw::stl_vector_resize_uninitialized(&offsets, count + prev_offsets);
+                size_t offset = bytes.size();
+                size_t cnt = 0;
+                for (size_t i = 0; i < count; ++i) {
+                    offset += is_nulls[i] ? 0 : lengths[cnt++];
+                    offsets[prev_offsets + i] = offset;
+                }
+
+                binary_column->get_bytes().reserve(offset);
+            }
+
+            if (read_count == 0) {
+                return Status::OK();
+            }
+
+            // fill bytes data
+            max_size = std::max(BitUtil::next_power_of_two(max_size), 8L);
+            if (datas[read_count - 1] - _data.data + max_size <= _data.size) {
+                binary_column->append_bytes_overflow(datas, lengths, read_count, max_size);
+                DCHECK_EQ(binary_column->get_bytes().size(), binary_column->get_offset().back());
+            } else {
+                binary_column->append_bytes(datas, lengths, read_count);
+                DCHECK_EQ(binary_column->get_bytes().size(), binary_column->get_offset().back());
+            }
+
             return Status::OK();
+        });
+        if (UNLIKELY(!status.ok())) {
+            _offset = entry_offset;
         }
-
-        // fill bytes data
-        max_size = std::max(BitUtil::next_power_of_two(max_size), 8L);
-        if (datas[read_count - 1] - _data.data + max_size <= _data.size) {
-            binary_column->append_bytes_overflow(datas, lengths, read_count, max_size);
-            DCHECK_EQ(binary_column->get_bytes().size(), binary_column->get_offset().back());
-        } else {
-            binary_column->append_bytes(datas, lengths, read_count);
-            DCHECK_EQ(binary_column->get_bytes().size(), binary_column->get_offset().back());
-        }
-
-        return Status::OK();
+        return status;
     }
 
     Status next_batch(size_t count, ColumnContentType content_type, Column* dst, const FilterData* filter) override {
-        size_t num_decoded = 0;
-        if (dst->is_nullable()) {
-            down_cast<NullableColumn*>(dst)->null_column_raw_ptr()->append_default(count);
-        }
+        // We fear a page that is short or corrupt in the middle of the batch, after the null column and some rows
+        // were appended. So the column and the position of the decoder are given back as they were on an error.
+        const size_t entry_offset = _offset;
+        Status status = _append_or_rollback(dst, [&]() -> Status {
+            size_t num_decoded = 0;
+            if (dst->is_nullable()) {
+                down_cast<NullableColumn*>(dst)->null_column_raw_ptr()->append_default(count);
+            }
 
 #define CHECK_DECODING_BOUND                                     \
     if (UNLIKELY(num_decoded < count || _offset > _data.size)) { \
         return _out_of_bounds_error(_offset, count);             \
     }
 
-        if (_use_filter(filter, _max_filter_share)) {
-            auto* binary_column = ColumnHelper::get_binary_column(dst);
-            // We fear a reader that looks at every non-NULL value of the column, for example the lookup in a
-            // global dictionary: it would fail on an empty value that a dropped row gets. So when the column is
-            // nullable we mark a dropped row as NULL, as the dictionary decoder does. The null column has
-            // already got `count` default entries, which are the last ones. A column that is not nullable keeps
-            // the empty value: such a column is not looked up before the dropped rows are removed.
-            NullableColumn* nullable_dst = dst->is_nullable() ? down_cast<NullableColumn*>(dst) : nullptr;
-            uint8_t* dst_nulls = nullptr;
-            if (nullable_dst != nullptr) {
-                auto& null_data = nullable_dst->null_column_raw_ptr()->get_data();
-                dst_nulls = null_data.data() + null_data.size() - count;
-            }
-            size_t num_dropped = 0;
-            // We fear a corrupt page: a length that does not fit in the page would make us copy memory after
-            // it. So the loop condition checks that the prefix fits and the value is checked before the copy.
-            while (num_decoded < count && _offset + sizeof(int32_t) <= _data.size) {
-                uint32_t length = decode_fixed32_le(reinterpret_cast<const uint8_t*>(_data.data) + _offset);
-                _offset += sizeof(int32_t);
-                if (UNLIKELY(length > _data.size - _offset)) {
-                    return _out_of_bounds_error(_offset, count);
+            if (_use_filter(filter, _max_filter_share)) {
+                auto* binary_column = ColumnHelper::get_binary_column(dst);
+                // We fear a reader that looks at every non-NULL value of the column, for example the lookup in a
+                // global dictionary: it would fail on an empty value that a dropped row gets. So when the column is
+                // nullable we mark a dropped row as NULL, as the dictionary decoder does. The null column has
+                // already got `count` default entries, which are the last ones. A column that is not nullable keeps
+                // the empty value: such a column is not looked up before the dropped rows are removed.
+                NullableColumn* nullable_dst = dst->is_nullable() ? down_cast<NullableColumn*>(dst) : nullptr;
+                uint8_t* dst_nulls = nullptr;
+                if (nullable_dst != nullptr) {
+                    auto& null_data = nullable_dst->null_column_raw_ptr()->get_data();
+                    dst_nulls = null_data.data() + null_data.size() - count;
                 }
-                if (filter[num_decoded]) {
-                    binary_column->append(Slice(_data.data + _offset, length));
-                } else {
-                    binary_column->append_default();
-                    if (dst_nulls != nullptr) {
-                        dst_nulls[num_decoded] = 1;
-                        num_dropped++;
+                size_t num_dropped = 0;
+                // We fear a corrupt page: a length that does not fit in the page would make us copy memory after
+                // it. So the loop condition checks that the prefix fits and the value is checked before the copy.
+                while (num_decoded < count && _offset + sizeof(int32_t) <= _data.size) {
+                    uint32_t length = decode_fixed32_le(reinterpret_cast<const uint8_t*>(_data.data) + _offset);
+                    _offset += sizeof(int32_t);
+                    if (UNLIKELY(length > _data.size - _offset)) {
+                        return _out_of_bounds_error(_offset, count);
                     }
+                    if (filter[num_decoded]) {
+                        binary_column->append(Slice(_data.data + _offset, length));
+                    } else {
+                        binary_column->append_default();
+                        if (dst_nulls != nullptr) {
+                            dst_nulls[num_decoded] = 1;
+                            num_dropped++;
+                        }
+                    }
+                    _offset += length;
+                    num_decoded++;
                 }
-                _offset += length;
-                num_decoded++;
-            }
-            CHECK_DECODING_BOUND
-            if (num_dropped > 0) {
-                nullable_dst->set_has_null(true);
-            }
-        } else {
-            auto slices_data = std::make_unique_for_overwrite<uint8_t[]>(count * sizeof(Slice));
-            Slice* slices = reinterpret_cast<Slice*>(slices_data.get());
-            size_t max_size = 0;
-            // The slices only point into the page here, and CHECK_DECODING_BOUND runs before they are used. The
-            // loop condition checks that the prefix fits, so a corrupt length ends the loop with _offset
-            // after the page.
-            while (num_decoded < count && _offset + sizeof(int32_t) <= _data.size) {
-                uint32_t length = decode_fixed32_le(reinterpret_cast<const uint8_t*>(_data.data) + _offset);
-                _offset += sizeof(int32_t);
-                slices[num_decoded] = {_data.data + _offset, length};
-                _offset += length;
-                max_size = std::max<size_t>(max_size, length);
-                num_decoded++;
-            }
-            CHECK_DECODING_BOUND
-            if (num_decoded == 0) {
-                return Status::OK();
-            }
-            bool ret = false;
-            // when last slices offset + max_size > _data.size, there is overflow on reading
-            max_size = std::max(BitUtil::next_power_of_two(max_size), 8L);
-            if (slices[count - 1].data - _data.data + max_size <= _data.size) {
-                ret = ColumnHelper::get_binary_column(dst)->append_strings_overflow(slices, num_decoded, max_size);
+                CHECK_DECODING_BOUND
+                if (num_dropped > 0) {
+                    nullable_dst->set_has_null(true);
+                }
             } else {
-                ret = ColumnHelper::get_binary_column(dst)->append_strings(slices, num_decoded);
+                auto slices_data = std::make_unique_for_overwrite<uint8_t[]>(count * sizeof(Slice));
+                Slice* slices = reinterpret_cast<Slice*>(slices_data.get());
+                size_t max_size = 0;
+                // The slices only point into the page here, and CHECK_DECODING_BOUND runs before they are used. The
+                // loop condition checks that the prefix fits, so a corrupt length ends the loop with _offset
+                // after the page.
+                while (num_decoded < count && _offset + sizeof(int32_t) <= _data.size) {
+                    uint32_t length = decode_fixed32_le(reinterpret_cast<const uint8_t*>(_data.data) + _offset);
+                    _offset += sizeof(int32_t);
+                    slices[num_decoded] = {_data.data + _offset, length};
+                    _offset += length;
+                    max_size = std::max<size_t>(max_size, length);
+                    num_decoded++;
+                }
+                CHECK_DECODING_BOUND
+                if (num_decoded == 0) {
+                    return Status::OK();
+                }
+                bool ret = false;
+                // when last slices offset + max_size > _data.size, there is overflow on reading
+                max_size = std::max(BitUtil::next_power_of_two(max_size), 8L);
+                if (slices[count - 1].data - _data.data + max_size <= _data.size) {
+                    ret = ColumnHelper::get_binary_column(dst)->append_strings_overflow(slices, num_decoded, max_size);
+                } else {
+                    ret = ColumnHelper::get_binary_column(dst)->append_strings(slices, num_decoded);
+                }
+
+                if (UNLIKELY(!ret)) {
+                    return Status::InternalError("PlainDecoder append strings to column failed");
+                }
             }
 
-            if (UNLIKELY(!ret)) {
-                return Status::InternalError("PlainDecoder append strings to column failed");
-            }
+            return Status::OK();
+        });
+        if (UNLIKELY(!status.ok())) {
+            _offset = entry_offset;
         }
-
-        return Status::OK();
+        return status;
     }
 
     Status skip(size_t values_to_skip) override {
@@ -625,6 +644,8 @@ public:
         dst->resize(original_size + count);
         auto num_unpacked_values = unpack_batch(count, dst->mutable_raw_data() + original_size);
         if (num_unpacked_values < count) {
+            // The rows that were unpacked before the page ended are not a batch, so the column is cut back.
+            _truncate(dst, original_size);
             return Status::InternalError(strings::Substitute(
                     "going to read out-of-bounds data, count=$0,num_unpacked_values=$1", count, num_unpacked_values));
         }

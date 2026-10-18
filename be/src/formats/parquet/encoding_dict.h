@@ -110,43 +110,47 @@ public:
     std::string to_string() const override { return "CacheAwareDictDecoder"; }
 
     Status next_batch(size_t count, ColumnContentType content_type, Column* dst, const FilterData* filter) override {
-        switch (content_type) {
-        case DICT_CODE: {
-            FixedLengthColumn<int32_t>* data_column;
-            if (dst->is_nullable()) {
-                auto nullable_column = down_cast<NullableColumn*>(dst);
-                nullable_column->null_column_raw_ptr()->append_default(count);
-                data_column = down_cast<FixedLengthColumn<int32_t>*>(nullable_column->data_column_raw_ptr());
-            } else {
-                data_column = down_cast<FixedLengthColumn<int32_t>*>(dst);
+        // We fear a page that is short or corrupt in the middle of the batch, after the null column and the data of
+        // the column were resized. So the column is given back as it was on an error.
+        return _append_or_rollback(dst, [&]() -> Status {
+            switch (content_type) {
+            case DICT_CODE: {
+                FixedLengthColumn<int32_t>* data_column;
+                if (dst->is_nullable()) {
+                    auto nullable_column = down_cast<NullableColumn*>(dst);
+                    nullable_column->null_column_raw_ptr()->append_default(count);
+                    data_column = down_cast<FixedLengthColumn<int32_t>*>(nullable_column->data_column_raw_ptr());
+                } else {
+                    data_column = down_cast<FixedLengthColumn<int32_t>*>(dst);
+                }
+                size_t cur_size = data_column->size();
+                data_column->resize_uninitialized(cur_size + count);
+                int32_t* __restrict__ data = data_column->get_data().data() + cur_size;
+                auto decoded_num = _rle_batch_reader.GetBatch(reinterpret_cast<uint32_t*>(data), count);
+                if (decoded_num < count) {
+                    return Status::InternalError("didn't get enough data from dict-decoder");
+                }
+                // The consumers of the codes index the dictionary with them, so we reject a code that the
+                // dictionary does not have here, where all the codes of the batch are real values.
+                if (UNLIKELY(indices_out_of_bounds(reinterpret_cast<const uint32_t*>(data), count,
+                                                   _get_num_dict_values()))) {
+                    return Status::Corruption("Dictionary code not in dictionary bounds");
+                }
+                break;
             }
-            size_t cur_size = data_column->size();
-            data_column->resize_uninitialized(cur_size + count);
-            int32_t* __restrict__ data = data_column->get_data().data() + cur_size;
-            auto decoded_num = _rle_batch_reader.GetBatch(reinterpret_cast<uint32_t*>(data), count);
-            if (decoded_num < count) {
-                return Status::InternalError("didn't get enough data from dict-decoder");
-            }
-            // The consumers of the codes index the dictionary with them, so we reject a code that the
-            // dictionary does not have here, where all the codes of the batch are real values.
-            if (UNLIKELY(indices_out_of_bounds(reinterpret_cast<const uint32_t*>(data), count,
-                                               _get_num_dict_values()))) {
-                return Status::Corruption("Dictionary code not in dictionary bounds");
-            }
-            break;
-        }
-        case VALUE: {
+            case VALUE: {
 #ifndef BE_TEST
-            if (!_filter_gate_open()) {
-                filter = nullptr;
-            }
+                if (!_filter_gate_open()) {
+                    filter = nullptr;
+                }
 #endif // BE_TEST
-            return _next_batch_value(count, dst, _select_filter(filter));
-        }
-        default:
-            return Status::NotSupported("read type not supported");
-        }
-        return Status::OK();
+                return _next_batch_value(count, dst, _select_filter(filter));
+            }
+            default:
+                return Status::NotSupported("read type not supported");
+            }
+            return Status::OK();
+        });
     }
 
     // The decision is made here, once for the batch. A path that reads the batch run by run passes the filter of
@@ -158,7 +162,11 @@ public:
         if (!_filter_gate_open()) {
             filter = nullptr;
         }
-        return _do_next_batch_with_nulls(count, null_infos, content_type, dst, _select_filter(filter));
+        // The paths below resize the null column and the data of `dst` before they read the codes, and a short or
+        // corrupt page fails after that, so the column is given back as it was on an error.
+        return _append_or_rollback(dst, [&]() -> Status {
+            return _do_next_batch_with_nulls(count, null_infos, content_type, dst, _select_filter(filter));
+        });
     }
 
     // `src_data` holds the `num_non_nulls` values of the batch and must have one more readable element after them.
@@ -392,7 +400,7 @@ public:
             _temp_read_data.resize(read_count + 1);
             auto ret =
                     _rle_batch_reader.GetBatchWithDict(_dict.data(), _dict.size(), _temp_read_data.data(), read_count);
-            if (UNLIKELY(ret <= 0)) {
+            if (UNLIKELY(ret < 0 || static_cast<size_t>(ret) < read_count)) {
                 return Status::InternalError("DictDecoder GetBatchWithDict failed");
             }
 
@@ -463,7 +471,7 @@ private:
             }
         } else {
             auto ret = _rle_batch_reader.GetBatchWithDict(_dict.data(), _dict.size(), data, count);
-            if (UNLIKELY(ret <= 0)) {
+            if (UNLIKELY(ret < 0 || static_cast<size_t>(ret) < count)) {
                 return Status::InternalError("DictDecoder<> GetBatchWithDict failed");
             }
         }
@@ -744,7 +752,7 @@ private:
 
             _slices.resize(read_count);
             auto ret = _rle_batch_reader.GetBatchWithDict(_dict.data(), _dict.size(), _slices.data(), read_count);
-            if (UNLIKELY(ret <= 0)) {
+            if (UNLIKELY(ret < 0 || static_cast<size_t>(ret) < read_count)) {
                 return Status::InternalError("DictDecoder<Slice> GetBatchWithDict failed");
             }
 
@@ -820,7 +828,7 @@ private:
         } else {
             _slices.resize(count);
             auto ret = _rle_batch_reader.GetBatchWithDict(_dict.data(), _dict.size(), _slices.data(), count);
-            if (UNLIKELY(ret <= 0)) {
+            if (UNLIKELY(ret < 0 || static_cast<size_t>(ret) < count)) {
                 return Status::InternalError("DictDecoder<Slice> GetBatchWithDict failed");
             }
             ret = dst->append_strings_overflow(_slices.data(), _slices.size(), _max_value_length);

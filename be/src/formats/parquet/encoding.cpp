@@ -32,29 +32,38 @@ namespace starrocks::parquet {
 Status Decoder::next_batch_with_nulls(size_t count, const NullInfos& null_infos, ColumnContentType content_type,
                                       Column* dst, const FilterData* filter) {
     RETURN_IF_ERROR(_check_nulls_fit(null_infos, dst, count));
-    const uint8_t* __restrict is_nulls = null_infos.nulls_data();
-    size_t idx = 0;
-    size_t off = 0;
-    while (idx < count) {
-        bool is_null = is_nulls[idx++];
-        size_t run = 1;
-        while (idx < count && is_nulls[idx] == is_null) {
-            idx++;
-            run++;
-        }
-        if (is_null) {
-            // The batch is checked above by the number of NULL rows that the caller gave. A column that is not
-            // nullable refuses the rows, and this catches a number that does not match the flags.
-            if (UNLIKELY(!dst->append_nulls(run))) {
-                return Status::Corruption("The column cannot hold NULL, but the page has NULL values for it");
+    return _append_or_rollback(dst, [&]() -> Status {
+        const uint8_t* __restrict is_nulls = null_infos.nulls_data();
+        size_t idx = 0;
+        size_t off = 0;
+        while (idx < count) {
+            bool is_null = is_nulls[idx++];
+            size_t run = 1;
+            while (idx < count && is_nulls[idx] == is_null) {
+                idx++;
+                run++;
             }
-        } else {
-            const FilterData* forward_filter = filter ? filter + off : filter;
-            RETURN_IF_ERROR(this->next_batch(run, content_type, dst, forward_filter));
+            if (is_null) {
+                // The batch is checked above by the number of NULL rows that the caller gave. A column that is not
+                // nullable refuses the rows, and this catches a number that does not match the flags.
+                if (UNLIKELY(!dst->append_nulls(run))) {
+                    return Status::Corruption("The column cannot hold NULL, but the page has NULL values for it");
+                }
+            } else {
+                const FilterData* forward_filter = filter ? filter + off : filter;
+                RETURN_IF_ERROR(this->next_batch(run, content_type, dst, forward_filter));
+            }
+            off += run;
         }
-        off += run;
+        return Status::OK();
+    });
+}
+
+void Decoder::_truncate(Column* dst, size_t size) {
+    dst->resize(size);
+    if (dst->is_nullable()) {
+        down_cast<NullableColumn*>(dst)->update_has_null();
     }
-    return Status::OK();
 }
 
 Status Decoder::_check_nulls_fit(const NullInfos& null_infos, const Column* dst, size_t count) const {
