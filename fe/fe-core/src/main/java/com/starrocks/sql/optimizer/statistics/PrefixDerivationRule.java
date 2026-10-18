@@ -89,7 +89,7 @@ final class PrefixDerivationRule {
     }
 
     // [s, n] of substr(column, s, n) with constant positions, null for any other expression.
-    private static int[] substrPositions(ScalarOperator expression) {
+    static int[] substrPositions(ScalarOperator expression) {
         if (!(expression instanceof CallOperator) || expression.getClass() != CallOperator.class
                 || !FunctionSet.SUBSTR.equals(((CallOperator) expression).getFnName().toLowerCase(Locale.ROOT))
                 || expression.getChildren().size() != 3 || !expression.getChild(0).isColumnRef()) {

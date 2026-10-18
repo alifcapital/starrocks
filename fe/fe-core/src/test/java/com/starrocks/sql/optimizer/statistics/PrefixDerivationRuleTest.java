@@ -15,6 +15,7 @@
 package com.starrocks.sql.optimizer.statistics;
 
 import com.starrocks.catalog.Function;
+import com.starrocks.qe.ConnectContext;
 import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.ast.expression.ExprUtils;
 import com.starrocks.sql.optimizer.Utils;
@@ -27,6 +28,7 @@ import com.starrocks.sql.optimizer.operator.scalar.InPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.IsNullPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.LikePredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
+import com.starrocks.sql.optimizer.rewrite.scalar.ConsolidateLikesRule;
 import com.starrocks.type.Type;
 import com.starrocks.type.VarcharType;
 import com.starrocks.utframe.UtFrameUtils;
@@ -425,6 +427,44 @@ public class PrefixDerivationRuleTest {
         // NOT keeps the rows that are not NULL, as for the LIKE.
         Assertions.assertEquals(rows(not(like(C, "104%"))), rows(not(one)), 1e-6);
         Assertions.assertEquals(600, rows(not(one)), 1e-6);
+    }
+
+    // What ConsolidateLikesRule makes of the predicate.
+    private static ScalarOperator consolidated(ScalarOperator predicate) {
+        if (ConnectContext.get() == null) {
+            new ConnectContext().setThreadLocalInfo();
+        }
+        return ConsolidateLikesRule.INSTANCE.apply(predicate, null);
+    }
+
+    @Test
+    public void testOrOfLikeConditionsWithSeveralPercentsIsTheOrOfThoseOfThePrefixes() {
+        // The optimizer writes the OR of LIKE conditions with several % at the end as one REGEXP, whose groups end with
+        // .*.*, and the estimate of it is the one of the OR of the LIKE conditions of the prefixes: 600 and 300 rows.
+        ScalarOperator percents = Utils.compoundOr(like(C, "103%%"), like(C, "104%%"));
+        ScalarOperator regexp = consolidated(percents);
+        Assertions.assertEquals(regexp(C, "^((103.*.*)|(104.*.*))$"), regexp);
+        ScalarOperator prefixes = Utils.compoundOr(like(C, "103%"), like(C, "104%"));
+        Assertions.assertEquals(900, rows(prefixes), 1e-6);
+        Assertions.assertEquals(900, rows(regexp), 1e-6);
+        Assertions.assertEquals(900, rows(percents), 1e-6);
+        Assertions.assertEquals(written(prefixes), written(regexp));
+        // Without the statistic on x they are the same too, the estimate of the LIKE conditions of the prefixes.
+        Assertions.assertEquals(plainRows(prefixes), plainRows(regexp), 1e-6);
+        // The other prefixes: one of them has no row, the other 600.
+        Assertions.assertEquals(rows(Utils.compoundOr(like(C, "103%"), like(C, "105%"))),
+                rows(consolidated(Utils.compoundOr(like(C, "103%%"), like(C, "105%%")))), 1e-6);
+        // The negation of them is the AND of the negations, that the rule writes as the NOT of the REGEXP: the rows that
+        // are not NULL and start with neither, 1000 - 100 - 900 and the floor of an estimate.
+        ScalarOperator notPercents = Utils.compoundAnd(not(like(C, "103%%")), not(like(C, "104%%")));
+        ScalarOperator notRegexp = consolidated(notPercents);
+        Assertions.assertEquals(not(regexp(C, "^((103.*.*)|(104.*.*))$")), notRegexp);
+        ScalarOperator notPrefixes = Utils.compoundAnd(not(like(C, "103%")), not(like(C, "104%")));
+        Assertions.assertEquals(rows(notPrefixes), rows(notRegexp), 1e-6);
+        Assertions.assertEquals(rows(notPrefixes), rows(notPercents), 1e-6);
+        // The prefixes of the first characters of c.
+        ScalarOperator left = Utils.compoundOr(like(left(5), "103%"), like(left(5), "104%"));
+        Assertions.assertEquals(rows(left), rows(Utils.compoundOr(like(left(5), "103%%"), like(left(5), "104%%"))), 1e-6);
     }
 
     @Test

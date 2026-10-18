@@ -74,6 +74,20 @@ public final class ExpressionStatisticsCanonicalizer {
         TEXT
     }
 
+    /**
+     * Whether the call is spelled as left, strleft, substr or substring, which canonicalize writes as substr. It does
+     * not allocate: the callers that look for the first characters of a column ask it for the left side of every
+     * condition before they pay for the canonical form.
+     */
+    static boolean isSubstrSpelling(ScalarOperator operator) {
+        if (!(operator instanceof CallOperator call) || call.getClass() != CallOperator.class) {
+            return false;
+        }
+        String name = call.getFnName();
+        return name.equalsIgnoreCase(FunctionSet.LEFT) || name.equalsIgnoreCase(FunctionSet.STRLEFT)
+                || name.equalsIgnoreCase(FunctionSet.SUBSTR) || name.equalsIgnoreCase(FunctionSet.SUBSTRING);
+    }
+
     public static ScalarOperator canonicalize(ScalarOperator operator) {
         ScalarOperator canonical = foldConstantCasts(rewrite(operator, Use.ROOT));
         // A constant part such as 1 + 2 is folded, as the optimizer folds it in a query predicate.

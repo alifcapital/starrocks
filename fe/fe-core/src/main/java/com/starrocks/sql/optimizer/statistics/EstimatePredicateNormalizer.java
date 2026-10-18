@@ -15,9 +15,7 @@
 package com.starrocks.sql.optimizer.statistics;
 
 import com.starrocks.catalog.FunctionSet;
-import com.starrocks.common.util.StringDateFormat;
 import com.starrocks.sql.ast.expression.BinaryType;
-import com.starrocks.sql.optimizer.ConstantOperatorUtils;
 import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
@@ -39,10 +37,8 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
-import java.util.OptionalDouble;
 
 /**
  * A condition written in the forms the estimators of conditions know. One condition can be written in several ways
@@ -52,7 +48,9 @@ import java.util.OptionalDouble;
  * reads it, and the estimators see only the forms below. The rewritten predicate is a copy used by the estimate
  * alone; the predicate of the query and the plan do not change.
  * <ul>
- * <li>A REGEXP of anchored prefixes, see #anchoredPrefixes, is the OR of c LIKE 'p%' for its prefixes.</li>
+ * <li>A REGEXP of anchored prefixes, see #anchoredPrefixes, is the OR of c LIKE 'p%' for its prefixes. It is either
+ * the alternatives ^p1|^p2, or the REGEXP that ConsolidateLikesRule writes for an OR of LIKE conditions with % at the
+ * end of them, ^((p1.*.*)|(p2.*.*))$ or, ended with \z, ^((p1.*.*)|(p2.*.*))\z.</li>
  * <li>left(c, n), strleft(c, n), substr(c, 1, n) or substring(c, 1, n) = 'p' with p of n characters, on a column of
  * strings whose table declares the format of its dates with a day, is c LIKE 'p%'.</li>
  * <li>f(c) IN (v1, ..., vk) with k up to IN_AS_OR_LIMIT is the OR of f(c) = vi, for a function f whose comparison
@@ -131,13 +129,12 @@ final class EstimatePredicateNormalizer {
         boolean reads;
         PrefixCall prefix = prefixCall(left);
         if (prefix != null) {
-            reads = isDateColumn(prefix.column());
+            reads = PredicateStatisticsCalculator.dayFormatOf(prefix.column()) != null;
         } else if (left instanceof CallOperator && !(left instanceof CastOperator)) {
             reads = MonotonicFilterDerivation.columnBoundsForEstimate(
                     new BinaryPredicateOperator(BinaryType.EQ, left, values.get(0))) != null;
-        } else if (left instanceof ColumnRefOperator column && column.getType().isStringType()) {
-            StringDateFormat format = PredicateStatisticsCalculator.stringDateFormat(column);
-            reads = format != null && format.hasDay();
+        } else if (left instanceof ColumnRefOperator column) {
+            reads = PredicateStatisticsCalculator.dayFormatOf(column) != null;
         } else {
             reads = false;
         }
@@ -156,7 +153,7 @@ final class EstimatePredicateNormalizer {
     // The checks below find a condition to rewrite without allocating. They may answer yes for a condition that the
     // rewrite then leaves as it is, never no for one it rewrites.
 
-    private static boolean hasCandidate(ScalarOperator operator) {
+    static boolean hasCandidate(ScalarOperator operator) {
         if (operator.isNotEvalEstimate()) {
             return false;
         }
@@ -201,7 +198,8 @@ final class EstimatePredicateNormalizer {
                     && pattern.getType().isStringType() && pattern.getVarchar().startsWith("^");
         }
         if (atom instanceof BinaryPredicateOperator binary) {
-            return binary.getBinaryType() == BinaryType.EQ && prefixCall(binary.getChild(0)) != null
+            return binary.getBinaryType() == BinaryType.EQ
+                    && ExpressionStatisticsCanonicalizer.isSubstrSpelling(binary.getChild(0))
                     && binary.getChild(1) instanceof ConstantOperator;
         }
         if (atom instanceof InPredicateOperator in) {
@@ -209,7 +207,7 @@ final class EstimatePredicateNormalizer {
             return !in.isNotIn() && !in.isSubquery() && in.getChildren().size() >= 2
                     && in.getChildren().size() - 1 <= StatisticsEstimateCoefficient.IN_AS_OR_LIMIT
                     && ((left instanceof CallOperator && !(left instanceof CastOperator))
-                    || (left instanceof ColumnRefOperator && left.getType().isStringType()));
+                    || (left instanceof ColumnRefOperator column && PredicateStatisticsCalculator.dayFormatOf(column) != null));
         }
         return false;
     }
@@ -233,40 +231,31 @@ final class EstimatePredicateNormalizer {
         return type.isTinyint() || type.isSmallint() || type.isInt() || type.isBigint() || type.isDate();
     }
 
-    // A column of strings whose table declares the format of its dates with a day, and that is not a virtual column.
-    private static boolean isDateColumn(ColumnRefOperator column) {
-        if (!column.getType().isStringType() || ExpressionStatisticsEstimator.isVirtualColumn(column)) {
-            return false;
-        }
-        StringDateFormat format = PredicateStatisticsCalculator.stringDateFormat(column);
-        return format != null && format.hasDay();
+    // The first n characters of a column, as the canonical form and the statistics on expressions read them.
+    private record PrefixCall(ColumnRefOperator column, int length) {
     }
 
-    // left(column, n), strleft(column, n), substr(column, 1, n) or substring(column, 1, n): the column, and the
-    // position of n among the arguments
-    private record PrefixCall(ColumnRefOperator column, int lengthPosition) {
-    }
-
+    /**
+     * left(column, n), strleft(column, n), substr(column, 1, n) or substring(column, 1, n), read from the canonical form
+     * substr(column, 1, n) by the same function that the statistics on prefixes read it with; null for any other
+     * expression. We fear a copy of this reading that differs from theirs in a spelling, so there is none.
+     */
     private static PrefixCall prefixCall(ScalarOperator operator) {
-        if (!(operator instanceof CallOperator call) || call.getClass() != CallOperator.class
-                || !(call.getChild(0) instanceof ColumnRefOperator column)) {
+        if (!ExpressionStatisticsCanonicalizer.isSubstrSpelling(operator)) {
             return null;
         }
-        String name = call.getFnName().toLowerCase(Locale.ROOT);
-        if (call.getChildren().size() == 2 && (name.equals(FunctionSet.LEFT) || name.equals(FunctionSet.STRLEFT))) {
-            return new PrefixCall(column, 1);
+        try {
+            ScalarOperator canonical = ExpressionStatisticsCanonicalizer.canonicalize(operator);
+            int[] positions = PrefixDerivationRule.substrPositions(canonical);
+            if (positions == null || positions[0] != 1 || positions[1] < 0) {
+                return null;
+            }
+            return new PrefixCall((ColumnRefOperator) canonical.getChild(0), positions[1]);
+        } catch (RuntimeException e) {
+            // The estimate of an IN asks for this outside of normalize, and a failure there would fail the planning.
+            LOG.debug("Failed to read the first characters of a column for the estimate", e);
+            return null;
         }
-        if (call.getChildren().size() == 3 && (name.equals(FunctionSet.SUBSTR) || name.equals(FunctionSet.SUBSTRING))
-                && isInt(call.getChild(1), 1)) {
-            return new PrefixCall(column, 2);
-        }
-        return null;
-    }
-
-    private static boolean isInt(ScalarOperator operator, int expected) {
-        OptionalDouble number = operator instanceof ConstantOperator constant && !constant.isNull()
-                ? ConstantOperatorUtils.doubleValueFromConstant(constant) : OptionalDouble.empty();
-        return number.isPresent() && number.getAsDouble() == expected;
     }
 
     /**
@@ -293,6 +282,10 @@ final class EstimatePredicateNormalizer {
      * character.
      */
     static Optional<List<String>> anchoredPrefixes(String regexp) {
+        Optional<List<String>> consolidated = consolidatedPrefixes(regexp);
+        if (consolidated.isPresent()) {
+            return consolidated;
+        }
         int[] points = regexp.codePoints().toArray();
         List<String> prefixes = new ArrayList<>();
         StringBuilder prefix = null;
@@ -322,6 +315,95 @@ final class EstimatePredicateNormalizer {
         }
         prefixes.add(prefix.toString());
         return Optional.of(prefixes);
+    }
+
+    /**
+     * The prefixes of the REGEXP that ConsolidateLikesRule writes for an OR of LIKE conditions of one column:
+     * ^((re1)|(re2))$, or the same ended with \z, with the regular expression of each LIKE pattern in its own group. A
+     * character of the pattern stands for itself, or after a backslash when it is one of the characters of a regular
+     * expression, or a % or an _, or as \n, \r and \t for a line break, a return and a tab; an _ is a dot and a % is
+     * .*. We expect an OR of LIKE conditions that the optimizer wrote with several % at the end, as 'p%%', and that
+     * has no other wildcard, to keep the strings that start with p, as 'p%' does, so a group is read when it is such
+     * characters and then one or more .*. We fear any other group: a pattern with a wildcard before the end, or with
+     * no % at the end, is not a prefix, and one of them leaves the whole REGEXP as it is. Empty for any other
+     * expression.
+     */
+    private static Optional<List<String>> consolidatedPrefixes(String regexp) {
+        if (!regexp.startsWith("^(")) {
+            return Optional.empty();
+        }
+        // The rule ends the pattern with $, or with \z, which is the end of the text in the engines of the BE while $ is
+        // also before a line break at the end of it. The estimate does not tell the two apart: they differ only for a
+        // text that ends with a line break.
+        int end;
+        if (regexp.endsWith(")$")) {
+            end = regexp.length() - 2;
+        } else if (regexp.endsWith(")\\z")) {
+            end = regexp.length() - 3;
+        } else {
+            return Optional.empty();
+        }
+        int[] points = regexp.substring(2, end).codePoints().toArray();
+        List<String> prefixes = new ArrayList<>();
+        int i = 0;
+        while (true) {
+            if (i >= points.length || points[i] != '(') {
+                return Optional.empty();
+            }
+            i++;
+            StringBuilder prefix = new StringBuilder();
+            boolean ended = false;
+            while (i < points.length && points[i] != ')') {
+                int point = points[i];
+                if (point == '.') {
+                    if (i + 1 >= points.length || points[i + 1] != '*') {
+                        return Optional.empty();
+                    }
+                    ended = true;
+                    i += 2;
+                } else if (ended) {
+                    return Optional.empty();
+                } else if (point == '\\') {
+                    int literal = i + 1 < points.length ? escapedLiteral(points[i + 1]) : -1;
+                    if (literal < 0) {
+                        return Optional.empty();
+                    }
+                    prefix.appendCodePoint(literal);
+                    i += 2;
+                } else if (REGEXP_META.indexOf(point) >= 0) {
+                    return Optional.empty();
+                } else {
+                    prefix.appendCodePoint(point);
+                    i++;
+                }
+            }
+            if (i >= points.length || !ended) {
+                return Optional.empty();
+            }
+            prefixes.add(prefix.toString());
+            i++;
+            if (i == points.length) {
+                return Optional.of(prefixes);
+            }
+            if (points[i] != '|') {
+                return Optional.empty();
+            }
+            i++;
+        }
+    }
+
+    // The character that a backslash and the given character stand for in the REGEXP of ConsolidateLikesRule; -1 for
+    // any other one.
+    private static int escapedLiteral(int escaped) {
+        if (REGEXP_META.indexOf(escaped) >= 0 || escaped == '_' || escaped == '%') {
+            return escaped;
+        }
+        return switch (escaped) {
+            case 'n' -> '\n';
+            case 'r' -> '\r';
+            case 't' -> '\t';
+            default -> -1;
+        };
     }
 
     /** The LIKE pattern of the strings that start with a prefix. */
@@ -459,11 +541,11 @@ final class EstimatePredicateNormalizer {
                 return null;
             }
             PrefixCall call = prefixCall(predicate.getChild(0));
-            if (call == null || !isDateColumn(call.column())) {
+            if (call == null || PredicateStatisticsCalculator.dayFormatOf(call.column()) == null) {
                 return null;
             }
             String prefix = value.getVarchar();
-            if (!isInt(predicate.getChild(0).getChild(call.lengthPosition()), prefix.codePointCount(0, prefix.length()))) {
+            if (call.length() != prefix.codePointCount(0, prefix.length())) {
                 return null;
             }
             return likeOfPrefix(call.column(), prefix);

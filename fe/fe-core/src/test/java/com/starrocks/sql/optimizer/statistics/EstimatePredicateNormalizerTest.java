@@ -22,12 +22,14 @@ import com.starrocks.sql.ast.expression.ExprUtils;
 import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
+import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.InPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.LikePredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
+import com.starrocks.sql.optimizer.rewrite.scalar.ConsolidateLikesRule;
 import com.starrocks.type.BooleanType;
 import com.starrocks.type.DateType;
 import com.starrocks.type.IntegerType;
@@ -152,7 +154,7 @@ public class EstimatePredicateNormalizerTest {
         return new CallOperator(name, returnType, List.of(arguments), function);
     }
 
-    private static ScalarOperator prefix(String name, ColumnRefOperator column, int length) {
+    private static ScalarOperator prefix(String name, ScalarOperator column, int length) {
         return name.startsWith("sub")
                 ? call(name, VarcharType.VARCHAR, column, ConstantOperator.createInt(1), ConstantOperator.createInt(length))
                 : call(name, VarcharType.VARCHAR, column, ConstantOperator.createInt(length));
@@ -215,6 +217,156 @@ public class EstimatePredicateNormalizerTest {
     }
 
     @Test
+    public void testAnchoredPrefixesOfTheRegexpThatConsolidateLikesRuleWrites() {
+        Assertions.assertEquals(Optional.of(List.of("p", "q")),
+                EstimatePredicateNormalizer.anchoredPrefixes("^((p.*.*)|(q.*.*))$"));
+        Assertions.assertEquals(Optional.of(List.of("42894", "40406", "4")),
+                EstimatePredicateNormalizer.anchoredPrefixes("^((42894.*.*)|(40406.*.*.*)|(4.*))$"));
+        // The pattern '%%' is every string, and the group of it is the empty prefix.
+        Assertions.assertEquals(Optional.of(List.of("", "a")),
+                EstimatePredicateNormalizer.anchoredPrefixes("^((.*.*)|(a.*.*))$"));
+        // The characters of a regular expression after a backslash, a % and an _ after a backslash, and the line break,
+        // the return and the tab that the rule writes as \n, \r and \t.
+        Assertions.assertEquals(Optional.of(List.of("a.b", "c|d", "x\\y", "$1", "e_f", "g%h", "i\nj", "k\rl", "m\tn", "(o)",
+                "[p]", "{q}", "r*s", "t+u", "v?w", "^x")),
+                EstimatePredicateNormalizer.anchoredPrefixes("^((a\\.b.*.*)|(c\\|d.*.*)|(x\\\\y.*.*)|(\\$1.*.*)|(e\\_f.*.*)|"
+                        + "(g\\%h.*.*)|(i\\nj.*.*)|(k\\rl.*.*)|(m\\tn.*.*)|(\\(o\\).*.*)|(\\[p\\].*.*)|(\\{q\\}.*.*)|"
+                        + "(r\\*s.*.*)|(t\\+u.*.*)|(v\\?w.*.*)|(\\^x.*.*))$"));
+        // Any other group leaves the whole expression as it is: an exact string, a dot that is an _, a wildcard before
+        // the end, a group that is not the one of the rule, a class, an end anchor, an unknown escape.
+        for (String other : List.of("^((a.*.*)|(b))$", "^((a.*.*)|(b.c.*))$", "^((a.*.*)|(b.*c.*))$", "^((a.*.*)|(^$))$",
+                "^(a.*.*)$", "^((a.*.*)|b.*)$", "^((a.*.*)(b.*.*))$", "^((a.*.*)|(b.*.*)$", "^((a.*.*)|(b.*.*)))$",
+                "^((a.*.*)|(b(c).*))$", "^((a.*.*)|(b[c].*))$", "^((a.*.*)|(b.*$))$", "^((a.*.*)|(b\\d.*))$",
+                "^((a.*.*)|(b\\.*))$", "^((a.*.*)|())$", "^(())$", "^()$", "^((a.*.*)|)$", "^((a.*.*)||(b.*.*))$",
+                "((p.*.*)|(q.*.*))$", "^((p.*.*)|(q.*.*))", "^((p.*.*)|(q.*.*)) $", "^((a.+))$", "^((a.))$")) {
+            Assertions.assertEquals(Optional.empty(), EstimatePredicateNormalizer.anchoredPrefixes(other), other);
+        }
+    }
+
+    // The pattern that ConsolidateLikesRule writes when it ends it with \z and not with $.
+    private static String endedWithEndOfText(String regexp) {
+        Assertions.assertTrue(regexp.endsWith(")$"), regexp);
+        return regexp.substring(0, regexp.length() - 1) + "\\z";
+    }
+
+    @Test
+    public void testRegexpEndedWithEndOfTextIsReadAsTheOneEndedWithDollar() {
+        List<String> read = List.of("^((p.*.*)|(q.*.*))$", "^((42894.*.*)|(40406.*.*.*)|(4.*))$", "^((.*.*)|(a.*.*))$",
+                "^((a\\.b.*.*)|(c\\|d.*.*)|(x\\\\y.*.*)|(\\$1.*.*)|(e\\_f.*.*)|(g\\%h.*.*)|(i\\nj.*.*)|(k\\rl.*.*)|"
+                        + "(m\\tn.*.*)|(\\(o\\).*.*)|(\\^x.*.*))$", "^((a.*.*))$");
+        for (String dollar : read) {
+            String endOfText = endedWithEndOfText(dollar);
+            Assertions.assertTrue(endOfText.endsWith(")\\z"), endOfText);
+            Optional<List<String>> prefixes = EstimatePredicateNormalizer.anchoredPrefixes(dollar);
+            Assertions.assertTrue(prefixes.isPresent(), dollar);
+            Assertions.assertEquals(prefixes, EstimatePredicateNormalizer.anchoredPrefixes(endOfText), endOfText);
+            // The OR of the LIKE conditions of the same prefixes, as the optimizer writes them.
+            ScalarOperator normalized = normalize(regexp(NAME, endOfText));
+            Assertions.assertEquals(normalize(regexp(NAME, dollar)), normalized, endOfText);
+            Assertions.assertEquals(Utils.compoundOr(prefixes.get().stream()
+                    .map(prefix -> (ScalarOperator) like(NAME, EstimatePredicateNormalizer.likeOfPrefix(prefix))).toList()),
+                    normalized, endOfText);
+        }
+        // What is not read with $ is not read with \z.
+        for (String other : List.of("^((a.*.*)|(b))$", "^((a.*.*)|(b.c.*))$", "^((a.*.*)|(b.*c.*))$", "^(a.*.*)$",
+                "^((a.*.*)|(b.*.*)$", "^((a.*.*)|(b.*.*)))$", "^((a.*.*)|(b[c].*))$", "^((a.*.*)|(b\\d.*))$", "^((a.*.*)|())$",
+                "^(())$", "^()$", "^((a.*.*)|)$", "((p.*.*)|(q.*.*))$", "^((a.+))$", "^((a.))$")) {
+            Assertions.assertEquals(Optional.empty(), EstimatePredicateNormalizer.anchoredPrefixes(endedWithEndOfText(other)),
+                    other);
+        }
+        // Other endings are not read: no ending, an escaped dollar, \Z, \z with a backslash before it, and \z in a group.
+        for (String other : List.of("^((p.*.*)|(q.*.*))", "^((p.*.*)|(q.*.*))\\$", "^((p.*.*)|(q.*.*))\\Z",
+                "^((p.*.*)|(q.*.*))\\\\z", "^((p.*.*)|(q.*.*))z", "^((p.*.*)|(q\\z.*.*))$", "^((p.*.*)|(q.*.*))\\z$",
+                "^((p.*.*)|(q.*.*)\\z", "^((p.*.*)|(q.*.*)x\\z", "^((p.*.*)|(q.*.*)x$")) {
+            Assertions.assertEquals(Optional.empty(), EstimatePredicateNormalizer.anchoredPrefixes(other), other);
+        }
+        // The REGEXP that is not merged is the same with either ending, that is, it stays.
+        assertUnchanged(regexp(NAME, "^((a.*.*)|(b))\\z"));
+    }
+
+    @Test
+    public void testRegexpThatConsolidateLikesRuleEndsWithEndOfTextIsTheOrOfTheLikeConditionsOfItsPrefixes() {
+        ScalarOperator likes = Utils.compoundOr(like(NAME, "p%%"), like(NAME, "q%%"));
+        LikePredicateOperator merged = (LikePredicateOperator) ConsolidateLikesRule.INSTANCE.apply(likes, null);
+        // The pattern of the rule in the branch where it ends with \z: ^((p.*.*)|(q.*.*))\z.
+        ScalarOperator endOfText = regexp(NAME, endedWithEndOfText(((ConstantOperator) merged.getChild(1)).getVarchar()));
+        Assertions.assertEquals(regexp(NAME, "^((p.*.*)|(q.*.*))\\z"), endOfText);
+        assertNormalizesTo(Utils.compoundOr(like(NAME, "p%"), like(NAME, "q%")), endOfText);
+        // The AND of the negations is the NOT of the REGEXP.
+        assertNormalizesTo(new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.NOT,
+                Utils.compoundOr(like(NAME, "p%"), like(NAME, "q%"))),
+                new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.NOT, endOfText));
+        // Several patterns, as the rule writes them for the OR of three.
+        ScalarOperator three = ConsolidateLikesRule.INSTANCE.apply(Utils.compoundOr(List.of(like(NAME, "a%%"),
+                like(NAME, "b%%%"), like(NAME, "c%%"))), null);
+        assertNormalizesTo(Utils.compoundOr(List.of(like(NAME, "a%"), like(NAME, "b%"), like(NAME, "c%"))),
+                regexp(NAME, endedWithEndOfText(((ConstantOperator) three.getChild(1)).getVarchar())));
+    }
+
+    @Test
+    public void testRegexpThatConsolidateLikesRuleWritesIsTheOrOfTheLikeConditionsOfItsPrefixes() {
+        ScalarOperator likes = Utils.compoundOr(like(NAME, "p%%"), like(NAME, "q%%"));
+        ScalarOperator consolidated = ConsolidateLikesRule.INSTANCE.apply(likes, null);
+        Assertions.assertEquals(regexp(NAME, "^((p.*.*)|(q.*.*))$"), consolidated);
+        assertNormalizesTo(Utils.compoundOr(like(NAME, "p%"), like(NAME, "q%")), consolidated);
+        // The rule writes the same for the OR of several patterns, and for the AND of their negations.
+        assertNormalizesTo(Utils.compoundOr(List.of(like(NAME, "a%"), like(NAME, "b%"), like(NAME, "c%"))),
+                ConsolidateLikesRule.INSTANCE.apply(Utils.compoundOr(List.of(like(NAME, "a%%"), like(NAME, "b%%%"),
+                        like(NAME, "c%%"))), null));
+        ScalarOperator notLikes = Utils.compoundAnd(new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.NOT,
+                like(NAME, "p%%")), new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.NOT,
+                like(NAME, "q%%")));
+        ScalarOperator consolidatedNot = ConsolidateLikesRule.INSTANCE.apply(notLikes, null);
+        Assertions.assertEquals(new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.NOT,
+                regexp(NAME, "^((p.*.*)|(q.*.*))$")), consolidatedNot);
+        assertNormalizesTo(new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.NOT,
+                Utils.compoundOr(like(NAME, "p%"), like(NAME, "q%"))), consolidatedNot);
+        // A pattern that is not a prefix next to the prefixes: the REGEXP stays as the rule wrote it.
+        ScalarOperator mixed = ConsolidateLikesRule.INSTANCE.apply(Utils.compoundOr(List.of(like(NAME, "p%%"),
+                like(NAME, "q%%"), like(NAME, "r"))), null);
+        assertUnchanged(mixed);
+        ScalarOperator inside = ConsolidateLikesRule.INSTANCE.apply(Utils.compoundOr(List.of(like(NAME, "p%%"),
+                like(NAME, "q_%"))), null);
+        assertUnchanged(inside);
+    }
+
+    @Test
+    public void testRegexpThatConsolidateLikesRuleWritesKeepsTheStringsOfTheLikeConditions() {
+        var random = new java.util.Random(91);
+        String[] literals = {"a", "b", "1", ".", "%", "_", "\\", "|", "$", "^", "+", "(", ")", "*", "[", "?", "-", " ", "\n"};
+        String[] texts = {"a", "b", "1", ".", "%", "_", "\\", "|", "$", "^", "+", "(", ")", "*", "[", "?", "-", " ", "\n", "x"};
+        int compared = 0;
+        for (int iteration = 0; iteration < 4000; iteration++) {
+            List<ScalarOperator> likes = new ArrayList<>();
+            for (int part = 2 + random.nextInt(2); part > 0; part--) {
+                var pattern = new StringBuilder();
+                for (int i = random.nextInt(4); i > 0; i--) {
+                    String literal = literals[random.nextInt(literals.length)];
+                    pattern.append(literal.equals("%") || literal.equals("_") || literal.equals("\\") ? "\\" + literal : literal);
+                }
+                pattern.append("%".repeat(2 + random.nextInt(2)));
+                likes.add(like(NAME, pattern.toString()));
+            }
+            ScalarOperator consolidated = ConsolidateLikesRule.INSTANCE.apply(Utils.compoundOr(likes), null);
+            Assertions.assertTrue(consolidated instanceof LikePredicateOperator regexp && regexp.isRegexp(),
+                    likes.toString());
+            ScalarOperator normalized = normalize(consolidated);
+            Assertions.assertNotSame(consolidated, normalized, consolidated.toString());
+            var text = new StringBuilder();
+            for (int i = random.nextInt(6); i > 0; i--) {
+                text.append(texts[random.nextInt(texts.length)]);
+            }
+            boolean expected = likes.stream().anyMatch(part -> LikePatternEstimator
+                    .pattern((LikePredicateOperator) part).orElseThrow().matches(text.toString()));
+            boolean actual = Utils.extractDisjunctive(normalized).stream().anyMatch(part -> LikePatternEstimator
+                    .pattern((LikePredicateOperator) part).orElseThrow().matches(text.toString()));
+            Assertions.assertEquals(expected, actual, likes + " / " + consolidated + " / " + text);
+            compared++;
+        }
+        Assertions.assertEquals(4000, compared);
+    }
+
+    @Test
     public void testRegexpOfAnchoredPrefixesMatchesAsTheRegularExpressionDoes() {
         var random = new java.util.Random(77);
         String[] literals = {"a", "b", "1", ".", "%", "_", "\\", "|", "$", "^", "+"};
@@ -243,6 +395,81 @@ public class EstimatePredicateNormalizerTest {
         Assertions.assertEquals(5000, compared);
     }
 
+    private static final ColumnRefOperator VIRTUAL = new ColumnRefOperator(-1, VarcharType.VARCHAR, "expr#1", true);
+
+    // The format of dates for every column of the query, the virtual column and the columns of other types as well.
+    private static <T> T withFormatForEveryColumn(StringDateFormat format, Supplier<T> action) {
+        return PredicateStatisticsCalculator.withStringDateFormats(column -> format, action);
+    }
+
+    private static Statistics withVirtual() {
+        return Statistics.buildFrom(statistics()).addColumnStatistic(VIRTUAL, statistics().getColumnStatistic(TEXT)).build();
+    }
+
+    @Test
+    public void testColumnOfDatesIsAStringColumnWithADayThatIsNotVirtual() {
+        StringDateFormat month = StringDateFormat.parse("%Y-%m");
+        Assertions.assertSame(ISO, withFormatForEveryColumn(ISO, () -> PredicateStatisticsCalculator.dayFormatOf(TEXT)));
+        Assertions.assertSame(ISO, withFormatForEveryColumn(ISO, () -> PredicateStatisticsCalculator.dayFormatOf(NAME)));
+        // The virtual column holds the first characters of a column, a format with no day casts to NULL, a column of
+        // another type is not a string, and a query without a format has no column of dates.
+        Assertions.assertNull(withFormatForEveryColumn(ISO, () -> PredicateStatisticsCalculator.dayFormatOf(VIRTUAL)));
+        Assertions.assertNull(withFormatForEveryColumn(ISO, () -> PredicateStatisticsCalculator.dayFormatOf(D)));
+        Assertions.assertNull(withFormatForEveryColumn(month, () -> PredicateStatisticsCalculator.dayFormatOf(TEXT)));
+        Assertions.assertNull(PredicateStatisticsCalculator.dayFormatOf(TEXT));
+        Assertions.assertNull(withFormatForEveryColumn(null, () -> PredicateStatisticsCalculator.dayFormatOf(TEXT)));
+    }
+
+    @Test
+    public void testFourReadersOfAColumnOfDatesAgreeOnWhichColumnIsOne() {
+        StringDateFormat month = StringDateFormat.parse("%Y-%m");
+        ScalarOperator inOf = in(false, TEXT, text("2026-08-15"), text("2026-08-16"));
+        for (ColumnRefOperator column : List.of(TEXT, NAME, VIRTUAL, D)) {
+            boolean isDate = column == TEXT || column == NAME;
+            ScalarOperator in = in(false, column, text("2026-08-15"), text("2026-08-16"));
+            ScalarOperator prefixEquality = eq(prefix("left", column, 10), text("2026-08-15"));
+            ScalarOperator comparison = compare(BinaryType.GE, column, text("2026-08-15"));
+            for (StringDateFormat format : new StringDateFormat[] {ISO, month}) {
+                boolean expected = isDate && format == ISO;
+                String message = column.getName() + " " + format;
+                // The IN of the column of dates is the OR of equalities, and the candidate of the normalizer.
+                Assertions.assertEquals(expected, withFormatForEveryColumn(format,
+                        () -> EstimatePredicateNormalizer.inEqualities((InPredicateOperator) in).isPresent()), message);
+                Assertions.assertEquals(expected, withFormatForEveryColumn(format,
+                        () -> EstimatePredicateNormalizer.hasCandidate(in)), message);
+                // The prefix of the column is its LIKE.
+                Assertions.assertEquals(expected, withFormatForEveryColumn(format,
+                        () -> EstimatePredicateNormalizer.normalize(prefixEquality, withVirtual()) != prefixEquality), message);
+                // The comparison of the column is the comparison of its cast to the time.
+                Assertions.assertEquals(expected, withFormatForEveryColumn(format, () -> PredicateStatisticsCalculator
+                        .asDatetimeComparison((BinaryPredicateOperator) comparison) != null), message);
+            }
+        }
+        // The column of dates is a candidate with a format, and is not one without.
+        Assertions.assertTrue(inScope(() -> EstimatePredicateNormalizer.hasCandidate(inOf)));
+        Assertions.assertFalse(EstimatePredicateNormalizer.hasCandidate(inOf));
+        // A string column of a table with no format of dates is no candidate, whatever the list.
+        Assertions.assertFalse(inScope(() -> EstimatePredicateNormalizer.hasCandidate(in(false, NAME, text("a"), text("b")))));
+    }
+
+    @Test
+    public void testPeriodOfAPrefixIsEstimatedOnlyForAColumnOfDates() {
+        // The LIKE of a prefix on a column of dates is estimated as the period, and on the virtual column, whatever the
+        // formats of the query say, as on any column without one.
+        ScalarOperator onText = like(TEXT, "2026-08-1%");
+        ScalarOperator onVirtual = like(VIRTUAL, "2026-08-1%");
+        double text = withFormatForEveryColumn(ISO, () -> PredicateStatisticsCalculator
+                .statisticsCalculate(onText, withVirtual()).getOutputRowCount());
+        double textWithoutFormat = PredicateStatisticsCalculator.statisticsCalculate(onText, withVirtual())
+                .getOutputRowCount();
+        Assertions.assertNotEquals(textWithoutFormat, text, 1.0);
+        double virtual = withFormatForEveryColumn(ISO, () -> PredicateStatisticsCalculator
+                .statisticsCalculate(onVirtual, withVirtual()).getOutputRowCount());
+        double virtualWithoutFormat = PredicateStatisticsCalculator.statisticsCalculate(onVirtual, withVirtual())
+                .getOutputRowCount();
+        Assertions.assertEquals(virtualWithoutFormat, virtual, 1e-6);
+    }
+
     @Test
     public void testPrefixEqualityOnAColumnOfDatesIsItsLike() {
         for (String name : List.of("left", "strleft", "substr", "substring")) {
@@ -251,6 +478,37 @@ public class EstimatePredicateNormalizerTest {
         }
         // The prefix of the constant is escaped as a LIKE pattern.
         assertNormalizesTo(like(TEXT, "2026\\_\\%%"), eq(prefix("left", TEXT, 6), text("2026_%")));
+    }
+
+    @Test
+    public void testPrefixIsReadFromTheCanonicalFormOfTheStatisticsOnPrefixes() {
+        ScalarOperator canonicalPrefix = prefix("substr", TEXT, 10);
+        // Every spelling that the canonical form writes as substr(c, 1, n), and the cast of the column to VARCHAR that it
+        // takes off, is the prefix of the column; so is an upper case name.
+        ScalarOperator castColumn = new CastOperator(VarcharType.VARCHAR, TEXT);
+        for (ScalarOperator spelled : List.of(prefix("left", castColumn, 10), prefix("strleft", castColumn, 10),
+                prefix("substr", castColumn, 10), prefix("substring", castColumn, 10),
+                call("LEFT", VarcharType.VARCHAR, TEXT, ConstantOperator.createInt(10)),
+                call("substr", VarcharType.VARCHAR, TEXT, ConstantOperator.createBigint(1),
+                        ConstantOperator.createInt(10)))) {
+            assertNormalizesTo(like(TEXT, "2026-08-15%"), eq(spelled, text("2026-08-15")));
+        }
+        // They agree with the rule that the statistics on prefixes write the conditions with.
+        Assertions.assertArrayEquals(new int[] {1, 10}, PrefixDerivationRule.substrPositions(
+                ExpressionStatisticsCanonicalizer.canonicalize(prefix("left", TEXT, 10))));
+        Assertions.assertArrayEquals(new int[] {1, 10}, PrefixDerivationRule.substrPositions(
+                ExpressionStatisticsCanonicalizer.canonicalize(canonicalPrefix)));
+        // The prefix of no characters is every string that is not NULL.
+        assertNormalizesTo(like(TEXT, "%"), eq(prefix("left", TEXT, 0), text("")));
+        // The first characters of an expression, or from another place, are not the prefix of a column.
+        assertUnchanged(eq(prefix("left", call("lower", VarcharType.VARCHAR, TEXT), 10), text("2026-08-15")));
+        assertUnchanged(eq(call("substr", VarcharType.VARCHAR, TEXT, ConstantOperator.createInt(0),
+                ConstantOperator.createInt(10)), text("2026-08-15")));
+        assertUnchanged(eq(call("substr", VarcharType.VARCHAR, TEXT, D, ConstantOperator.createInt(10)),
+                text("2026-08-15")));
+        assertUnchanged(eq(call("substr", VarcharType.VARCHAR, TEXT, ConstantOperator.createInt(1)),
+                text("2026-08-15")));
+        assertUnchanged(eq(prefix("left", TEXT, -1), text("")));
     }
 
     @Test

@@ -103,6 +103,21 @@ public class PredicateStatisticsCalculator {
     }
 
     /**
+     * The format of the dates of a column of strings whose table declares one with a day, or null for any other column.
+     * The strings of such a column sort as the times they hold, and a prefix of them is a period. We fear the virtual
+     * column of a statistic on expressions, which holds the first characters of a column and not its dates, being read
+     * so, and a format without a day, which casts to NULL, so these are null as well. This is the one check of a column
+     * of dates that the estimate and the normalizer make.
+     */
+    static StringDateFormat dayFormatOf(ColumnRefOperator column) {
+        if (!column.getType().isStringType() || ExpressionStatisticsEstimator.isVirtualColumn(column)) {
+            return null;
+        }
+        StringDateFormat format = stringDateFormat(column);
+        return format != null && format.hasDay() ? format : null;
+    }
+
+    /**
      * A comparison of a VARCHAR column with a constant, when the table of the column declares the format of its dates,
      * see StringDateFormatProperty, as a comparison of CAST(column AS DATETIME) that keeps the same rows, which the
      * statistics of the cast estimate. Strings of the format sort as the times they hold, so the strings above a
@@ -126,13 +141,12 @@ public class PredicateStatisticsCalculator {
     private static BinaryPredicateOperator datetimeComparison(BinaryPredicateOperator predicate) {
         BinaryType type = predicate.getBinaryType();
         if ((type != BinaryType.EQ && !type.isRange()) || !(predicate.getChild(0) instanceof ColumnRefOperator column)
-                || !column.getType().isStringType()
                 || !(predicate.getChild(1) instanceof ConstantOperator constant) || constant.isNull()
                 || !constant.getType().isStringType()) {
             return null;
         }
-        StringDateFormat format = stringDateFormat(column);
-        if (format == null || !format.hasDay()) {
+        StringDateFormat format = dayFormatOf(column);
+        if (format == null) {
             return null;
         }
         CastOperator cast = new CastOperator(DateType.DATETIME, column);
@@ -1454,11 +1468,7 @@ public class PredicateStatisticsCalculator {
          * column without such a format.
          */
         private Optional<Statistics> estimatePeriodOfPrefix(ColumnRefOperator column, String prefix) {
-            if (!column.getType().isStringType() || ExpressionStatisticsEstimator.isVirtualColumn(column)) {
-                return Optional.empty();
-            }
-            StringDateFormat format = stringDateFormat(column);
-            if (format == null || !format.hasDay()) {
+            if (dayFormatOf(column) == null) {
                 return Optional.empty();
             }
             List<ScalarOperator> bounds = new ArrayList<>(2);
