@@ -69,6 +69,9 @@ public:
         int64_t async_write_exist_count = 0;
         int64_t read_block_buffer_bytes = 0;
         int64_t read_block_buffer_count = 0;
+        // Bytes of blocks that the cache holds and that we did not load from remote storage together with
+        // the shared buffer they belong to.
+        int64_t skip_remote_read_bytes = 0;
 
         // Fold another stream's counters in. Used when a scan reads through more than one
         // CacheInputStream (e.g. CACHE SELECT routes reader-owned reads through a second
@@ -110,6 +113,7 @@ public:
             async_write_exist_count += o.async_write_exist_count;
             read_block_buffer_bytes += o.read_block_buffer_bytes;
             read_block_buffer_count += o.read_block_buffer_count;
+            skip_remote_read_bytes += o.skip_remote_read_bytes;
             return *this;
         }
     };
@@ -195,6 +199,10 @@ protected:
     void _write_cache(int64_t offset, const IOBuffer& iobuf, DiskCacheWriteOptions* options);
 
     void _deduplicate_shared_buffer(const SharedBufferPtr& sb);
+    // Split a shared buffer that is not loaded yet into the runs of blocks that we have to load from remote storage.
+    // [need_begin, need_end) is the range that is still to be read from remote storage, and it stays in one run.
+    void _skip_cached_blocks(const SharedBufferPtr& sb, int64_t need_begin, int64_t need_end);
+    bool _can_ask_cache() const;
     bool _can_ignore_populate_error(const Status& status) const;
     bool _can_try_peer_cache();
 

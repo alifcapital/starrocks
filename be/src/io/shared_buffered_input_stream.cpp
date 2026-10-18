@@ -207,6 +207,61 @@ StatusOr<SharedBufferedInputStream::SharedBufferPtr> SharedBufferedInputStream::
     return sb;
 }
 
+// find_shared_buffer() takes the first buffer whose key (the end of its raw range) is above the offset, and then
+// checks that the buffer covers the bytes. We want every offset that `sb` serves to find the new buffer that
+// covers it, and every offset in a hole between the ranges to find a buffer that does not cover it. So the raw
+// range of a new buffer is the part of the raw range of `sb` that its range covers. The new keys grow with the
+// ranges and are never above the key of `sb`, so they do not take offsets from the buffers around `sb`.
+Status SharedBufferedInputStream::split_shared_buffer(const SharedBufferPtr& sb, const std::vector<IORange>& ranges) {
+    auto old_iter = _map.find(sb->raw_offset + sb->raw_size);
+    if (old_iter == _map.end() || old_iter->second != sb) {
+        return Status::InvalidArgument("the shared buffer is not registered in the stream");
+    }
+    if (sb->buffer.capacity() != 0) {
+        return Status::InvalidArgument("the shared buffer is loaded already");
+    }
+    if (ranges.empty()) {
+        return Status::InvalidArgument("no range to split the shared buffer to");
+    }
+
+    const int64_t raw_begin = sb->raw_offset;
+    const int64_t raw_end = sb->raw_offset + sb->raw_size;
+    const int64_t end = sb->offset + sb->size;
+    int64_t prev_end = sb->offset;
+    std::vector<SharedBufferPtr> new_buffers;
+    new_buffers.reserve(ranges.size());
+    for (const IORange& r : ranges) {
+        const int64_t r_end = r.offset + r.size;
+        const int64_t new_raw_begin = std::max(r.offset, raw_begin);
+        const int64_t new_raw_end = std::min(r_end, raw_end);
+        if (r.size <= 0 || r.offset < prev_end || r_end > end || new_raw_begin >= new_raw_end) {
+            return Status::InvalidArgument(strings::Substitute("bad range [$0, $1) to split the shared buffer to, $2",
+                                                               r.offset, r_end, sb->debug_string()));
+        }
+        // The key of `sb` is free, because we erase `sb` before we insert the new buffers.
+        auto existing = _map.find(new_raw_end);
+        if (existing != _map.end() && existing != old_iter) {
+            return Status::InvalidArgument(strings::Substitute("a shared buffer with the key $0 exists already, $1",
+                                                               new_raw_end, existing->second->debug_string()));
+        }
+        // We do not know which io ranges of `sb` fall into which new buffer, so each new buffer keeps the ref_count
+        // of `sb` as an upper bound.
+        new_buffers.emplace_back(new SharedBuffer{.raw_offset = new_raw_begin,
+                                                  .raw_size = new_raw_end - new_raw_begin,
+                                                  .offset = r.offset,
+                                                  .size = r.size,
+                                                  .ref_count = sb->ref_count,
+                                                  .split = true});
+        prev_end = r_end;
+    }
+
+    _map.erase(old_iter);
+    for (const SharedBufferPtr& new_buffer : new_buffers) {
+        _map.emplace(new_buffer->raw_offset + new_buffer->raw_size, new_buffer);
+    }
+    return Status::OK();
+}
+
 Status SharedBufferedInputStream::get_bytes(const uint8_t** buffer, size_t offset, size_t count,
                                             SharedBufferPtr shared_buffer) {
     if (!shared_buffer) {

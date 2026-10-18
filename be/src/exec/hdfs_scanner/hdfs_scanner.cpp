@@ -647,6 +647,7 @@ void HdfsScanner::update_counter() {
         COUNTER_UPDATE(profile->datacache_async_write_exist_counter, stats.async_write_exist_count);
         COUNTER_UPDATE(profile->datacache_read_block_buffer_counter, stats.read_block_buffer_count);
         COUNTER_UPDATE(profile->datacache_read_block_buffer_bytes, stats.read_block_buffer_bytes);
+        COUNTER_UPDATE(profile->datacache_skip_remote_read_bytes, stats.skip_remote_read_bytes);
 
         if (_scanner_ctx->datacache_options.enable_cache_select) {
             // For cache select, we will update load datacache metrics

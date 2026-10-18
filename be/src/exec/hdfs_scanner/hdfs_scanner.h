@@ -236,6 +236,7 @@ struct HdfsScannerProfile {
     RuntimeProfile::Counter* datacache_async_write_exist_counter = nullptr;
     RuntimeProfile::Counter* datacache_read_block_buffer_counter = nullptr;
     RuntimeProfile::Counter* datacache_read_block_buffer_bytes = nullptr;
+    RuntimeProfile::Counter* datacache_skip_remote_read_bytes = nullptr;
 
     RuntimeProfile::Counter* shared_buffered_shared_io_count = nullptr;
     RuntimeProfile::Counter* shared_buffered_shared_io_bytes = nullptr;

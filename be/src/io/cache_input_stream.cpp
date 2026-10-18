@@ -16,7 +16,9 @@
 
 #include <fmt/format.h>
 
+#include <algorithm>
 #include <utility>
+#include <vector>
 
 #include "common/config.h"
 #include "gutil/strings/fastmem.h"
@@ -253,11 +255,19 @@ Status CacheInputStream::_read_blocks_from_remote(const int64_t offset, const in
         // check [read_offset_cursor, read_size) is already in SharedBuffer
         // If existed, we can use zero copy to avoid copy data from SharedBuffer to _buffer
         SharedBufferPtr sb = nullptr;
+        auto ret = _sb_stream->find_shared_buffer(read_offset_cursor, read_size);
+        if (ret.ok() && ret.value()->buffer.capacity() == 0 && !ret.value()->split && _can_ask_cache()) {
+            // Loading this shared buffer downloads all of its blocks, and we fear that the cache holds some of
+            // them. So we split the buffer into the runs of blocks without cache before we load it. The chunk is
+            // a part of the range that is still to be read, so it stays inside one run. A buffer that an earlier
+            // split made is not asked again, because the cache has answered for its blocks already.
+            _skip_cached_blocks(ret.value(), read_offset_cursor, block_end_offset);
+            ret = _sb_stream->find_shared_buffer(read_offset_cursor, read_size);
+        }
         int64_t read_remote_ns = 0;
         int64_t previous_remote_bytes = _sb_stream->shared_io_bytes() + _sb_stream->direct_io_bytes();
         {
             SCOPED_RAW_TIMER(&read_remote_ns);
-            auto ret = _sb_stream->find_shared_buffer(read_offset_cursor, read_size);
             if (ret.ok()) {
                 sb = ret.value();
                 const uint8_t* buffer = nullptr;
@@ -345,6 +355,101 @@ void CacheInputStream::_deduplicate_shared_buffer(const SharedBufferPtr& sb) {
             _block_map.erase(i);
         }
     }
+}
+
+bool CacheInputStream::_can_ask_cache() const {
+    return _cache != nullptr && _cache->is_initialized();
+}
+
+// We fear that a shared buffer covers blocks that the cache holds: we read them from the cache anyway, so loading
+// them with the buffer downloads the same data twice. So we ask the cache about each block of the buffer that
+// [need_begin, need_end) does not need, and split the buffer into one shared buffer for each run of blocks
+// without cache:
+// - The blocks of [need_begin, need_end) are always in a run, even if the cache holds them. We are here
+//   because the cache did not give them to us (they are missing, or the IO adaptor refused the read).
+// - We expect to read every run later, and we want one request for each run. So each run gets a shared buffer
+//   that the stream loads when a read first needs it. A run without a buffer is read block by block.
+// - We expect that a request costs about one round trip (about 25 ms on S3), in which one stream reads about
+//   2 MB, so a small cached gap is cheaper to download than to skip with an extra request. So two runs with a
+//   cached gap of at most io_coalesce_read_max_distance_size share one buffer, and we download the gap. We also
+//   fear that one request for a very long span is slow and holds a lot of memory, so a merged buffer is not
+//   larger than the coalesce buffer size of the stream. A run that is larger than that by itself stays one buffer.
+// - If one range covers the whole buffer (the cache holds no block, or every gap is small), we keep the buffer.
+// The answer of the cache is only a hint, and a block can be evicted after the answer. No buffer covers a block
+// that we cut out, so its read goes to the cache, finds nothing, and then reads remote storage directly.
+// The caller loads the buffer of the current read right after this call, and a buffer that this function made
+// is not asked again, so the cache is asked at most once about each block of a shared buffer.
+void CacheInputStream::_skip_cached_blocks(const SharedBufferPtr& sb, int64_t need_begin, int64_t need_end) {
+    if (sb->size <= 0 || need_begin >= need_end) {
+        return;
+    }
+    const int64_t sb_begin = sb->offset;
+    const int64_t sb_end = sb->offset + sb->size;
+    const int64_t first_block = sb_begin / _block_size;
+    const int64_t last_block = (sb_end - 1) / _block_size;
+    const int64_t need_first = std::max(need_begin / _block_size, first_block);
+    const int64_t need_last = std::min((need_end - 1) / _block_size, last_block);
+    if (need_first > need_last) {
+        return;
+    }
+
+    auto is_cached = [&](int64_t block_id) {
+        const int64_t block_offset = block_id * _block_size;
+        return _cache->exist(_cache_key, block_offset, std::min(_block_size, _size - block_offset));
+    };
+
+    // The runs of consecutive blocks without cache, in the order of the blocks.
+    std::vector<SharedBufferedInputStream::IORange> runs;
+    for (int64_t block_id = first_block; block_id <= last_block; ++block_id) {
+        const bool needed = block_id >= need_first && block_id <= need_last;
+        if (!needed && is_cached(block_id)) {
+            continue;
+        }
+        // The bytes of the block that this buffer would load.
+        const int64_t begin = std::max(block_id * _block_size, sb_begin);
+        const int64_t end = std::min((block_id + 1) * _block_size, sb_end);
+        if (!runs.empty() && runs.back().offset + runs.back().size == begin) {
+            runs.back().size = end - runs.back().offset;
+        } else {
+            runs.emplace_back(begin, end - begin);
+        }
+    }
+
+    // The ranges of the buffer that we load. We merge two runs under two limits, like
+    // SharedBufferedInputStream::_merge_small_ranges() does: the gap between them and the size of the merged buffer.
+    // A run that is longer than the size limit stays one buffer, like a long io range.
+    // We read the distance from the config here and not from the options of the stream, which the scanner set when
+    // it opened the stream. So a change of the config works at the next split.
+    const int64_t max_gap = config::io_coalesce_read_max_distance_size;
+    const int64_t max_buffer_size = _sb_stream->coalesce_options().max_buffer_size;
+    std::vector<SharedBufferedInputStream::IORange> ranges;
+    for (const auto& run : runs) {
+        if (!ranges.empty()) {
+            auto& last = ranges.back();
+            const int64_t merged_size = run.offset + run.size - last.offset;
+            if (run.offset - (last.offset + last.size) <= max_gap && merged_size <= max_buffer_size) {
+                last.size = merged_size;
+                continue;
+            }
+        }
+        ranges.push_back(run);
+    }
+    int64_t kept_bytes = 0;
+    for (const auto& range : ranges) {
+        kept_bytes += range.size;
+    }
+    if (kept_bytes == sb->size) {
+        return;
+    }
+
+    const int64_t skipped_bytes = sb->size - kept_bytes;
+    Status st = _sb_stream->split_shared_buffer(sb, ranges);
+    if (!st.ok()) {
+        // The buffer is loaded whole then, which costs bytes but returns the right data.
+        LOG(WARNING) << "Failed to split a shared buffer of " << _filename << ": " << st.message();
+        return;
+    }
+    _stats.skip_remote_read_bytes += skipped_bytes;
 }
 
 struct ReadFromRemoteIORange {

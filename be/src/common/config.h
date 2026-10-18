@@ -1280,8 +1280,10 @@ CONF_mBool(parquet_reader_enable_adpative_bloom_filter, "true");
 CONF_Double(parquet_page_cache_decompress_threshold, "1.5");
 CONF_mBool(enable_adjustment_page_cache_skip, "true");
 
-CONF_Int32(io_coalesce_read_max_buffer_size, "8388608");
-CONF_Int32(io_coalesce_read_max_distance_size, "1048576");
+CONF_mInt32(io_coalesce_read_max_buffer_size, "8388608");
+// The bytes that we accept to download in vain to save one request: two io ranges that are not farther apart than
+// this are read with one request, and so are two blocks without data cache that have cached blocks between them.
+CONF_mInt32(io_coalesce_read_max_distance_size, "1048576");
 CONF_mBool(io_coalesce_adaptive_lazy_active, "true");
 CONF_Int32(io_tasks_per_scan_operator, "4");
 CONF_Int32(connector_io_tasks_per_scan_operator, "16");

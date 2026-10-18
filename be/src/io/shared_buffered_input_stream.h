@@ -47,6 +47,9 @@ public:
         int64_t size;
         int64_t ref_count;
         std::vector<uint8_t> buffer;
+        // True for a buffer that split_shared_buffer() made. The caller of split_shared_buffer() has chosen
+        // the bytes that the buffer covers, so no one needs to choose them again.
+        bool split = false;
         void align(int64_t align_size, int64_t file_size);
         std::string debug_string() const;
     };
@@ -69,6 +72,14 @@ public:
     }
 
     StatusOr<SharedBufferPtr> find_shared_buffer(size_t offset, size_t count);
+    // We want a caller that knows that some bytes of `sb` are not worth loading (for example, the data cache holds
+    // them) to load the rest of `sb` as before: each run of bytes with one request, when a read first needs it.
+    // So this function replaces `sb`, which is not loaded yet, by one shared buffer for each of `ranges`. No new
+    // buffer covers the bytes of `sb` outside `ranges`, so find_shared_buffer() fails for them and the caller reads
+    // them by other means.
+    // `ranges` are sorted by offset, do not overlap, and lie inside [sb->offset, sb->offset + sb->size).
+    // On an error nothing changes. On success `sb` is not registered any more and the caller does not use it again.
+    Status split_shared_buffer(const SharedBufferPtr& sb, const std::vector<IORange>& ranges);
     // Get bytes from shared buffer or remote storage, when the shared_buffer is not NULL, the function
     // will use it directely instead of finding it repeatedly.
     Status get_bytes(const uint8_t** buffer, size_t offset, size_t count, SharedBufferPtr shared_buffer);
@@ -83,6 +94,7 @@ public:
     void release_to_offset(int64_t offset);
     void release();
     void set_coalesce_options(const CoalesceOptions& options) { _options = options; }
+    const CoalesceOptions& coalesce_options() const { return _options; }
     void set_align_size(int64_t size) { _align_size = size; }
 
     int64_t shared_io_count() const { return _shared_io_count; }
