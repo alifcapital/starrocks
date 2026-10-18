@@ -217,6 +217,11 @@ public:
 
     bool has_null() const { return *_has_null; }
 
+    // Parquet keeps the values of 8-bit and 16-bit integer columns as INT32 and hashes them in its bloom filters with
+    // four bytes, while the values that we probe are one or two bytes long. After this call, which must follow
+    // init(), the filter widens a value of one or two bytes to a signed int32 before it hashes it.
+    void hash_narrow_ints_as_int32();
+
     virtual void add_hash(uint64_t hash) = 0;
     virtual bool test_hash(uint64_t hash) const = 0;
 

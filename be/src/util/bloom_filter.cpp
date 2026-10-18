@@ -33,6 +33,7 @@
 // under the License.
 
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <memory>
 
@@ -51,6 +52,37 @@ uint64_t MurmurHasher::hash(const void* buf, uint32_t size) const {
 
 uint64_t XXHasher::hash(const void* buf, uint32_t size) const {
     return HashUtil::xx_hash64(buf, size, _seed);
+}
+
+namespace {
+
+class Int32WideningHasher final : public Hasher {
+public:
+    explicit Int32WideningHasher(std::unique_ptr<Hasher> hasher) : _hasher(std::move(hasher)) {}
+
+    uint64_t hash(const void* buf, uint32_t size) const override {
+        int32_t value;
+        if (size == sizeof(int8_t)) {
+            value = *static_cast<const int8_t*>(buf);
+        } else if (size == sizeof(int16_t)) {
+            int16_t narrow;
+            memcpy(&narrow, buf, sizeof(narrow));
+            value = narrow;
+        } else {
+            return _hasher->hash(buf, size);
+        }
+        return _hasher->hash(&value, sizeof(value));
+    }
+
+private:
+    std::unique_ptr<Hasher> _hasher;
+};
+
+} // namespace
+
+void BloomFilter::hash_narrow_ints_as_int32() {
+    DCHECK(_hasher);
+    _hasher = std::make_unique<Int32WideningHasher>(std::move(_hasher));
 }
 
 std::unique_ptr<Hasher> HasherFactory::create(Hasher::HashStrategy strategy, uint32_t seed) {

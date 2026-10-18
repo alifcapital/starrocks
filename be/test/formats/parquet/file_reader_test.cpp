@@ -15,6 +15,7 @@
 #include "formats/parquet/file_reader.h"
 
 #include <gtest/gtest.h>
+#include <parquet/bloom_filter.h>
 
 #include <algorithm>
 #include <cmath>
@@ -3256,6 +3257,30 @@ TEST_F(FileReaderTest, read_parquet_bloom_filter_by_parquet_hadoop) {
     v = 1000000000;
     std::memcpy(buf, &v, sizeof(v));
     ASSERT_FALSE(bloom_filter.test_bytes(buf, 4));
+}
+
+// A Parquet writer keeps the values of an 8-bit or a 16-bit integer column as INT32 and hashes them into the bloom
+// filter with four bytes. A probe of such a column through its TINYINT or SMALLINT slot must hash the value the same
+// way, or it misses values that the filter holds and drops row groups with their rows. The filter here holds the hash
+// that the reference writer (arrow) gives the int32 of each value.
+TEST_F(FileReaderTest, bloom_filter_of_narrow_ints_matches_the_int32_hash_of_writers) {
+    // The writer makes its hasher when it is initialized.
+    ::parquet::BlockSplitBloomFilter writer;
+    writer.Init(::parquet::BlockSplitBloomFilter::kMinimumBloomFilterBytes);
+    for (const auto& [type, value] : std::vector<std::pair<LogicalType, std::string>>{
+                 {TYPE_TINYINT, "5"}, {TYPE_TINYINT, "-7"}, {TYPE_SMALLINT, "300"}, {TYPE_SMALLINT, "-1000"}}) {
+        SCOPED_TRACE(fmt::format("{} {}", static_cast<int>(type), value));
+        std::vector<char> bitset(1024 + 1, 0);
+        ParquetBlockSplitBloomFilter filter;
+        ASSERT_OK(filter.init(bitset.data(), bitset.size(), Hasher::HashStrategy::XXHASH64, 0));
+        filter.add_hash(writer.Hash(static_cast<int32_t>(std::stoi(value))));
+        std::unique_ptr<ColumnPredicate> pred(new_column_eq_predicate(get_type_info(type), 0, value));
+        ASSERT_TRUE(pred->support_original_bloom_filter());
+        // The bytes of the slot type alone are another hash, which the filter does not hold.
+        EXPECT_FALSE(pred->original_bloom_filter(&filter));
+        filter.hash_narrow_ints_as_int32();
+        EXPECT_TRUE(pred->original_bloom_filter(&filter));
+    }
 }
 
 TEST_F(FileReaderTest, read_parquet_bloom_filter_by_parquet_hadoop2) {

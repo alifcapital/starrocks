@@ -611,6 +611,11 @@ StatusOr<bool> RawColumnReader::_row_group_bloom_filter(const std::vector<const 
                 return filtered = false;
             }
         }
+        // The predicates of a TINYINT or SMALLINT column probe one or two bytes, and the INT32 column of the file
+        // hashed four.
+        if (col_type.type == TYPE_TINYINT || col_type.type == TYPE_SMALLINT) {
+            bloom_filter.hash_narrow_ints_as_int32();
+        }
 
         if (pred_relation == CompoundNodeType::AND) {
             filtered = std::ranges::any_of(predicates, [&bloom_filter](auto& pred) {
