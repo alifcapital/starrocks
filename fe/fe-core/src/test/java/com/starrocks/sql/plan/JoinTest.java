@@ -936,6 +936,24 @@ public class JoinTest extends PlanTestBase {
                 "             AND (v3 IN (SELECT v1 FROM t0)));";
         // check no exception
         String plan = getFragmentPlan(sql);
+        // The OR of the two IN subqueries is a top-level conjunct, so it becomes one semi join over a union.
+        assertContains(plan, "11:HASH JOIN\n" +
+                "  |  join op: LEFT SEMI JOIN (BROADCAST)\n" +
+                "  |  colocate: false, reason: \n" +
+                "  |  equal join conjunct: 6: v3 = 17: v1");
+        assertContains(plan, "14:HASH JOIN\n" +
+                "  |    |  join op: RIGHT SEMI JOIN (PARTITIONED)\n" +
+                "  |    |  colocate: false, reason: \n" +
+                "  |    |  equal join conjunct: 15: v1 = 5: v2");
+        assertNotContains(plan, "OUTER JOIN");
+
+        // The outer joins of the three-valued plan are reordered without an exception too.
+        connectContext.getSessionVariable().setEnableRewriteInOrToUnion(false);
+        try {
+            plan = getFragmentPlan(sql);
+        } finally {
+            connectContext.getSessionVariable().setEnableRewriteInOrToUnion(true);
+        }
         assertContains(plan, "11:HASH JOIN\n" +
                 "  |  join op: LEFT OUTER JOIN (BROADCAST)\n" +
                 "  |  colocate: false, reason: \n" +

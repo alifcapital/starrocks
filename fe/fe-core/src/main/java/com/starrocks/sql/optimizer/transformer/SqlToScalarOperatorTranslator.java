@@ -23,6 +23,7 @@ import com.starrocks.catalog.SqlFunction;
 import com.starrocks.catalog.TableName;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.sql.analyzer.AnalyzerUtils;
 import com.starrocks.sql.analyzer.ExpressionAnalyzer;
 import com.starrocks.sql.analyzer.RelationFields;
 import com.starrocks.sql.analyzer.RelationId;
@@ -118,8 +119,11 @@ import org.apache.logging.log4j.Logger;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import static com.starrocks.sql.common.UnsupportedException.unsupportedException;
@@ -196,6 +200,10 @@ public final class SqlToScalarOperatorTranslator {
         List<Subquery> subqueries = Lists.newArrayList();
         expression.collect(Subquery.class, subqueries);
         Context ctx = new Context(!subqueries.isEmpty(), useSemiAnti, Collections.emptyList());
+        if (useSemiAnti && !subqueries.isEmpty() && session != null
+                && session.getSessionVariable().isEnableRewriteInOrToUnion()) {
+            visitor.setMergeableOrPredicates(topLevelOrPredicates(expression));
+        }
 
         ScalarOperator result = visitor.visit(expression, ctx);
 
@@ -216,6 +224,20 @@ public final class SqlToScalarOperatorTranslator {
         }
 
         requireNonNull(result, "translated expression is null");
+        return result;
+    }
+
+    // A top-level conjunct keeps a row only when it is TRUE, so NULL and FALSE are the same for it. We expect the
+    // merge of "x IN (S1) OR x IN (S2)" to be safe only there, so we collect these ORs by identity and the visitor
+    // merges no other OR.
+    private static Set<Expr> topLevelOrPredicates(Expr predicate) {
+        Set<Expr> result = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (Expr conjunct : AnalyzerUtils.extractConjuncts(predicate)) {
+            if (conjunct instanceof CompoundPredicate
+                    && ((CompoundPredicate) conjunct).getOp() == CompoundPredicate.Operator.OR) {
+                result.add(conjunct);
+            }
+        }
         return result;
     }
 
@@ -307,6 +329,11 @@ public final class SqlToScalarOperatorTranslator {
         public final OptExprBuilder builder;
         public final Map<ScalarOperator, SubqueryOperator> subqueryPlaceholders;
 
+        // The top-level ORs where "x IN (S1) OR x IN (S2)" may become "x IN (S1 UNION ALL S2)", empty when the
+        // merge is off. The planned INs that the merge may take are kept in inSubqueryTerms.
+        private Set<Expr> mergeableOrPredicates = Collections.emptySet();
+        private final Map<ColumnRefOperator, InSubqueryOrMerger.Term> inSubqueryTerms = new HashMap<>();
+
         public Visitor(ExpressionMapping expressionMapping, ColumnRefFactory columnRefFactory,
                        List<ColumnRefOperator> correlation, ConnectContext session,
                        CTETransformerContext cteContext, OptExprBuilder builder,
@@ -322,6 +349,10 @@ public final class SqlToScalarOperatorTranslator {
             this.cteContext = cteContext;
             this.builder = builder;
             this.subqueryPlaceholders = subqueryPlaceholders;
+        }
+
+        public void setMergeableOrPredicates(Set<Expr> mergeableOrPredicates) {
+            this.mergeableOrPredicates = mergeableOrPredicates;
         }
 
         @Override
@@ -480,10 +511,19 @@ public final class SqlToScalarOperatorTranslator {
                 case AND:
                     return new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.AND,
                             visit(node.getChild(0), context), visit(node.getChild(1), context));
-                case OR:
-                    return new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.OR,
+                case OR: {
+                    ScalarOperator or = new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.OR,
                             visit(node.getChild(0), context.clone(node)),
                             visit(node.getChild(1), context.clone(node)));
+                    if (mergeableOrPredicates.contains(node)) {
+                        ColumnRefOperator merged = InSubqueryOrMerger.merge(or, inSubqueryTerms,
+                                subqueryPlaceholders, columnRefFactory);
+                        if (merged != null) {
+                            return merged;
+                        }
+                    }
+                    return or;
+                }
                 case NOT:
                     return new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.NOT,
                             visit(node.getChild(0), context.clone(node)));
@@ -695,6 +735,10 @@ public final class SqlToScalarOperatorTranslator {
                     applyOperator, subqueryPlan.getRootBuilder());
 
             subqueryPlaceholders.put(outputPredicateRef, subqueryOperator);
+            if (!mergeableOrPredicates.isEmpty() && !node.isNotIn() && subqueryPlan.getCorrelation().isEmpty()) {
+                inSubqueryTerms.put(outputPredicateRef, new InSubqueryOrMerger.Term(leftColRef, rightColRef,
+                        subqueryPlan.getRootBuilder(), queryStatement));
+            }
 
             return outputPredicateRef;
         }

@@ -958,6 +958,7 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     public static final String CBO_REORDER_THRESHOLD_USE_EXHAUSTIVE = "cbo_reorder_threshold_use_exhaustive";
     public static final String ENABLE_REWRITE_SUM_BY_ASSOCIATIVE_RULE = "enable_rewrite_sum_by_associative_rule";
     public static final String ENABLE_REWRITE_SIMPLE_AGG_TO_META_SCAN = "enable_rewrite_simple_agg_to_meta_scan";
+    public static final String ENABLE_REWRITE_IN_OR_TO_UNION = "enable_rewrite_in_or_to_union";
     public static final String ENABLE_REWRITE_SIMPLE_AGG_TO_HDFS_SCAN = "enable_rewrite_simple_agg_to_hdfs_scan";
     public static final String ENABLE_REWRITE_PARTITION_COLUMN_MINMAX = "enable_rewrite_partition_column_minmax";
     public static final String ENABLE_MIN_MAX_OPTIMIZATION = "enable_min_max_optimization";
@@ -2312,6 +2313,10 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     @VarAttr(name = ENABLE_REWRITE_SUM_BY_ASSOCIATIVE_RULE)
     private boolean enableRewriteSumByAssociativeRule = true;
+
+    // Merges "x IN (S1) OR x IN (S2)" in WHERE/HAVING into "x IN (S1 UNION ALL S2)" to get one semi join.
+    @VarAttr(name = ENABLE_REWRITE_IN_OR_TO_UNION)
+    private boolean enableRewriteInOrToUnion = true;
 
     @VarAttr(name = ENABLE_REWRITE_SIMPLE_AGG_TO_META_SCAN)
     private boolean enableRewriteSimpleAggToMetaScan = true;
@@ -5776,6 +5781,14 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     public boolean isEnableRewriteSumByAssociativeRule() {
         return this.enableRewriteSumByAssociativeRule;
+    }
+
+    public boolean isEnableRewriteInOrToUnion() {
+        return enableRewriteInOrToUnion;
+    }
+
+    public void setEnableRewriteInOrToUnion(boolean enableRewriteInOrToUnion) {
+        this.enableRewriteInOrToUnion = enableRewriteInOrToUnion;
     }
 
     public void setEnableRewriteSimpleAggToMetaScan(boolean enableRewriteSimpleAggToMetaScan) {

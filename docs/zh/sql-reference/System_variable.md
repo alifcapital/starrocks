@@ -932,6 +932,14 @@ FROM test;
 * **数据类型**: boolean
 * **引入版本**: v3.2.0
 
+### enable_rewrite_in_or_to_union
+
+* **范围**: Session
+* **描述**: 是否将 `x IN (子查询1) OR x IN (子查询2) [OR ...]` 改写为 `x IN (子查询1 UNION ALL 子查询2 [UNION ALL ...])`。改写后，该谓词作为一个 LEFT SEMI JOIN 执行，Runtime Filter 可以下推到 `x` 所在的扫描，不再为每个子查询生成一个带计数聚合的外连接，也不再使用嵌套循环连接。仅对 WHERE 或 HAVING 顶层合取项中的 OR 生效，因为在这里 NULL 和 FALSE 都会过滤掉该行。所有析取项都必须是 `IN`（不能是 `NOT IN`），左侧是相同的表达式，且子查询为非相关子查询。所有子查询必须返回相同的类型，因为 `x` 与子查询值的比较类型取决于子查询的类型。支持的类型为整数类型、DECIMAL、VARCHAR（长度不限）、DATE 和 DATETIME；例如 INT 与 BIGINT、DATE 与 DATETIME 是不同的类型。否则不改写。设置为 `false` 可关闭该改写。
+* **默认值**: `true`
+* **数据类型**: boolean
+* **引入版本**: v4.1
+
 ### enable_runtime_adaptive_dop
 
 * **范围**: Session

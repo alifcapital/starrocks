@@ -921,6 +921,14 @@ StarRocks は 2 種類の RF を提供します：ローカル RF とグロー�
 * **タイプ**: boolean
 * **導入バージョン**: v3.2.0
 
+### enable_rewrite_in_or_to_union
+
+* **スコープ**: Session
+* **説明**: `x IN (サブクエリ1) OR x IN (サブクエリ2) [OR ...]` を `x IN (サブクエリ1 UNION ALL サブクエリ2 [UNION ALL ...])` に書き換えるかどうかを制御します。書き換え後、この述語は 1 つの LEFT SEMI JOIN として実行され、Runtime Filter を `x` のスキャンまで届けられます。サブクエリごとのカウント集計付き外部結合やネストループ結合は生成されません。書き換えは、WHERE または HAVING のトップレベルの AND 項になっている OR にのみ適用されます。そこでは NULL と FALSE のどちらでも行が除外されるためです。すべての選言項が `IN`（`NOT IN` は不可）で、左辺が同じ式であり、サブクエリが非相関である必要があります。すべてのサブクエリが同じ型を返す必要があります。`x` とサブクエリの値の比較に使われる型が、サブクエリの型によって決まるためです。対象の型は整数型、DECIMAL、VARCHAR（長さは問いません）、DATE、DATETIME です。たとえば INT と BIGINT、DATE と DATETIME は異なる型として扱います。そうでない場合は書き換えません。`false` に設定すると書き換えを無効にします。
+* **デフォルト**: `true`
+* **タイプ**: boolean
+* **導入バージョン**: v4.1
+
 ### enable_runtime_adaptive_dop
 
 * **スコープ**: Session

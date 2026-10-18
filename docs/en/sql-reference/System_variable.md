@@ -1093,6 +1093,14 @@ If a Join (other than Broadcast Join and Replicated Join) has multiple equi-join
 * **Data Type**: boolean
 * **Introduced in**: v3.2.0
 
+### enable_rewrite_in_or_to_union
+
+* **Scope**: Session
+* **Description**: Whether the optimizer rewrites `x IN (subquery1) OR x IN (subquery2) [OR ...]` into `x IN (subquery1 UNION ALL subquery2 [UNION ALL ...])`. The predicate then runs as one LEFT SEMI JOIN, and runtime filters can reach the scan of `x`, instead of one outer join with a count aggregation per subquery and a nested-loop join. The rewrite applies only to an OR that is a top-level conjunct of WHERE or HAVING, where a NULL result and a FALSE result both drop the row. All disjuncts must be `IN` (not `NOT IN`) with the same left expression and an uncorrelated subquery. All subqueries must return the same type, because `x` is compared with the values of a subquery in a type that depends on the type of the subquery. The supported types are the integer types, DECIMAL, VARCHAR (the length does not matter), DATE and DATETIME; for example INT and BIGINT, or DATE and DATETIME, are different types. Otherwise the predicate is not rewritten. Set it to `false` to turn the rewrite off.
+* **Default**: `true`
+* **Data Type**: boolean
+* **Introduced in**: v4.1
+
 ### enable_runtime_adaptive_dop
 
 * **Scope**: Session
