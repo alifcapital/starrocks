@@ -15,6 +15,7 @@
 package com.starrocks.sql.optimizer.rewrite;
 
 import com.starrocks.qe.ConnectContext;
+import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
@@ -23,6 +24,7 @@ import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 
+import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -44,9 +46,9 @@ public final class MonotonicFilterDerivation {
         boolean added = false;
         for (ScalarOperator original : originals) {
             // Do not descend into OR, NOT, IS NULL or other boolean/value expressions.
-            Bound bound = derive(original, useRegistry);
-            if (bound.predicate() != original) {
-                ScalarOperator rewritten = new ScalarOperatorRewriter().rewrite(bound.predicate(),
+            ScalarOperator bound = derive(original, useRegistry).predicate();
+            if (bound != original) {
+                ScalarOperator rewritten = new ScalarOperatorRewriter().rewrite(bound,
                         ScalarOperatorRewriter.DEFAULT_REWRITE_SCAN_PREDICATE_RULES);
                 for (ScalarOperator conjunct : Utils.extractConjuncts(rewritten)) {
                     // We want bounds that let the scan skip files and row groups by min/max, which works only for a
@@ -73,8 +75,24 @@ public final class MonotonicFilterDerivation {
 
     /**
      * Bounds on columns that hold whenever a comparison of a function of a column with a constant is true, for the
-     * estimation of this comparison. A column has min, max, NDV and maybe a histogram, while an expression of it often
-     * has no statistics. Null when nothing is derived.
+     * estimation of this comparison. Null when nothing is derived.
+     * <p>
+     * We estimate the comparison by these bounds and not by the statistics of the function. The statistics of a
+     * function are derived from the statistics of its column and keep less of them, often only min and max, while
+     * the column has its NDV, most common values and histogram. Exact bounds admit more rows than the comparison only
+     * where the function returns NULL, such as a shift past the last date, and the statistics of the function do
+     * not show these rows either.
+     * <p>
+     * Some bounds are wider than the comparison, and then the caller also estimates the comparison on the function
+     * and takes the lower estimate. A month shift of a DATETIME keeps the time of day and cuts the day to the end of
+     * a shorter month, so its bound holds whole days: months_add(ts, 1) = '2025-03-15 10:00:00' bounds ts to all of
+     * 2025-02-15, and months_add(ts, 1) < '2025-03-15 10:00:00' to the days before 2025-02-16. Only a lower bound
+     * at midnight is exact. The rest of the day can hold a hot value of the column on the other side of the constant,
+     * with many times the rows that the comparison keeps. The statistics of the shift carry the histogram of its
+     * argument, see ExpressionStatisticCalculator, so the estimate on the function counts the hot value only when the
+     * comparison keeps it. A month shift inside another function is not marked: the estimate on the outer function
+     * may not see the hot value, and the lower estimate would drop rows that the comparison keeps. A bound through a
+     * cast of a string, and bounds that leave out a derived conjunct which is not a column bound, are wider too.
      * <p>
      * We expect this to run for every comparison that the statistics estimate, many times per query. It rejects a
      * comparison by its shape and by a lookup of the function name before it allocates, and it does not run the
@@ -115,15 +133,30 @@ public final class MonotonicFilterDerivation {
         if (bounds == null) {
             return null;
         }
-        // Dropping a derived conjunct that is not a column bound leaves a weaker condition.
-        return new ColumnBounds(bounds, !bound.necessary() && bounds.size() == derived.size());
+        // A derived conjunct that is not a column bound is left out, so the bounds are a weaker condition.
+        return new ColumnBounds(bounds, bound.wider() || bounds.size() != derived.size()
+                || monthShiftHoldsMore(call, predicate.getBinaryType(), constant));
+    }
+
+    // A month shift of anything but a date bounds only the date part, see MonotonicInverse.monthShift, which decides
+    // the comparison only for a lower bound at midnight.
+    private static boolean monthShiftHoldsMore(CallOperator call, BinaryType type, ConstantOperator constant) {
+        if (!MonotonicFunctionRegistry.isMonthShift(call.getFnName())) {
+            return false;
+        }
+        ScalarOperator dataChild = MonotonicFunctionRegistry.dataChildOf(call);
+        if (dataChild == null || isDateInput(dataChild)) {
+            return false;
+        }
+        return type != BinaryType.GE || !constant.getType().isDateType()
+                || !constant.getDatetime().toLocalTime().equals(LocalTime.MIDNIGHT);
     }
 
     /**
-     * Bounds on columns derived from one comparison. When exact, they hold exactly when the comparison is true;
-     * otherwise they only follow from it, and an estimate by them is an upper bound of the rows.
+     * Bounds on columns derived from one comparison. When wider, they admit rows that the comparison does not hold
+     * besides the rows where the function returns NULL.
      */
-    public record ColumnBounds(List<ScalarOperator> bounds, boolean exact) {
+    public record ColumnBounds(List<ScalarOperator> bounds, boolean wider) {
     }
 
     // An inverse on a DATE column often compares the column cast to DATETIME, which the scan rewriter turns into a
@@ -147,9 +180,9 @@ public final class MonotonicFilterDerivation {
         return false;
     }
 
-    // A predicate derived from a conjunct. When a function on the way has no exact inverse, the predicate only follows
-    // from the conjunct, and we call it necessary: the conjunct must stay next to it. Otherwise it is equivalent.
-    private record Bound(ScalarOperator predicate, boolean necessary) {
+    // The bounds derived from a conjunct, or the conjunct itself when nothing is derived, and whether they are wider
+    // than the conjunct, see columnBoundsForEstimate.
+    private record Bound(ScalarOperator predicate, boolean wider) {
     }
 
     private static Bound derive(ScalarOperator predicate, boolean useRegistry) {
@@ -169,7 +202,6 @@ public final class MonotonicFilterDerivation {
         }
         CallOperator call = (CallOperator) predicate.getChild(0);
         MonotonicFunctionRegistry.PredicateInverse inverse = MonotonicFunctionRegistry.filterInverse(call.getFnName());
-        boolean necessary = inverse != null;
         if (inverse == null) {
             inverse = MonotonicFunctionRegistry.exactInverse(call.getFnName());
         }
@@ -186,14 +218,21 @@ public final class MonotonicFilterDerivation {
         if (bound == predicate) {
             return none;
         }
+        boolean wider = false;
         // Each inverse removes one function layer; recursively derive bounds through a chain.
         List<ScalarOperator> conjuncts = Utils.extractConjuncts(bound);
         List<ScalarOperator> layers = new ArrayList<>(conjuncts.size());
         for (ScalarOperator conjunct : conjuncts) {
             Bound layer = derive(conjunct, useRegistry);
             layers.add(layer.predicate());
-            necessary |= layer.necessary();
+            wider |= layer.wider();
         }
-        return new Bound(Utils.compoundAnd(layers), necessary);
+        return new Bound(Utils.compoundAnd(layers), wider);
+    }
+
+    // A DATE, or a DATE cast to DATETIME, as MonotonicInverse.monthShift reads its input
+    private static boolean isDateInput(ScalarOperator dataChild) {
+        return dataChild.getType().isDate()
+                || (dataChild instanceof CastOperator && dataChild.getChild(0).getType().isDate());
     }
 }

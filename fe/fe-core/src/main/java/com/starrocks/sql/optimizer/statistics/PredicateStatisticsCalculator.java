@@ -474,35 +474,34 @@ public class PredicateStatisticsCalculator {
                 return statistics;
             }
             // A comparison of a function of a column with a constant is estimated by the bounds on the column that
-            // follow from it. The check of the shape comes first, because it rejects most comparisons for free.
+            // follow from it, see columnBoundsForEstimate. The check of the shape comes first, because it rejects most
+            // comparisons for free.
             if (predicate.getChild(0) instanceof CallOperator && predicate.getChild(1).isConstantRef()) {
                 MonotonicFilterDerivation.ColumnBounds bounds =
                         MonotonicFilterDerivation.columnBoundsForEstimate(predicate);
                 if (bounds != null) {
-                    return estimateByColumnBounds(predicate, bounds);
+                    List<ScalarOperator> columnBounds = bounds.bounds();
+                    ScalarOperator bound = columnBounds.size() == 1 ? columnBounds.get(0)
+                            : Utils.compoundAnd(columnBounds);
+                    Statistics byBounds = statisticsCalculate(bound, statistics, useMcv);
+                    if (!bounds.wider()) {
+                        return byBounds;
+                    }
+                    // A wider bound admits rows that the comparison does not hold, such as the rest of the day of a
+                    // month shift of a DATETIME. The comparison on the statistics of the function can give
+                    // fewer rows, and we take the lower row count. The columns keep their statistics by the bound,
+                    // as the estimate on the function does not narrow the column.
+                    ColumnStatistic function = getExpressionStatistic(predicate.getChild(0));
+                    if (function.isUnknown() || function.isInfiniteRange() || function.hasNaNValue()) {
+                        return byBounds;
+                    }
+                    double rows = estimateBinaryPredicate(predicate, function).getOutputRowCount();
+                    return rows < byBounds.getOutputRowCount()
+                            ? StatisticsEstimateUtils.adjustStatisticsByRowCount(byBounds.withOutputRowCount(rows), rows)
+                            : byBounds;
                 }
             }
             return estimateBinaryPredicate(predicate, null);
-        }
-
-        private Statistics estimateByColumnBounds(BinaryPredicateOperator predicate,
-                                                  MonotonicFilterDerivation.ColumnBounds bounds) {
-            List<ScalarOperator> columnBounds = bounds.bounds();
-            ScalarOperator bound = columnBounds.size() == 1 ? columnBounds.get(0) : Utils.compoundAnd(columnBounds);
-            Statistics byBounds = statisticsCalculate(bound, statistics, useMcv);
-            if (bounds.exact()) {
-                return byBounds;
-            }
-            // The bounds only follow from the comparison, so their estimate is an upper bound of its rows. When the
-            // function has statistics of its own, the comparison on them can give fewer rows, and we take the lower
-            // estimate.
-            ColumnStatistic functionStatistic = getExpressionStatistic(predicate.getChild(0));
-            if (functionStatistic.isUnknown() || functionStatistic.isInfiniteRange()
-                    || functionStatistic.hasNaNValue()) {
-                return byBounds;
-            }
-            Statistics byFunction = estimateBinaryPredicate(predicate, functionStatistic);
-            return byFunction.getOutputRowCount() < byBounds.getOutputRowCount() ? byFunction : byBounds;
         }
 
         // knownLeftStatistic: the statistics of the left child when the caller has computed them, or null

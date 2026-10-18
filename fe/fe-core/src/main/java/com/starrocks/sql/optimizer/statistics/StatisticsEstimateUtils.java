@@ -27,6 +27,7 @@ import com.starrocks.statistic.StatisticUtils;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -389,13 +390,24 @@ public class StatisticsEstimateUtils {
         Statistics.Builder filteredStatsBuilder = Statistics.buildFrom(inputStats)
                 .setOutputRowCount(filteredRowCount);
 
-        // The row count already reflects these predicates; take only their effect on the column statistics.
+        // The row count already reflects these predicates; take only their effect on the column statistics. A column
+        // takes the predicates on it one after another, as the conjunction does: the two ends of a range on one column
+        // both narrow it. It does not take the predicates on other columns: each estimate ends by bounding the NDV of
+        // every column by its row count, and the row count of predicates on correlated columns is the one the MCV
+        // list gives, not the product of their selectivities.
+        Map<ColumnRefOperator, List<ScalarOperator>> consumedByColumn = new LinkedHashMap<>();
         for (ScalarOperator consumed : consumedNonEqualityPredicates) {
-            Statistics consumedStats = PredicateStatisticsCalculator.statisticsCalculate(consumed, inputStats, false);
             for (ColumnRefOperator column : Utils.extractColumnRef(consumed)) {
-                filteredStatsBuilder.addColumnStatistic(column, consumedStats.getColumnStatistic(column));
+                consumedByColumn.computeIfAbsent(column, k -> new ArrayList<>()).add(consumed);
             }
         }
+        consumedByColumn.forEach((column, predicates) -> {
+            Statistics columnStats = inputStats;
+            for (ScalarOperator consumed : predicates) {
+                columnStats = PredicateStatisticsCalculator.statisticsCalculate(consumed, columnStats, false);
+            }
+            filteredStatsBuilder.addColumnStatistic(column, columnStats.getColumnStatistic(column));
+        });
 
         for (Map.Entry<ColumnRefOperator, ConstantOperator> entry : equalityPredicates.entrySet()) {
             ColumnRefOperator columnRef = entry.getKey();

@@ -587,7 +587,92 @@ public class ExpressionStatisticCalculator {
             if (!result.isUnknown() && !result.isInfiniteRange()) {
                 return result;
             }
-            return monotonicImageStatistics(call, childrenColumnStatistics, result).orElse(result);
+            return monotonicImageStatistics(call, childrenColumnStatistics, result)
+                    .map(image -> withMonthShiftHistogram(call, childrenColumnStatistics, image)).orElse(result);
+        }
+
+        /**
+         * A month shift of a DATETIME gets the histogram of its argument mapped through it. A comparison with it is
+         * estimated by the bound on the column, which for a DATETIME holds whole days, and by the statistics of the
+         * shift, and takes the lower estimate (see MonotonicFilterDerivation.columnBoundsForEstimate). A comparison
+         * with a point inside a day then needs the rows on each side of the point: a hot value of the column keeps its
+         * rows, and other values take their share of a bucket instead of an even spread over the whole range.
+         * <p>
+         * Each most common value folds with the FE, as the filter compares the folded values. A bucket maps to the
+         * values of the shift at its two ends with the same rows, and its upper end keeps its rows: an equi-depth
+         * histogram often ends a bucket on a heavy value that is not among the most common ones. The shift keeps the
+         * order of the dates and the time
+         * of day; only at the end of a month it cuts the day (January 29 to 31 of one time of day go to February 29),
+         * where a bucket can stick out of these ends by a few days. Buckets whose ends meet merge. The image of a
+         * range that MonotonicImage gives is widened to whole days, and with it the neighbouring buckets of an
+         * equi-depth histogram, whose ends lie in one day, would all merge into one.
+         */
+        private ColumnStatistic withMonthShiftHistogram(CallOperator call, List<ColumnStatistic> children,
+                                                        ColumnStatistic statistic) {
+            if (statistic.getHistogram() != null || call.getFunction() == null
+                    || !MonotonicFunctionRegistry.isMonthShift(call.getFnName()) || call.getChildren().size() != 2
+                    || !call.getChild(1).isConstantRef()) {
+                return statistic;
+            }
+            ScalarOperator argument = call.getChild(0);
+            Histogram input = children.get(0).getHistogram();
+            if (!argument.getType().isDatetime() || input == null || input.hasStringValues()
+                    || input.hasUnknownRange()) {
+                return statistic;
+            }
+            // A placeholder column stands for the argument, which can be an expression with statistics of its own
+            ColumnRefOperator placeholder = new ColumnRefOperator(Integer.MAX_VALUE, argument.getType(),
+                    "month_shift_input", true);
+            CallOperator probe = new CallOperator(call.getFnName(), call.getType(), List.of(placeholder,
+                    call.getChild(1)), call.getFunction());
+            Map<String, Long> mcv = new HashMap<>();
+            for (Map.Entry<String, Long> entry : input.getMCV().entrySet()) {
+                Optional<ConstantOperator> value = MultiColumnMcvEstimator.evaluate(probe, placeholder, entry.getKey());
+                if (value.isEmpty() || value.get().isNull()) {
+                    return statistic;
+                }
+                mcv.merge(MultiColumnMcvEstimator.constantText(value.get()), entry.getValue(), Long::sum);
+            }
+            List<Bucket> buckets = new ArrayList<>(input.getBuckets().size());
+            for (Bucket bucket : input.getBuckets()) {
+                Optional<ConstantOperator> low = statisticValueToConstant(bucket.getLower(), argument.getType());
+                Optional<ConstantOperator> high = statisticValueToConstant(bucket.getUpper(), argument.getType());
+                if (low.isEmpty() || high.isEmpty() || low.get().compareTo(high.get()) > 0) {
+                    return statistic;
+                }
+                Optional<ConstantOperator> lowImage = MultiColumnMcvEstimator.evaluate(probe, placeholder,
+                        MultiColumnMcvEstimator.constantText(low.get()));
+                Optional<ConstantOperator> highImage = MultiColumnMcvEstimator.evaluate(probe, placeholder,
+                        MultiColumnMcvEstimator.constantText(high.get()));
+                if (lowImage.isEmpty() || highImage.isEmpty() || lowImage.get().isNull() || highImage.get().isNull()) {
+                    return statistic;
+                }
+                OptionalDouble lower = ConstantOperatorUtils.doubleValueFromConstant(lowImage.get());
+                OptionalDouble upper = ConstantOperatorUtils.doubleValueFromConstant(highImage.get());
+                if (lower.isEmpty() || upper.isEmpty() || lower.getAsDouble() > upper.getAsDouble()) {
+                    return statistic;
+                }
+                // The cumulative counts stay, as the shift keeps the order of the buckets. Merged buckets add up their
+                // distinct values and keep the upper end that lies higher.
+                double from = lower.getAsDouble();
+                double to = upper.getAsDouble();
+                long repeats = bucket.getUpperRepeats();
+                Optional<Long> distinct = bucket.getDistinctCount();
+                if (!buckets.isEmpty() && from <= buckets.get(buckets.size() - 1).getUpper()) {
+                    Bucket last = buckets.remove(buckets.size() - 1);
+                    from = last.getLower();
+                    if (last.getUpper() > to) {
+                        to = last.getUpper();
+                        repeats = last.getUpperRepeats();
+                    }
+                    distinct = distinct.isPresent() && last.getDistinctCount().isPresent()
+                            ? Optional.of(distinct.get() + last.getDistinctCount().get()) : Optional.empty();
+                }
+                buckets.add(distinct.isPresent() ? new Bucket(from, to, bucket.getCount(), repeats, distinct.get())
+                        : new Bucket(from, to, bucket.getCount(), repeats));
+            }
+            Histogram histogram = buckets.isEmpty() ? new Histogram(mcv) : new Histogram(buckets, mcv);
+            return ColumnStatistic.buildFrom(statistic).setHistogram(histogram).build();
         }
 
         // Many date functions have no case above, for example hours_add, months_add or last_day, so their range

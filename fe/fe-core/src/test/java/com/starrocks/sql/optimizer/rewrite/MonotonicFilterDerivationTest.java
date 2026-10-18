@@ -132,7 +132,7 @@ public class MonotonicFilterDerivationTest {
         }
         MonotonicFilterDerivation.ColumnBounds forEstimate =
                 MonotonicFilterDerivation.columnBoundsForEstimate((BinaryPredicateOperator) comparison);
-        assertTrue(forEstimate.exact());
+        assertFalse(forEstimate.wider());
         assertFalse(forEstimate.bounds().isEmpty());
     }
 
@@ -295,7 +295,8 @@ public class MonotonicFilterDerivationTest {
         // The option decides which predicates the plan gets, not how the statistics read the one it has
         MonotonicFilterDerivation.ColumnBounds forEstimate =
                 MonotonicFilterDerivation.columnBoundsForEstimate((BinaryPredicateOperator) predicate);
-        assertFalse(forEstimate.exact());
+        // from_unixtime bounds the epoch by the exact period of the rendering
+        assertFalse(forEstimate.wider());
         assertTrue(forEstimate.bounds().stream().anyMatch(p -> p.toString().equals("1: ep >= 1709634600")),
                 forEstimate.bounds().toString());
     }
@@ -307,5 +308,41 @@ public class MonotonicFilterDerivationTest {
         CallOperator abs = new CallOperator("abs", IntegerType.BIGINT, ImmutableList.of(epoch));
         ScalarOperator unknown = new BinaryPredicateOperator(BinaryType.GE, abs, ConstantOperator.createBigint(0));
         assertNull(MonotonicFilterDerivation.columnBoundsForEstimate((BinaryPredicateOperator) unknown));
+    }
+
+    private static MonotonicFilterDerivation.ColumnBounds monthShiftBounds(ScalarOperator input, BinaryType cmp,
+                                                                          LocalDateTime value) {
+        CallOperator shift = new CallOperator("months_add", input.getType(),
+                ImmutableList.of(input, ConstantOperator.createInt(1)));
+        return MonotonicFilterDerivation.columnBoundsForEstimate(
+                new BinaryPredicateOperator(cmp, shift, ConstantOperator.createDatetime(value)));
+    }
+
+    @Test
+    public void testMonthShiftOfADatetimeIsExactOnlyFromMidnight() {
+        // The bound on ts holds whole days, and only ts >= the first day that reaches midnight decides the comparison
+        ColumnRefOperator ts = new ColumnRefOperator(6, DateType.DATETIME, "ts", true);
+        LocalDateTime midnight = LocalDateTime.of(2025, 3, 15, 0, 0);
+        LocalDateTime morning = LocalDateTime.of(2025, 3, 15, 10, 0);
+        assertFalse(monthShiftBounds(ts, BinaryType.GE, midnight).wider());
+        for (BinaryType cmp : List.of(BinaryType.EQ, BinaryType.GT, BinaryType.LE, BinaryType.LT)) {
+            assertTrue(monthShiftBounds(ts, cmp, midnight).wider(), cmp.toString());
+        }
+        for (BinaryType cmp : List.of(BinaryType.EQ, BinaryType.GE, BinaryType.GT, BinaryType.LE, BinaryType.LT)) {
+            assertTrue(monthShiftBounds(ts, cmp, morning).wider(), cmp.toString());
+        }
+        // A shift of a date gives exact bounds
+        ColumnRefOperator day = new ColumnRefOperator(7, DateType.DATE, "d", true);
+        assertFalse(monthShiftBounds(day, BinaryType.LT, morning).wider());
+        // Inside another function the bound is taken as it is: the estimate on the outer function may not see a hot
+        // value that the comparison keeps
+        CallOperator shift = new CallOperator("months_add", DateType.DATETIME,
+                ImmutableList.of(ts, ConstantOperator.createInt(1)));
+        CallOperator hour = new CallOperator("date_trunc", DateType.DATETIME,
+                ImmutableList.of(ConstantOperator.createVarchar("hour"), shift));
+        MonotonicFilterDerivation.ColumnBounds hourBounds = MonotonicFilterDerivation.columnBoundsForEstimate(
+                new BinaryPredicateOperator(BinaryType.EQ, hour, ConstantOperator.createDatetime(morning)));
+        assertFalse(hourBounds.bounds().isEmpty());
+        assertFalse(hourBounds.wider());
     }
 }
