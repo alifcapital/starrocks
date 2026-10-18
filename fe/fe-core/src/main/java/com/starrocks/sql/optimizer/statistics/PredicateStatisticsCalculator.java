@@ -97,7 +97,7 @@ public class PredicateStatisticsCalculator {
         }
     }
 
-    private static StringDateFormat stringDateFormat(ColumnRefOperator column) {
+    static StringDateFormat stringDateFormat(ColumnRefOperator column) {
         Function<ColumnRefOperator, StringDateFormat> formats = STRING_DATE_FORMATS.get();
         return formats == null ? null : formats.apply(column);
     }
@@ -252,14 +252,17 @@ public class PredicateStatisticsCalculator {
         if (implied != null) {
             return implied.narrow(statisticsCalculate(implied.stripped(), statistics, useMcv, expressions), useMcv);
         }
-        Statistics plain = statisticsCalculate(predicate, statistics, useMcv);
+        // The conditions are in the forms of the estimators before the statistics on expressions and the plain
+        // estimate read them.
+        ScalarOperator normalized = EstimatePredicateNormalizer.normalize(predicate, statistics);
+        Statistics plain = statisticsCalculate(normalized, statistics, useMcv);
         try {
-            ExpressionStatisticsMatcher.Result match = ExpressionStatisticsMatcher.match(predicate, expressions,
+            ExpressionStatisticsMatcher.Result match = ExpressionStatisticsMatcher.match(normalized, expressions,
                     statistics);
             if (match == null) {
                 Set<ColumnRefOperator> describing = Sets.newHashSet();
                 for (ScanExpressionStatistics.Entry entry : expressions.getEntries()) {
-                    if (ExpressionStatisticsMatcher.describesFilteredRows(predicate, entry, statistics)) {
+                    if (ExpressionStatisticsMatcher.describesFilteredRows(normalized, entry, statistics)) {
                         describing.add(entry.getColumn());
                     }
                 }
@@ -400,9 +403,10 @@ public class PredicateStatisticsCalculator {
         }
         ImpliedRanges implied = ImpliedRanges.find(predicate);
         if (implied != null) {
-            return implied.narrow(estimate(implied.stripped(), statistics, useMcv), useMcv);
+            return implied.narrow(estimate(EstimatePredicateNormalizer.normalize(implied.stripped(), statistics),
+                    statistics, useMcv), useMcv);
         }
-        return estimate(predicate, statistics, useMcv);
+        return estimate(EstimatePredicateNormalizer.normalize(predicate, statistics), statistics, useMcv);
     }
 
     /**
@@ -447,7 +451,8 @@ public class PredicateStatisticsCalculator {
         }
         ImpliedRanges implied = ImpliedRanges.find(predicate);
         ScalarOperator estimated = implied == null ? predicate : implied.stripped();
-        return visit(estimated, statistics, false).getOutputRowCount();
+        return visit(EstimatePredicateNormalizer.normalize(estimated, statistics), statistics, false)
+                .getOutputRowCount();
     }
 
     private static Statistics visit(ScalarOperator predicate, Statistics statistics, boolean useMcv) {
@@ -717,6 +722,29 @@ public class PredicateStatisticsCalculator {
         }
     }
 
+    /**
+     * Whether the estimate evaluates the predicate: not one that is marked to be skipped, and not a range derived from
+     * other conditions while a column of the statistics is unknown.
+     */
+    static boolean needsEvalEstimate(ScalarOperator predicate, Statistics statistics) {
+        if (predicate == null) {
+            return false;
+        }
+        // check predicate need to eval
+        if (predicate.isNotEvalEstimate()) {
+            return false;
+        }
+        // extract range predicate scalar operator with unknown column statistics will not eval
+        if (predicate.isFromPredicateRangeDerive()) {
+            for (ColumnStatistic cs : statistics.getColumnStatistics().values()) {
+                if (cs.isUnknown()) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
     private static Statistics finishEstimate(ScalarOperator predicate, Statistics statistics, Statistics output,
                                             boolean useMcv) {
         if (useMcv) {
@@ -864,22 +892,7 @@ public class PredicateStatisticsCalculator {
         }
 
         protected boolean checkNeedEvalEstimate(ScalarOperator predicate) {
-            if (predicate == null) {
-                return false;
-            }
-            // check predicate need to eval
-            if (predicate.isNotEvalEstimate()) {
-                return false;
-            }
-            // extract range predicate scalar operator with unknown column statistics will not eval
-            if (predicate.isFromPredicateRangeDerive()) {
-                for (ColumnStatistic cs : statistics.getColumnStatistics().values()) {
-                    if (cs.isUnknown()) {
-                        return false;
-                    }
-                }
-            }
-            return true;
+            return needsEvalEstimate(predicate, statistics);
         }
 
         @Override
@@ -926,6 +939,13 @@ public class PredicateStatisticsCalculator {
             if (substring.isPresent()) {
                 return StatisticsEstimateUtils.adjustStatisticsByRowCount(substring.get(),
                         substring.get().getOutputRowCount());
+            }
+            if (predicate.isNotIn()) {
+                Optional<EstimatePredicateNormalizer.InEqualities> equalities =
+                        EstimatePredicateNormalizer.inEqualities(predicate);
+                if (equalities.isPresent()) {
+                    return estimateNotIn(equalities.get());
+                }
             }
             if (SPMFunctions.isSPMFunctions(predicate)) {
                 if (SPMFunctions.canRevert2ScalarOperator(predicate)) {
@@ -1092,6 +1112,33 @@ public class PredicateStatisticsCalculator {
                                     addColumnStatistic(operator, newInColumnStatistic).build()).
                     orElseGet(() -> statistics.withOutputRowCount(rowCount));
             return StatisticsEstimateUtils.adjustStatisticsByRowCount(inStatistics, rowCount, defaultSelectivity);
+        }
+
+        /**
+         * f(c) NOT IN (v1, ..., vk) over an expression whose equality with a constant the estimate reads, see
+         * EstimatePredicateNormalizer#inEqualities, is the rows where f(c) is not NULL less the rows of the IN, so that
+         * the two keep the rows of f(c) together. The IN is the OR of the equalities, which the normalizer writes. It
+         * holds no row when a NULL stands in the list: the comparison with it is never true.
+         */
+        private Statistics estimateNotIn(EstimatePredicateNormalizer.InEqualities in) {
+            ScalarOperator left = in.left();
+            double rows = 0;
+            if (!in.hasNull()) {
+                ColumnStatistic expression = getExpressionStatistic(left);
+                double notNull = statistics.getOutputRowCount()
+                        * (expression.isUnknown() ? 1 : 1 - expression.getNullsFraction());
+                Statistics inRows = statisticsCalculate(
+                        Utils.compoundOr(EstimatePredicateNormalizer.equalities(left, in.values())), statistics,
+                        useMcv);
+                rows = Math.max(0, notNull - inRows.getOutputRowCount());
+            }
+            Statistics.Builder builder = Statistics.buildFrom(statistics).setOutputRowCount(rows);
+            if (left instanceof ColumnRefOperator column && statistics.getColumnStatistics().containsKey(column)
+                    && !statistics.getColumnStatistic(column).isUnknown()) {
+                builder.addColumnStatistic(column,
+                        ColumnStatistic.buildFrom(statistics.getColumnStatistic(column)).setNullsFraction(0).build());
+            }
+            return StatisticsEstimateUtils.adjustStatisticsByRowCount(builder.build(), rows);
         }
 
         // A cast that keeps the order of its source, whose statistics have the range and the NDV of the cast. For a

@@ -152,15 +152,17 @@ final class PrefixDerivationRule {
      * first character: x holds only K characters of c, so it cannot tell what follows them.
      */
     private ScalarOperator rewriteLike(LikePredicateOperator like, ScalarOperator canonicalLeft) {
-        if (like.isRegexp()) {
-            return null;
-        }
         Optional<String> prefix = LikePatternEstimator.pattern(like).flatMap(LikePatternEstimator.LikePattern::fixedPrefix);
         if (prefix.isEmpty()) {
             return null;
         }
-        int characters = prefix.get().codePointCount(0, prefix.get().length());
-        ScalarOperator onX = new LikePredicateOperator(LikePredicateOperator.LikeType.LIKE, x, like.getChild(1));
+        return rewritePrefixLike(prefix.get(),
+                new LikePredicateOperator(LikePredicateOperator.LikeType.LIKE, x, like.getChild(1)), canonicalLeft);
+    }
+
+    // The condition that the strings start with the prefix, onX, for c or for the first characters of c.
+    private ScalarOperator rewritePrefixLike(String prefix, ScalarOperator onX, ScalarOperator canonicalLeft) {
+        int characters = prefix.codePointCount(0, prefix.length());
         if (column.equals(canonicalLeft)) {
             return characters <= length ? onX : null;
         }

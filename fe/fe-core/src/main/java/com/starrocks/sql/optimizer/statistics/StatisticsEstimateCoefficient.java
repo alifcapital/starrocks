@@ -57,6 +57,11 @@ public class StatisticsEstimateCoefficient {
     // default or predicate limit
     public static final int DEFAULT_OR_OPERATOR_LIMIT = 16;
 
+    // An IN over a function or a string date is estimated as the OR of its equalities up to this many values; the estimate
+    // of an OR adds its parts one by one, so a longer list keeps the default estimate of an IN. The same bound as the
+    // operands of an IN that the evaluator of the partition column predicates reads.
+    public static final int IN_AS_OR_LIMIT = 50;
+
     public static final double EXECUTE_COST_PENALTY = 2;
     public static final int BROADCAST_JOIN_MEM_EXCEED_PENALTY = 1000;
 

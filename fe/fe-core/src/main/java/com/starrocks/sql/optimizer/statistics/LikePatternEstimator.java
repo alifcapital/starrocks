@@ -203,8 +203,9 @@ public class LikePatternEstimator {
     }
 
     /**
-     * The pattern of a LIKE predicate with a constant pattern; empty for REGEXP and for a pattern
-     * that is not a constant.
+     * The pattern of a LIKE predicate with a constant pattern; empty for a REGEXP and for a pattern that is not a
+     * constant. A REGEXP of anchored prefixes is written as LIKE conditions before the estimate reads it, see
+     * EstimatePredicateNormalizer.
      */
     public static Optional<LikePattern> pattern(LikePredicateOperator predicate) {
         if (predicate.isRegexp() || predicate.getChildren().size() != 2 || !predicate.getChild(1).isConstantRef()) {

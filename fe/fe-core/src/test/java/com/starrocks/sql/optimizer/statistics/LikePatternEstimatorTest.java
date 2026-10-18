@@ -218,7 +218,7 @@ public class LikePatternEstimatorTest {
                 PredicateStatisticsCalculator.statisticsCalculate(noHistogram, statistics).getOutputRowCount(), 1e-9);
 
         LikePredicateOperator regexp = new LikePredicateOperator(LikePredicateOperator.LikeType.REGEXP, STATUS,
-                ConstantOperator.createVarchar("^app"));
+                ConstantOperator.createVarchar("^app.*"));
         Assertions.assertTrue(LikePatternEstimator.pattern(regexp).isEmpty());
         LikePredicateOperator column = new LikePredicateOperator(STATUS, CODE);
         Assertions.assertTrue(LikePatternEstimator.pattern(column).isEmpty());
@@ -275,5 +275,31 @@ public class LikePatternEstimatorTest {
         double expected = (10 + (total - 1000) * StatisticsEstimateCoefficient.PREDICATE_UNKNOWN_FILTER_COEFFICIENT)
                 / total;
         Assertions.assertEquals(expected, LikePatternEstimator.selectivity(like, statistics).orElseThrow(), 1e-12);
+    }
+
+    private static LikePredicateOperator regexp(String pattern) {
+        return new LikePredicateOperator(LikePredicateOperator.LikeType.REGEXP, STATUS,
+                ConstantOperator.createVarchar(pattern));
+    }
+
+    @Test
+    void regexpOfAnchoredPrefixesIsEstimatedAsTheLikeConditionsOfItsPrefixes() {
+        LikePredicateOperator app = new LikePredicateOperator(LikePredicateOperator.LikeType.LIKE, STATUS,
+                ConstantOperator.createVarchar("app%"));
+        Assertions.assertEquals(PredicateStatisticsCalculator.statisticsCalculate(app, statistics()).getOutputRowCount(),
+                PredicateStatisticsCalculator.statisticsCalculate(regexp("^app"), statistics()).getOutputRowCount(), 1e-9);
+        // The rows of the head that start with one of the prefixes: 500 + 60 of 800 of the head.
+        Assertions.assertTrue(PredicateStatisticsCalculator.statisticsCalculate(regexp("^app|^dec"), statistics())
+                .getOutputRowCount() > 560);
+    }
+
+    @Test
+    void regexpHasNoPattern() {
+        // A REGEXP of anchored prefixes is written as LIKE conditions before the estimate reads it, see
+        // EstimatePredicateNormalizer, so the patterns of LIKE are the only ones the estimators know.
+        for (String regexp : List.of("^abc", "^42894|^40406", "^abc$", "abc", "")) {
+            Assertions.assertTrue(LikePatternEstimator.pattern(regexp(regexp)).isEmpty(), regexp);
+            Assertions.assertTrue(LikePatternEstimator.selectivity(regexp(regexp), statistics()).isEmpty(), regexp);
+        }
     }
 }

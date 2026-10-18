@@ -42,7 +42,8 @@ import java.util.Set;
 /**
  * left(c, n) [NOT] LIKE 'p%' next to a statistic on x = left(c, 8): the prefix of n characters starts with p exactly
  * when c does while p has at most n characters, and no value of n characters starts with a longer p. The comparison of c
- * itself with a constant of at most 8 characters is a comparison of x.
+ * itself with a constant of at most 8 characters is a comparison of x, and a REGEXP of anchored prefixes is the OR of
+ * their LIKE conditions.
  *
  * The table has 1000 rows: 600 start with 103, 300 with 104 and 100 are NULL; the head of x holds all of them.
  */
@@ -107,8 +108,10 @@ public class PrefixDerivationRuleTest {
         return PredicateStatisticsCalculator.statisticsCalculate(predicate, scan(), true).getOutputRowCount();
     }
 
+    // The matcher reads the predicate after the normalizer, as the estimate does.
     private static ScalarOperator written(ScalarOperator predicate) {
-        ExpressionStatisticsMatcher.Result result = ExpressionStatisticsMatcher.match(predicate, expressions(), scan());
+        ExpressionStatisticsMatcher.Result result = ExpressionStatisticsMatcher.match(
+                EstimatePredicateNormalizer.normalize(predicate, scan()), expressions(), scan());
         return result == null ? null : result.getPredicate();
     }
 
@@ -183,6 +186,11 @@ public class PrefixDerivationRuleTest {
             children.add(ConstantOperator.createVarchar(value));
         }
         return new InPredicateOperator(not, children.toArray(new ScalarOperator[0]));
+    }
+
+    private static ScalarOperator regexp(ScalarOperator left, String pattern) {
+        return new LikePredicateOperator(LikePredicateOperator.LikeType.REGEXP, left,
+                ConstantOperator.createVarchar(pattern));
     }
 
     @Test
@@ -318,4 +326,113 @@ public class PrefixDerivationRuleTest {
         Assertions.assertNull(written(in(true, "1040000000")));
     }
 
+    @Test
+    public void testRegexpOfAnchoredPrefixesIsTheOrOfTheirLikeConditions() {
+        ScalarOperator one = regexp(C, "^104");
+        ScalarOperator onX = written(one);
+        Assertions.assertTrue(onX instanceof LikePredicateOperator, String.valueOf(onX));
+        Assertions.assertFalse(((LikePredicateOperator) onX).isRegexp());
+        Assertions.assertEquals(X, onX.getChild(0));
+        Assertions.assertEquals(rows(like(C, "104%")), rows(one), 1e-6);
+        Assertions.assertEquals(300, rows(one), 1e-6);
+        // Two prefixes: 600 + 300 rows less the one row the estimate of an OR takes for the rows of the second part in
+        // the first, as for the OR of the two LIKE conditions.
+        ScalarOperator two = regexp(C, "^103|^104");
+        ScalarOperator likes = Utils.compoundOr(like(C, "103%"), like(C, "104%"));
+        Assertions.assertEquals(899, rows(likes), 1e-6);
+        Assertions.assertEquals(rows(likes), rows(two), 1e-6);
+        Assertions.assertEquals(2, Utils.extractDisjunctive(written(two)).size());
+        // The prefix of the column, the one that no value has, and the one longer than x.
+        Assertions.assertEquals(rows(Utils.compoundOr(like(left(5), "103%"), like(left(5), "104%"))),
+                rows(regexp(left(5), "^103|^104")), 1e-6);
+        Assertions.assertEquals(ConstantOperator.createBoolean(false), written(regexp(left(3), "^1031")));
+        Assertions.assertEquals(1, rows(regexp(left(3), "^1031")), 1e-6);
+        // The prefix that x cannot tell stays on the column in the OR of the LIKE conditions, as in any OR.
+        Assertions.assertEquals(List.of(like(X, "103%"), like(C, "1031234567%")),
+                Utils.extractDisjunctive(written(regexp(C, "^103|^1031234567"))));
+        Assertions.assertEquals(plainRows(like(C, "1031234567%")), rows(regexp(C, "^1031234567")), 1e-6);
+        // NOT keeps the rows that are not NULL, as for the LIKE.
+        Assertions.assertEquals(rows(not(like(C, "104%"))), rows(not(one)), 1e-6);
+        Assertions.assertEquals(600, rows(not(one)), 1e-6);
+    }
+
+    @Test
+    public void testRegexpThatIsNotAnchoredPrefixesIsEstimatedAsBefore() {
+        for (String pattern : List.of("^103$", "103", "^1(03)", "^103.*", "^103|104", "^[0-9]", "^\\d", "", "^103|",
+                "|^103", "^1+03", "^1{2}", "^1?03", "^10\\x", "^10^3")) {
+            ScalarOperator regexp = regexp(C, pattern);
+            Assertions.assertNull(written(regexp), pattern);
+            Assertions.assertEquals(plainRows(regexp), rows(regexp), 1e-6, pattern);
+            // The default of a predicate that is not understood: a quarter of the rows.
+            Assertions.assertEquals(250, rows(regexp), 1e-6, pattern);
+        }
+    }
+
+    @Test
+    public void testRegexpOfAnchoredPrefixesOnTheStatisticsOfTheColumn() {
+        // No statistics on x: the column has the head of its own, 600 and 300 rows of two values, and 100 NULL.
+        Histogram histogram = Histogram.forStrings(List.of(), Map.of("10312345", 600L, "10400000", 300L));
+        Statistics column = Statistics.builder().setOutputRowCount(1000).addColumnStatistic(C,
+                ColumnStatistic.builder().setMinValue(Double.NEGATIVE_INFINITY).setMaxValue(Double.POSITIVE_INFINITY)
+                        .setNullsFraction(0.1).setAverageRowSize(8).setDistinctValuesCount(2).setHistogram(histogram)
+                        .build()).build();
+        ScalarOperator likes = Utils.compoundOr(like(C, "103%"), like(C, "104%"));
+        double expected = PredicateStatisticsCalculator.statisticsCalculate(likes, column).getOutputRowCount();
+        Assertions.assertEquals(899, expected, 1e-6);
+        Assertions.assertEquals(expected, PredicateStatisticsCalculator.statisticsCalculate(regexp(C, "^103|^104"), column)
+                .getOutputRowCount(), 1e-6);
+        Assertions.assertEquals(300, PredicateStatisticsCalculator.statisticsCalculate(regexp(C, "^104"), column)
+                .getOutputRowCount(), 1e-6);
+        // The prefixes of other expressions of the column: the LIKE conditions on the same left side.
+        Assertions.assertEquals(PredicateStatisticsCalculator.statisticsCalculate(
+                Utils.compoundOr(like(left(3), "103%"), like(left(3), "104%")), column).getOutputRowCount(),
+                PredicateStatisticsCalculator.statisticsCalculate(regexp(left(3), "^103|^104"), column).getOutputRowCount(),
+                1e-6);
+    }
+
+    // The accounts of the queries: 20 digits, a statistic on x = substr(number, 1, 8) with the head of three prefixes.
+    private static ScanExpressionStatistics numberExpressions() {
+        List<MultiColumnCombinedStats.McvEntry> entries = new ArrayList<>();
+        entries.add(new MultiColumnCombinedStats.McvEntry(List.of("42894972"), 700, List.of(700L)));
+        entries.add(new MultiColumnCombinedStats.McvEntry(List.of("40406972"), 200, List.of(200L)));
+        entries.add(new MultiColumnCombinedStats.McvEntry(List.of("10100001"), 100, List.of(100L)));
+        ExternalMcvStatistics.Group group = new ExternalMcvStatistics.Group(List.of("x"), 1000, 3, entries, List.of(),
+                List.of(0L));
+        group.prepare(VarcharType.VARCHAR);
+        ColumnStatistic statistic = group.columnStatistic(VarcharType.VARCHAR, ColumnStatistic.unknown()).orElseThrow();
+        ScalarOperator canonical = ExpressionStatisticsCanonicalizer.canonicalize(left(8));
+        return new ScanExpressionStatistics("t", List.of(new ScanExpressionStatistics.Entry(canonical,
+                ExpressionStatisticsCanonicalizer.keyOf(canonical), X, statistic)),
+                Map.of(Set.of(X), new MultiColumnCombinedStats(3, 1000, List.of(X), entries, List.of(0L))));
+    }
+
+    @Test
+    public void testRegexpOfTheQueriesOnAccountNumbers() {
+        // a.number REGEXP '^42894|^40406': 700 and 200 rows of the head, and no row has both prefixes.
+        Statistics numbers = Statistics.builder().setOutputRowCount(1000).addColumnStatistic(C,
+                new ColumnStatistic(Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY, 0, 20, 1000)).build();
+        ScalarOperator regexp = regexp(C, "^42894|^40406");
+        ScalarOperator likes = Utils.compoundOr(like(C, "42894%"), like(C, "40406%"));
+        ScalarOperator prefixes = new InPredicateOperator(false, left(5), ConstantOperator.createVarchar("42894"),
+                ConstantOperator.createVarchar("40406"));
+        double regexpRows = PredicateStatisticsCalculator.statisticsCalculate(regexp, numbers, true, numberExpressions())
+                .getOutputRowCount();
+        Assertions.assertEquals(900, regexpRows, 1e-6);
+        Assertions.assertEquals(PredicateStatisticsCalculator.statisticsCalculate(likes, numbers, true,
+                numberExpressions()).getOutputRowCount(), regexpRows, 1e-6);
+        Assertions.assertEquals(900, PredicateStatisticsCalculator.statisticsCalculate(prefixes, numbers, true,
+                numberExpressions()).getOutputRowCount(), 1e-6);
+        // Without the statistic on x the REGEXP is estimated as the LIKE conditions of its prefixes.
+        Assertions.assertEquals(PredicateStatisticsCalculator.statisticsCalculate(likes, numbers, true)
+                .getOutputRowCount(), PredicateStatisticsCalculator.statisticsCalculate(regexp, numbers, true)
+                .getOutputRowCount(), 1e-6);
+        // Written over x as the OR of the two prefixes.
+        ExpressionStatisticsMatcher.Result result = ExpressionStatisticsMatcher.match(
+                EstimatePredicateNormalizer.normalize(regexp, numbers), numberExpressions(), numbers);
+        List<ScalarOperator> parts = Utils.extractDisjunctive(result.getPredicate());
+        Assertions.assertEquals(2, parts.size());
+        for (ScalarOperator part : parts) {
+            Assertions.assertEquals(X, part.getChild(0));
+        }
+    }
 }

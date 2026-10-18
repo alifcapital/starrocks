@@ -254,9 +254,8 @@ final class ExpressionStatisticsEstimator {
     }
 
     /**
-     * The prefixes of x LIKE 'p%' or substr(x, 1, n) IN (prefixes of length n), and of every such disjunct of an
-     * OR: the values that start with them are the values on which the condition holds. Empty for any other
-     * condition.
+     * The prefixes of x LIKE 'p%' or substr(x, 1, n) IN (prefixes of length n), and of every such disjunct of an OR:
+     * the values that start with them are the values on which the condition holds. Empty for any other condition.
      */
     static List<String> prefixesOf(ScalarOperator condition) {
         if (condition instanceof CompoundPredicateOperator compound && compound.isOr()) {
