@@ -27,6 +27,7 @@
 #include "formats/parquet/encoding.h"
 #include "formats/parquet/utils.h"
 #include "gutil/strings/substitute.h"
+#include "simd/expand.h"
 #include "types/int256.h"
 #include "util/bit_stream_utils.h"
 #include "util/bit_util.h"
@@ -149,6 +150,59 @@ public:
         return Status::OK();
     }
 
+    // The page holds the values of the rows that are not NULL one after another, and the decoder does not use the
+    // filter: every value is a copy of its bytes, so a dropped row costs no more than a kept one. The base class
+    // would split the batch into runs of NULL and not NULL rows and append each run, and with NULL rows spread over
+    // the batch it appends a run for every few rows. We expect a nullable batch with many runs to be much faster
+    // when the values are copied together and spread over their rows by the NULL flags in one pass, so that is
+    // what we do. A batch with no NULL row, with only NULL rows, or with one run of values is one copy or one
+    // append for the base class, and it stays there.
+    Status next_batch_with_nulls(size_t count, const NullInfos& null_infos, ColumnContentType content_type, Column* dst,
+                                 const FilterData* filter) override {
+        const size_t num_nulls = null_infos.num_nulls;
+        if (UNLIKELY(num_nulls > count)) {
+            return Status::InternalError(
+                    strings::Substitute("The batch has $0 NULL rows of $1 rows", num_nulls, count));
+        }
+        // From here a batch with NULL rows has a nullable destination, which the one-pass fill below needs for the
+        // NULL flags.
+        RETURN_IF_ERROR(_check_nulls_fit(null_infos, dst, count));
+        if (num_nulls == 0) {
+            return next_batch(count, content_type, dst, filter);
+        }
+        if (num_nulls == count) {
+            dst->append_nulls(count);
+            return Status::OK();
+        }
+        // num_ranges is an estimate, and 0 means that the caller did not count the runs.
+        if (null_infos.num_ranges != 0 && null_infos.num_ranges <= 2) {
+            return Decoder::next_batch_with_nulls(count, null_infos, content_type, dst, filter);
+        }
+
+        // The page is file data, so we check that it holds the values before we change the column.
+        const size_t num_values = count - num_nulls;
+        size_t num_bytes = 0;
+        RETURN_IF_ERROR(_get_values_size(num_values, "read", &num_bytes));
+
+        // SIMD::Expand::expand_load copies the next source element to every row, NULL rows included, so after
+        // the last value it reads one more element. The page may end with the last value, and its values sit at
+        // any byte of it, so we copy them to a buffer that is aligned and has this element, and the element is
+        // zero so that a NULL row gets a defined value.
+        _values.resize(num_values + 1);
+        memcpy(_values.data(), _data.data + _offset, num_bytes);
+        _values[num_values] = T{};
+        _offset += num_bytes;
+
+        auto* nullable_dst = down_cast<NullableColumn*>(dst);
+        _next_null_column(count, null_infos, nullable_dst);
+        Column* data_column = nullable_dst->data_column_raw_ptr();
+        const size_t prev_size = data_column->size();
+        data_column->resize_uninitialized(prev_size + count);
+        T* __restrict__ out = reinterpret_cast<T*>(data_column->mutable_raw_data()) + prev_size;
+        SIMD::Expand::expand_load(out, _values.data(), null_infos.nulls_data(), count);
+        return Status::OK();
+    }
+
     Status skip(size_t values_to_skip) override {
         size_t fetch_size = 0;
         RETURN_IF_ERROR(_get_values_size(values_to_skip, "skip", &fetch_size));
@@ -181,6 +235,8 @@ private:
 
     Slice _data;
     size_t _offset = 0;
+    // The values of a nullable batch before they are spread over their rows, and one element more.
+    raw::RawVector<T> _values;
 };
 
 template <>
@@ -248,9 +304,9 @@ public:
 
     Status next_batch_with_nulls(size_t count, const NullInfos& null_infos, ColumnContentType content_type, Column* dst,
                                  const FilterData* filter) override {
+        RETURN_IF_ERROR(_check_nulls_fit(null_infos, dst, count));
         const uint8_t* __restrict is_nulls = null_infos.nulls_data();
         // fill null data
-        DCHECK(dst->is_nullable());
         size_t null_cnt = null_infos.num_nulls;
         if (dst->is_nullable()) {
             NullColumn* null_column = down_cast<NullableColumn*>(dst)->null_column_raw_ptr();
@@ -576,6 +632,52 @@ public:
         return Status::OK();
     }
 
+    // The same as the decoder of numbers: with NULL rows spread over the batch, the base class unpacks the bits
+    // of a few rows at a time, once for each run. We unpack the values of the batch together into a buffer, and
+    // spread them over their rows by the NULL flags in one pass. The buffer has one element more than the values,
+    // so that a NULL row after the last value reads a defined byte.
+    Status next_batch_with_nulls(size_t count, const NullInfos& null_infos, ColumnContentType content_type, Column* dst,
+                                 const FilterData* filter) override {
+        const size_t num_nulls = null_infos.num_nulls;
+        if (UNLIKELY(num_nulls > count)) {
+            return Status::InternalError(
+                    strings::Substitute("The batch has $0 NULL rows of $1 rows", num_nulls, count));
+        }
+        RETURN_IF_ERROR(_check_nulls_fit(null_infos, dst, count));
+        if (num_nulls == 0) {
+            return next_batch(count, content_type, dst, filter);
+        }
+        if (num_nulls == count) {
+            dst->append_nulls(count);
+            return Status::OK();
+        }
+        if (null_infos.num_ranges != 0 && null_infos.num_ranges <= 2) {
+            return Decoder::next_batch_with_nulls(count, null_infos, content_type, dst, filter);
+        }
+
+        // We size the buffer from the count only after the page is known to hold that many bits.
+        const size_t num_values = count - num_nulls;
+        RETURN_IF_ERROR(_check_values_left(num_values));
+        _values.resize(num_values + 1);
+        RETURN_IF_ERROR(next_batch(num_values, _values.data()));
+        _values[num_values] = 0;
+
+        auto* nullable_dst = down_cast<NullableColumn*>(dst);
+        _next_null_column(count, null_infos, nullable_dst);
+        Column* data_column = nullable_dst->data_column_raw_ptr();
+        const size_t prev_size = data_column->size();
+        data_column->resize_uninitialized(prev_size + count);
+        uint8_t* __restrict__ out = data_column->mutable_raw_data() + prev_size;
+        const uint8_t* __restrict__ is_nulls = null_infos.nulls_data();
+        const uint8_t* __restrict__ values = _values.data();
+        size_t next_value = 0;
+        for (size_t i = 0; i < count; ++i) {
+            out[i] = values[next_value];
+            next_value += !is_nulls[i];
+        }
+        return Status::OK();
+    }
+
     Status skip(size_t values_to_skip) override {
         RETURN_IF_ERROR(_check_values_left(values_to_skip));
         //TODO(Smith) still heavy work load
@@ -614,6 +716,7 @@ private:
 
     BatchedBitReader _batched_bit_reader;
     std::vector<uint8_t> _skip_buffer;
+    raw::RawVector<uint8_t> _values;
 
     std::unique_ptr<uint8_t[]> _decoded_values_buffer;
     std::size_t _decoded_buffer_size;
@@ -737,12 +840,15 @@ public:
 
     Status next_batch_with_nulls(size_t count, const NullInfos& null_infos, ColumnContentType content_type, Column* dst,
                                  const FilterData* filter) override {
-        if (null_infos.num_ranges <= 1) {
+        RETURN_IF_ERROR(_check_nulls_fit(null_infos, dst, count));
+        // The fill below writes the NULL flags to the null column of `dst`. A destination that is not nullable has
+        // no NULL row here, and the base class appends its values. We do not leave the cast to num_ranges, which
+        // comes from the caller.
+        if (!dst->is_nullable() || null_infos.num_ranges <= 1) {
             return Decoder::next_batch_with_nulls(count, null_infos, content_type, dst, filter);
         }
 
         const uint8_t* __restrict is_nulls = null_infos.nulls_data();
-        DCHECK(dst->is_nullable());
         auto* nullable_column = down_cast<NullableColumn*>(dst);
         size_t null_cnt = null_infos.num_nulls;
         size_t read_count = count - null_cnt;

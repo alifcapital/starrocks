@@ -23,6 +23,7 @@
 
 #include "column/column.h"
 #include "column/vectorized_fwd.h"
+#include "common/compiler_util.h"
 #include "common/status.h"
 #include "exec/hdfs_scanner/hdfs_scanner.h"
 #include "formats/parquet/column_reader.h"
@@ -95,6 +96,9 @@ public:
         if (_current_row_group_no_null || _current_page_no_null) {
             return _cur_decoder->next_batch(n, content_type, dst, filter);
         }
+        if (UNLIKELY(null_infos.num_nulls > 0 && !dst->is_nullable())) {
+            return _null_for_non_nullable_column(null_infos.num_nulls, n);
+        }
         return _cur_decoder->next_batch_with_nulls(n, null_infos, content_type, dst, filter);
     }
 
@@ -129,6 +133,9 @@ public:
 
 private:
     Status _parse_page_header();
+    // The error for a batch with NULL values that is read into a column that cannot hold NULL. The decoders give an
+    // error for it too, but only the reader knows the file and the column.
+    Status _null_for_non_nullable_column(size_t num_nulls, size_t num_values) const;
     Status _parse_page_data();
 
     Status _parse_data_page(tparquet::PageType::type page_type);

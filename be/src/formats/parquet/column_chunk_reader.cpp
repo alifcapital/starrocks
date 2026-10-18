@@ -167,6 +167,20 @@ Status ColumnChunkReader::_parse_page_data() {
     return Status::OK();
 }
 
+Status ColumnChunkReader::_null_for_non_nullable_column(size_t num_nulls, size_t num_values) const {
+    std::string column;
+    for (const auto& name : metadata().path_in_schema) {
+        if (!column.empty()) {
+            column += '.';
+        }
+        column += name;
+    }
+    return Status::Corruption(strings::Substitute(
+            "Parquet column '$0' has $1 NULL values in a batch of $2 values, but the table does not allow NULL in it, "
+            "file: $3",
+            column, num_nulls, num_values, _opts.file != nullptr ? _opts.file->filename() : std::string()));
+}
+
 Status ColumnChunkReader::_parse_data_page(tparquet::PageType::type page_type) {
     if (_page_parse_state == PAGE_DATA_PARSED) {
         return Status::OK();

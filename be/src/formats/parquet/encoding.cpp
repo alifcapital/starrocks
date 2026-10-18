@@ -31,6 +31,7 @@ namespace starrocks::parquet {
 
 Status Decoder::next_batch_with_nulls(size_t count, const NullInfos& null_infos, ColumnContentType content_type,
                                       Column* dst, const FilterData* filter) {
+    RETURN_IF_ERROR(_check_nulls_fit(null_infos, dst, count));
     const uint8_t* __restrict is_nulls = null_infos.nulls_data();
     size_t idx = 0;
     size_t off = 0;
@@ -42,7 +43,11 @@ Status Decoder::next_batch_with_nulls(size_t count, const NullInfos& null_infos,
             run++;
         }
         if (is_null) {
-            dst->append_nulls(run);
+            // The batch is checked above by the number of NULL rows that the caller gave. A column that is not
+            // nullable refuses the rows, and this catches a number that does not match the flags.
+            if (UNLIKELY(!dst->append_nulls(run))) {
+                return Status::Corruption("The column cannot hold NULL, but the page has NULL values for it");
+            }
         } else {
             const FilterData* forward_filter = filter ? filter + off : filter;
             RETURN_IF_ERROR(this->next_batch(run, content_type, dst, forward_filter));
@@ -51,6 +56,16 @@ Status Decoder::next_batch_with_nulls(size_t count, const NullInfos& null_infos,
     }
     return Status::OK();
 }
+
+Status Decoder::_check_nulls_fit(const NullInfos& null_infos, const Column* dst, size_t count) const {
+    if (UNLIKELY(null_infos.num_nulls > 0 && !dst->is_nullable())) {
+        return Status::Corruption(strings::Substitute(
+                "The column cannot hold NULL, but the page has $0 NULL values in a batch of $1 values for it",
+                null_infos.num_nulls, count));
+    }
+    return Status::OK();
+}
+
 void Decoder::_next_null_column(size_t count, const NullInfos& null_infos, NullableColumn* dst) {
     size_t null_cnt = null_infos.num_nulls;
     NullColumn* null_column = down_cast<NullableColumn*>(dst)->null_column_raw_ptr();

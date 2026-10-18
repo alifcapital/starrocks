@@ -217,6 +217,7 @@ protected:
         _chunk = tparquet::ColumnChunk();
         _chunk.__isset.meta_data = true;
         _chunk.meta_data.type = tparquet::Type::INT32;
+        _chunk.meta_data.path_in_schema = {"c"};
         _chunk.meta_data.codec = tparquet::CompressionCodec::UNCOMPRESSED;
         _chunk.meta_data.num_values = num_levels;
         _chunk.meta_data.total_compressed_size = buffer.size();
@@ -602,6 +603,34 @@ TEST_P(StoredColumnReaderTest, TellsTheDecoderTheShareOfTheReadRange) {
     // The first 8 rows of the range are dropped and the other 24 are kept.
     ASSERT_NO_FATAL_FAILURE(_run(std::vector<ReadOp>{ReadOp{160, 192, FilterKind::ZERO_PREFIX, 8}}));
     EXPECT_DOUBLE_EQ(offers_filter ? 0.75 : 1.0, decoder_share());
+}
+
+// A NULL value in the page for a column that cannot hold NULL means that the file contradicts the table. The reader
+// returns Corruption that names the column and the file, and a range without a NULL value still reads.
+TEST_P(StoredColumnReaderTest, NullForNonNullableColumnIsCorruptionWithColumnAndFile) {
+    if (GetParam() != ReaderCase::OPTIONAL && GetParam() != ReaderCase::OPTIONAL_WITH_LEVELS) {
+        GTEST_SKIP() << "only the Optional readers get NULL values for a destination";
+    }
+    ASSERT_NO_FATAL_FAILURE(_init());
+    // The row 1 is NULL.
+    MutableColumnPtr column = ColumnHelper::create_column(TYPE_INT_DESC, false);
+    Status st = _reader->read_range(Range<uint64_t>(0, 8), nullptr, ColumnContentType::VALUE, column.get());
+    ASSERT_TRUE(st.is_corruption()) << st.to_string();
+    EXPECT_NE(std::string::npos, st.to_string().find("'c'")) << st.to_string();
+    EXPECT_NE(std::string::npos, st.to_string().find("stored_column_reader_test")) << st.to_string();
+}
+
+// The rows 2 and 3 have a value, and the row 4 is NULL.
+TEST_P(StoredColumnReaderTest, RangeWithoutNullReadsIntoNonNullableColumn) {
+    if (GetParam() != ReaderCase::OPTIONAL && GetParam() != ReaderCase::OPTIONAL_WITH_LEVELS) {
+        GTEST_SKIP() << "only the Optional readers get NULL values for a destination";
+    }
+    ASSERT_NO_FATAL_FAILURE(_init());
+    MutableColumnPtr column = ColumnHelper::create_column(TYPE_INT_DESC, false);
+    ASSERT_OK(_reader->read_range(Range<uint64_t>(2, 4), nullptr, ColumnContentType::VALUE, column.get()));
+    ASSERT_EQ(2U, column->size());
+    EXPECT_EQ(1000 + 2 * 10, column->get(0).get_int32());
+    EXPECT_EQ(1000 + 3 * 10, column->get(1).get_int32());
 }
 
 INSTANTIATE_TEST_SUITE_P(AllReaders, StoredColumnReaderTest,

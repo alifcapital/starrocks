@@ -2809,4 +2809,596 @@ TEST_F(ParquetEncodingTest, StringDictDecidesByWidthAndTheShareItIsTold) {
     }
 }
 
+namespace {
+
+// The NULL patterns of a batch: leading, trailing and long runs of NULL rows, alternating rows, a single row,
+// and batches that end with NULL rows. Each pattern is a name and the NULL flag of every row.
+std::vector<std::pair<std::string, std::vector<uint8_t>>> make_null_patterns() {
+    std::vector<std::pair<std::string, std::vector<uint8_t>>> patterns;
+    auto add = [&patterns](const std::string& name, size_t count, const std::function<bool(size_t)>& is_null) {
+        std::vector<uint8_t> nulls(count);
+        for (size_t i = 0; i < count; ++i) {
+            nulls[i] = is_null(i);
+        }
+        patterns.emplace_back(name, std::move(nulls));
+    };
+    add("no NULL", 100, [](size_t) { return false; });
+    add("all NULL", 100, [](size_t) { return true; });
+    add("leading NULL run", 100, [](size_t i) { return i < 40; });
+    add("trailing NULL run", 100, [](size_t i) { return i >= 60; });
+    add("alternating", 101, [](size_t i) { return i % 2 == 1; });
+    add("alternating from NULL", 101, [](size_t i) { return i % 2 == 0; });
+    add("every third", 100, [](size_t i) { return i % 3 == 2; });
+    add("long runs", 200, [](size_t i) { return (i / 30) % 2 == 0; });
+    add("one value", 100, [](size_t i) { return i != 57; });
+    add("one NULL", 100, [](size_t i) { return i == 57; });
+    add("last row is the only value", 100, [](size_t i) { return i != 99; });
+    add("single NULL row", 1, [](size_t) { return true; });
+    add("single value row", 1, [](size_t) { return false; });
+    add("ends with NULL rows", 37, [](size_t i) { return i % 3 == 1 || i + 6 >= 37; });
+    add("big batch", 5000, [](size_t i) { return i % 7 == 3 || (i >= 2500 && i < 2520); });
+    return patterns;
+}
+
+template <typename T>
+T make_plain_value(size_t i) {
+    if constexpr (std::is_same_v<T, int96_t>) {
+        int96_t value;
+        value.lo = 1000003ULL * (i + 1);
+        value.hi = static_cast<uint32_t>(i + 7);
+        return value;
+    } else if constexpr (std::is_floating_point_v<T>) {
+        return static_cast<T>(i) * static_cast<T>(1.5) + static_cast<T>(0.25);
+    } else {
+        return static_cast<T>(1000 + i * 7);
+    }
+}
+
+// Decodes two batches that have the NULL rows `nulls` with next_batch_with_nulls(), and then `tail_values` values
+// without NULL rows, from one PLAIN page. The page is a copy of its exact size, so a decoder that reads after
+// its end is a heap overflow for ASAN. With `count_ranges` the NullInfos tell the number of runs of NULL rows, and
+// without it the number is 0, which means that it is not known. A filter that drops every row is passed with
+// `with_filter`: the decoder does not use it, and the dropped rows have to hold their values.
+template <tparquet::Type::type PT>
+void check_plain_numeric_batches_with_nulls(const std::vector<uint8_t>& nulls, bool count_ranges, size_t tail_values,
+                                            bool with_filter) {
+    using T = typename PhysicalTypeTraits<PT>::CppType;
+    constexpr size_t kNumBatches = 2;
+    const size_t num_values = count_non_null_rows(nulls);
+    std::vector<T> page_values;
+    for (size_t i = 0; i < kNumBatches * num_values + tail_values; ++i) {
+        page_values.push_back(make_plain_value<T>(i));
+    }
+
+    const EncodingInfo* encoding = nullptr;
+    (void)EncodingInfo::get(PT, tparquet::Encoding::PLAIN, &encoding);
+    ASSERT_TRUE(encoding != nullptr);
+    std::unique_ptr<Encoder> encoder;
+    ASSERT_TRUE(encoding->create_encoder(&encoder).ok());
+    if (!page_values.empty()) {
+        ASSERT_TRUE(encoder->append(reinterpret_cast<const uint8_t*>(page_values.data()), page_values.size()).ok());
+    }
+    const Slice built = encoder->build();
+    const std::vector<char> page(built.data, built.data + built.size);
+    std::unique_ptr<Decoder> decoder;
+    ASSERT_TRUE(encoding->create_decoder(&decoder).ok());
+    ASSERT_TRUE(decoder->set_data(Slice(page.data(), page.size())).ok());
+
+    const std::vector<uint8_t> filter(nulls.size(), 0);
+    auto dst = NullableColumn::create(FixedLengthColumn<T>::create(), NullColumn::create());
+    size_t next_value = 0;
+    for (size_t batch = 0; batch < kNumBatches; ++batch) {
+        const size_t prev_rows = dst->size();
+        NullInfos null_infos = make_dict_null_infos(nulls);
+        if (!count_ranges) {
+            null_infos.num_ranges = 0;
+        }
+        Status st = decoder->next_batch_with_nulls(nulls.size(), null_infos, ColumnContentType::VALUE, dst.get(),
+                                                   with_filter ? filter.data() : nullptr);
+        ASSERT_TRUE(st.ok()) << st.to_string();
+        ASSERT_EQ(prev_rows + nulls.size(), dst->size());
+        ASSERT_EQ(dst->size(), dst->null_column_raw_ptr()->size());
+
+        const T* data = reinterpret_cast<const T*>(dst->data_column_raw_ptr()->raw_data());
+        for (size_t i = 0; i < nulls.size(); ++i) {
+            const size_t row = prev_rows + i;
+            if (nulls[i]) {
+                ASSERT_TRUE(dst->is_null(row)) << "row " << row;
+            } else {
+                ASSERT_FALSE(dst->is_null(row)) << "row " << row;
+                ASSERT_TRUE(page_values[next_value] == data[row]) << "row " << row;
+                next_value++;
+            }
+        }
+    }
+    ASSERT_EQ(dst->has_null(), num_values < nulls.size());
+
+    // The decoder is at the end of the values of the batches.
+    auto tail = FixedLengthColumn<T>::create();
+    ASSERT_TRUE(decoder->next_batch(tail_values, ColumnContentType::VALUE, tail.get(), nullptr).ok());
+    const T* tail_data = reinterpret_cast<const T*>(tail->raw_data());
+    for (size_t i = 0; i < tail_values; ++i) {
+        ASSERT_TRUE(page_values[next_value + i] == tail_data[i]) << "tail value " << i;
+    }
+    ASSERT_FALSE(decoder->next_batch(1, ColumnContentType::VALUE, tail.get(), nullptr).ok());
+}
+
+template <tparquet::Type::type PT>
+void check_plain_numeric_with_nulls() {
+    for (const auto& [name, nulls] : make_null_patterns()) {
+        for (bool count_ranges : {true, false}) {
+            for (size_t tail_values : {0, 3}) {
+                for (bool with_filter : {false, true}) {
+                    SCOPED_TRACE("pattern '" + name + "', count_ranges " + std::to_string(count_ranges) +
+                                 ", tail values " + std::to_string(tail_values) + ", filter " +
+                                 std::to_string(with_filter));
+                    ASSERT_NO_FATAL_FAILURE(
+                            check_plain_numeric_batches_with_nulls<PT>(nulls, count_ranges, tail_values, with_filter));
+                }
+            }
+        }
+    }
+}
+
+} // namespace
+
+// A nullable batch of a PLAIN page of numbers holds the values of the rows that are not NULL. The decoder spreads
+// them over their rows, and the values have to be the same for every pattern of NULL rows and every width.
+TEST_F(ParquetEncodingTest, PlainNumericWithNulls) {
+    ASSERT_NO_FATAL_FAILURE(check_plain_numeric_with_nulls<tparquet::Type::INT32>());
+    ASSERT_NO_FATAL_FAILURE(check_plain_numeric_with_nulls<tparquet::Type::INT64>());
+    ASSERT_NO_FATAL_FAILURE(check_plain_numeric_with_nulls<tparquet::Type::FLOAT>());
+    ASSERT_NO_FATAL_FAILURE(check_plain_numeric_with_nulls<tparquet::Type::DOUBLE>());
+    ASSERT_NO_FATAL_FAILURE(check_plain_numeric_with_nulls<tparquet::Type::INT96>());
+}
+
+// The page is file data. A batch that needs more values than the page holds has to give an error before it
+// changes the column or moves the decoder, and a number of NULL rows above the number of rows is a mistake of the
+// caller.
+TEST_F(ParquetEncodingTest, PlainNumericWithNullsBounds) {
+    for (auto type : {tparquet::Type::INT32, tparquet::Type::INT64, tparquet::Type::FLOAT, tparquet::Type::DOUBLE,
+                      tparquet::Type::INT96}) {
+        SCOPED_TRACE("type " + std::to_string(type));
+        const EncodingInfo* encoding = nullptr;
+        (void)EncodingInfo::get(type, tparquet::Encoding::PLAIN, &encoding);
+        ASSERT_TRUE(encoding != nullptr);
+        std::unique_ptr<Decoder> decoder;
+        ASSERT_TRUE(encoding->create_decoder(&decoder).ok());
+
+        size_t value_size = 4;
+        if (type == tparquet::Type::INT64 || type == tparquet::Type::DOUBLE) {
+            value_size = 8;
+        } else if (type == tparquet::Type::INT96) {
+            value_size = 12;
+        }
+        // The batch of 100 rows has 50 values, and the page holds 49. The page is a buffer of its exact size.
+        const std::vector<char> page(49 * value_size, 1);
+        ASSERT_TRUE(decoder->set_data(Slice(page.data(), page.size())).ok());
+
+        std::vector<uint8_t> nulls(100);
+        for (size_t i = 0; i < nulls.size(); ++i) {
+            nulls[i] = i % 2;
+        }
+        NullInfos null_infos = make_dict_null_infos(nulls);
+        auto dst = NullableColumn::create(FixedLengthColumn<int64_t>::create(), NullColumn::create());
+        // The column type does not matter, because the decoder does not reach the column.
+        Status st =
+                decoder->next_batch_with_nulls(nulls.size(), null_infos, ColumnContentType::VALUE, dst.get(), nullptr);
+        ASSERT_FALSE(st.ok());
+        ASSERT_EQ(0U, dst->size());
+        ASSERT_EQ(0U, dst->null_column_raw_ptr()->size());
+
+        // The decoder did not move: the 49 values of the page can still be read.
+        uint8_t out[49 * 12];
+        ASSERT_TRUE(decoder->next_batch(49, out).ok());
+
+        // A count that makes the size of the values wrap is an error, and the NULL flags are not read.
+        ASSERT_TRUE(decoder->set_data(Slice(page.data(), page.size())).ok());
+        NullInfos wrap_infos;
+        wrap_infos.reset_with_capacity(1);
+        wrap_infos.nulls_data()[0] = 1;
+        wrap_infos.num_nulls = 1;
+        wrap_infos.num_ranges = 0;
+        const size_t wrap_count = std::numeric_limits<size_t>::max() / value_size + 2;
+        ASSERT_FALSE(
+                decoder->next_batch_with_nulls(wrap_count, wrap_infos, ColumnContentType::VALUE, dst.get(), nullptr)
+                        .ok());
+        ASSERT_EQ(0U, dst->size());
+
+        // More NULL rows than rows.
+        NullInfos bad_infos = make_dict_null_infos(nulls);
+        bad_infos.num_nulls = nulls.size() + 1;
+        ASSERT_FALSE(
+                decoder->next_batch_with_nulls(nulls.size(), bad_infos, ColumnContentType::VALUE, dst.get(), nullptr)
+                        .ok());
+        ASSERT_EQ(0U, dst->size());
+    }
+}
+
+namespace {
+
+bool plain_bool_value(size_t i) {
+    return (i * 5) % 7 < 3;
+}
+
+// The same as check_plain_numeric_batches_with_nulls() for the bits of a PLAIN BOOLEAN page. The batches have
+// different numbers of values, so the bits that the unpacking buffers between two calls are used.
+void check_plain_bool_batches_with_nulls(const std::vector<std::vector<uint8_t>>& batches, bool count_ranges,
+                                         size_t tail_values) {
+    size_t total_values = tail_values;
+    for (const auto& nulls : batches) {
+        total_values += count_non_null_rows(nulls);
+    }
+    std::vector<uint8_t> page_values(total_values);
+    for (size_t i = 0; i < total_values; ++i) {
+        page_values[i] = plain_bool_value(i);
+    }
+
+    const EncodingInfo* encoding = nullptr;
+    (void)EncodingInfo::get(tparquet::Type::BOOLEAN, tparquet::Encoding::PLAIN, &encoding);
+    ASSERT_TRUE(encoding != nullptr);
+    std::unique_ptr<Encoder> encoder;
+    ASSERT_TRUE(encoding->create_encoder(&encoder).ok());
+    ASSERT_TRUE(encoder->append(page_values.data(), page_values.size()).ok());
+    std::unique_ptr<Decoder> decoder;
+    ASSERT_TRUE(encoding->create_decoder(&decoder).ok());
+    ASSERT_TRUE(decoder->set_data(encoder->build()).ok());
+
+    auto dst = NullableColumn::create(FixedLengthColumn<uint8_t>::create(), NullColumn::create());
+    size_t next_value = 0;
+    for (const auto& nulls : batches) {
+        const size_t prev_rows = dst->size();
+        NullInfos null_infos = make_dict_null_infos(nulls);
+        if (!count_ranges) {
+            null_infos.num_ranges = 0;
+        }
+        Status st =
+                decoder->next_batch_with_nulls(nulls.size(), null_infos, ColumnContentType::VALUE, dst.get(), nullptr);
+        ASSERT_TRUE(st.ok()) << st.to_string();
+        ASSERT_EQ(prev_rows + nulls.size(), dst->size());
+        ASSERT_EQ(dst->size(), dst->null_column_raw_ptr()->size());
+        const uint8_t* data = dst->data_column_raw_ptr()->raw_data();
+        for (size_t i = 0; i < nulls.size(); ++i) {
+            const size_t row = prev_rows + i;
+            if (nulls[i]) {
+                ASSERT_TRUE(dst->is_null(row)) << "row " << row;
+            } else {
+                ASSERT_FALSE(dst->is_null(row)) << "row " << row;
+                ASSERT_EQ(page_values[next_value], data[row]) << "row " << row;
+                next_value++;
+            }
+        }
+    }
+
+    auto tail = FixedLengthColumn<uint8_t>::create();
+    ASSERT_TRUE(decoder->next_batch(tail_values, ColumnContentType::VALUE, tail.get(), nullptr).ok());
+    for (size_t i = 0; i < tail_values; ++i) {
+        ASSERT_EQ(page_values[next_value + i], tail->raw_data()[i]) << "tail value " << i;
+    }
+}
+
+} // namespace
+
+TEST_F(ParquetEncodingTest, PlainBooleanWithNulls) {
+    const auto patterns = make_null_patterns();
+    // One batch for each pattern, and then every pattern after the previous one in the same page.
+    std::vector<std::vector<std::vector<uint8_t>>> cases;
+    std::vector<std::vector<uint8_t>> all_patterns;
+    for (const auto& pattern : patterns) {
+        cases.push_back({pattern.second});
+        all_patterns.push_back(pattern.second);
+    }
+    cases.push_back(all_patterns);
+    for (size_t c = 0; c < cases.size(); ++c) {
+        for (bool count_ranges : {true, false}) {
+            for (size_t tail_values : {0, 5}) {
+                SCOPED_TRACE("case " + std::to_string(c) + ", count_ranges " + std::to_string(count_ranges) +
+                             ", tail values " + std::to_string(tail_values));
+                ASSERT_NO_FATAL_FAILURE(check_plain_bool_batches_with_nulls(cases[c], count_ranges, tail_values));
+            }
+        }
+    }
+}
+
+// A batch that needs more bits than the page holds gives an error and leaves the column as it was.
+TEST_F(ParquetEncodingTest, PlainBooleanWithNullsBounds) {
+    const EncodingInfo* encoding = nullptr;
+    (void)EncodingInfo::get(tparquet::Type::BOOLEAN, tparquet::Encoding::PLAIN, &encoding);
+    ASSERT_TRUE(encoding != nullptr);
+    std::unique_ptr<Decoder> decoder;
+    ASSERT_TRUE(encoding->create_decoder(&decoder).ok());
+    const std::string page(1, '\xff');
+    ASSERT_TRUE(decoder->set_data(Slice(page.data(), page.size())).ok());
+
+    std::vector<uint8_t> nulls(40);
+    for (size_t i = 0; i < nulls.size(); ++i) {
+        nulls[i] = i % 2;
+    }
+    NullInfos null_infos = make_dict_null_infos(nulls);
+    auto dst = NullableColumn::create(FixedLengthColumn<uint8_t>::create(), NullColumn::create());
+    ASSERT_FALSE(decoder->next_batch_with_nulls(nulls.size(), null_infos, ColumnContentType::VALUE, dst.get(), nullptr)
+                         .ok());
+    ASSERT_EQ(0U, dst->size());
+    ASSERT_EQ(0U, dst->null_column_raw_ptr()->size());
+
+    // A count that the page cannot hold is rejected before the decoder sizes a buffer from it, and the NULL
+    // flags are not read.
+    NullInfos huge_infos;
+    huge_infos.reset_with_capacity(1);
+    huge_infos.nulls_data()[0] = 1;
+    huge_infos.num_nulls = 1;
+    huge_infos.num_ranges = 0;
+    ASSERT_FALSE(
+            decoder->next_batch_with_nulls(size_t(1) << 40, huge_infos, ColumnContentType::VALUE, dst.get(), nullptr)
+                    .ok());
+    ASSERT_EQ(0U, dst->size());
+
+    // More NULL rows than rows.
+    NullInfos bad_infos = make_dict_null_infos(nulls);
+    bad_infos.num_nulls = nulls.size() + 1;
+    ASSERT_FALSE(
+            decoder->next_batch_with_nulls(nulls.size(), bad_infos, ColumnContentType::VALUE, dst.get(), nullptr).ok());
+    ASSERT_EQ(0U, dst->size());
+}
+
+namespace {
+
+// The NULL rows of the batches below: every second row, so there are many runs and the decoders would take the
+// paths that write the NULL flags to a null column.
+std::vector<uint8_t> make_alternating_nulls() {
+    std::vector<uint8_t> nulls(41);
+    for (size_t i = 0; i < nulls.size(); ++i) {
+        nulls[i] = i % 2;
+    }
+    return nulls;
+}
+
+// A column that is not nullable has no place for a NULL row, and a NULL value in the page for it means that the file
+// contradicts the table. The decoder gives Corruption and leaves the column and its own position as they were.
+void check_nulls_are_corruption(Decoder* decoder, const std::vector<uint8_t>& nulls, bool count_ranges, Column* dst) {
+    NullInfos null_infos = make_dict_null_infos(nulls);
+    if (!count_ranges) {
+        null_infos.num_ranges = 0;
+    }
+    Status st = decoder->next_batch_with_nulls(nulls.size(), null_infos, ColumnContentType::VALUE, dst, nullptr);
+    ASSERT_TRUE(st.is_corruption()) << st.to_string();
+    ASSERT_EQ(0U, dst->size());
+}
+
+// A batch without NULL rows is fine for a column that is not nullable, and starts at the first value of the page.
+NullInfos make_batch_without_nulls(size_t count) {
+    return make_dict_null_infos(std::vector<uint8_t>(count, 0));
+}
+
+// A PLAIN page of numbers read into a column that is not nullable.
+template <tparquet::Type::type PT>
+void check_plain_numeric_to_non_nullable_column() {
+    using T = typename PhysicalTypeTraits<PT>::CppType;
+    const std::vector<uint8_t> nulls = make_alternating_nulls();
+    const size_t num_values = count_non_null_rows(nulls);
+    std::vector<T> page_values;
+    for (size_t i = 0; i < num_values; ++i) {
+        page_values.push_back(make_plain_value<T>(i));
+    }
+    const EncodingInfo* encoding = nullptr;
+    (void)EncodingInfo::get(PT, tparquet::Encoding::PLAIN, &encoding);
+    ASSERT_TRUE(encoding != nullptr);
+    std::unique_ptr<Encoder> encoder;
+    ASSERT_TRUE(encoding->create_encoder(&encoder).ok());
+    ASSERT_TRUE(encoder->append(reinterpret_cast<const uint8_t*>(page_values.data()), page_values.size()).ok());
+    const Slice built = encoder->build();
+    const std::vector<char> page(built.data, built.data + built.size);
+    std::unique_ptr<Decoder> decoder;
+    ASSERT_TRUE(encoding->create_decoder(&decoder).ok());
+
+    for (bool count_ranges : {true, false}) {
+        ASSERT_TRUE(decoder->set_data(Slice(page.data(), page.size())).ok());
+        auto dst = FixedLengthColumn<T>::create();
+        ASSERT_NO_FATAL_FAILURE(check_nulls_are_corruption(decoder.get(), nulls, count_ranges, dst.get()));
+
+        NullInfos null_infos = make_batch_without_nulls(num_values);
+        Status st =
+                decoder->next_batch_with_nulls(num_values, null_infos, ColumnContentType::VALUE, dst.get(), nullptr);
+        ASSERT_TRUE(st.ok()) << st.to_string();
+        ASSERT_EQ(num_values, dst->size());
+        const T* data = reinterpret_cast<const T*>(dst->raw_data());
+        for (size_t i = 0; i < num_values; ++i) {
+            ASSERT_TRUE(page_values[i] == data[i]) << "value " << i;
+        }
+    }
+}
+
+} // namespace
+
+TEST_F(ParquetEncodingTest, NullsForNonNullableColumnArePlainNumericCorruption) {
+    ASSERT_NO_FATAL_FAILURE(check_plain_numeric_to_non_nullable_column<tparquet::Type::INT32>());
+    ASSERT_NO_FATAL_FAILURE(check_plain_numeric_to_non_nullable_column<tparquet::Type::INT64>());
+    ASSERT_NO_FATAL_FAILURE(check_plain_numeric_to_non_nullable_column<tparquet::Type::FLOAT>());
+    ASSERT_NO_FATAL_FAILURE(check_plain_numeric_to_non_nullable_column<tparquet::Type::DOUBLE>());
+    ASSERT_NO_FATAL_FAILURE(check_plain_numeric_to_non_nullable_column<tparquet::Type::INT96>());
+}
+
+TEST_F(ParquetEncodingTest, NullsForNonNullableColumnArePlainBooleanCorruption) {
+    const std::vector<uint8_t> nulls = make_alternating_nulls();
+    const size_t num_values = count_non_null_rows(nulls);
+    std::vector<uint8_t> page_values(num_values);
+    for (size_t i = 0; i < num_values; ++i) {
+        page_values[i] = plain_bool_value(i);
+    }
+    const EncodingInfo* encoding = nullptr;
+    (void)EncodingInfo::get(tparquet::Type::BOOLEAN, tparquet::Encoding::PLAIN, &encoding);
+    ASSERT_TRUE(encoding != nullptr);
+    std::unique_ptr<Encoder> encoder;
+    ASSERT_TRUE(encoding->create_encoder(&encoder).ok());
+    ASSERT_TRUE(encoder->append(page_values.data(), page_values.size()).ok());
+    std::unique_ptr<Decoder> decoder;
+    ASSERT_TRUE(encoding->create_decoder(&decoder).ok());
+
+    for (bool count_ranges : {true, false}) {
+        ASSERT_TRUE(decoder->set_data(encoder->build()).ok());
+        auto dst = FixedLengthColumn<uint8_t>::create();
+        ASSERT_NO_FATAL_FAILURE(check_nulls_are_corruption(decoder.get(), nulls, count_ranges, dst.get()));
+
+        NullInfos null_infos = make_batch_without_nulls(num_values);
+        Status st =
+                decoder->next_batch_with_nulls(num_values, null_infos, ColumnContentType::VALUE, dst.get(), nullptr);
+        ASSERT_TRUE(st.ok()) << st.to_string();
+        ASSERT_EQ(num_values, dst->size());
+        for (size_t i = 0; i < num_values; ++i) {
+            ASSERT_EQ(page_values[i], dst->raw_data()[i]) << "value " << i;
+        }
+    }
+}
+
+TEST_F(ParquetEncodingTest, NullsForNonNullableColumnAreDictionaryCorruption) {
+    const std::vector<uint8_t> nulls = make_alternating_nulls();
+    const size_t num_values = count_non_null_rows(nulls);
+    // numbers
+    {
+        const std::vector<int32_t> values = make_dict_page_values<int32_t>(num_values);
+        std::unique_ptr<Encoder> encoder;
+        std::unique_ptr<Decoder> decoder;
+        ASSERT_NO_FATAL_FAILURE(make_numeric_dict_page<tparquet::Type::INT32>(values, &encoder, &decoder));
+        auto dst = FixedLengthColumn<int32_t>::create();
+        ASSERT_NO_FATAL_FAILURE(check_nulls_are_corruption(decoder.get(), nulls, true, dst.get()));
+
+        NullInfos null_infos = make_batch_without_nulls(num_values);
+        Status st =
+                decoder->next_batch_with_nulls(num_values, null_infos, ColumnContentType::VALUE, dst.get(), nullptr);
+        ASSERT_TRUE(st.ok()) << st.to_string();
+        ASSERT_EQ(num_values, dst->size());
+        const int32_t* data = reinterpret_cast<const int32_t*>(dst->raw_data());
+        for (size_t i = 0; i < num_values; ++i) {
+            ASSERT_EQ(values[i], data[i]) << "value " << i;
+        }
+    }
+    // strings
+    {
+        std::vector<std::string> values;
+        std::unique_ptr<Encoder> encoder;
+        std::unique_ptr<Decoder> decoder;
+        ASSERT_NO_FATAL_FAILURE(make_string_dict_page(num_values, 5, &values, &encoder, &decoder));
+        auto dst = BinaryColumn::create();
+        ASSERT_NO_FATAL_FAILURE(check_nulls_are_corruption(decoder.get(), nulls, true, dst.get()));
+
+        NullInfos null_infos = make_batch_without_nulls(num_values);
+        Status st =
+                decoder->next_batch_with_nulls(num_values, null_infos, ColumnContentType::VALUE, dst.get(), nullptr);
+        ASSERT_TRUE(st.ok()) << st.to_string();
+        ASSERT_EQ(num_values, dst->size());
+        for (size_t i = 0; i < num_values; ++i) {
+            ASSERT_EQ(values[i], dst->get_slice(i).to_string()) << "value " << i;
+        }
+    }
+}
+
+TEST_F(ParquetEncodingTest, NullsForNonNullableColumnAreFixedLengthByteArrayCorruption) {
+    constexpr size_t kTypeLength = 4;
+    const std::vector<uint8_t> nulls = make_alternating_nulls();
+    const size_t num_values = count_non_null_rows(nulls);
+    std::vector<std::string> values;
+    std::vector<Slice> slices;
+    for (size_t i = 0; i < num_values; ++i) {
+        values.push_back(std::string(kTypeLength, static_cast<char>('a' + i % 26)));
+    }
+    for (const auto& value : values) {
+        slices.emplace_back(value);
+    }
+    const EncodingInfo* encoding = nullptr;
+    (void)EncodingInfo::get(tparquet::Type::FIXED_LEN_BYTE_ARRAY, tparquet::Encoding::PLAIN, &encoding);
+    ASSERT_TRUE(encoding != nullptr);
+    std::unique_ptr<Encoder> encoder;
+    ASSERT_TRUE(encoding->create_encoder(&encoder).ok());
+    ASSERT_TRUE(encoder->append(reinterpret_cast<uint8_t*>(slices.data()), slices.size()).ok());
+    std::unique_ptr<Decoder> decoder;
+    ASSERT_TRUE(encoding->create_decoder(&decoder).ok());
+    ASSERT_TRUE(decoder->set_type_length(kTypeLength).ok());
+    ASSERT_TRUE(decoder->set_data(encoder->build()).ok());
+
+    auto dst = BinaryColumn::create();
+    ASSERT_NO_FATAL_FAILURE(check_nulls_are_corruption(decoder.get(), nulls, true, dst.get()));
+    NullInfos null_infos = make_batch_without_nulls(num_values);
+    Status st = decoder->next_batch_with_nulls(num_values, null_infos, ColumnContentType::VALUE, dst.get(), nullptr);
+    ASSERT_TRUE(st.ok()) << st.to_string();
+    ASSERT_EQ(num_values, dst->size());
+    for (size_t i = 0; i < num_values; ++i) {
+        ASSERT_EQ(values[i], dst->get_slice(i).to_string()) << "value " << i;
+    }
+}
+
+// The PLAIN decoder of strings, which has its own path, and the delta and byte stream split decoders, which use the
+// base class: they all give the same error.
+TEST_F(ParquetEncodingTest, NullsForNonNullableColumnArePlainStringAndBaseClassCorruption) {
+    const std::vector<uint8_t> nulls = make_alternating_nulls();
+    const size_t num_values = count_non_null_rows(nulls);
+    // PLAIN strings
+    {
+        std::vector<std::string> values;
+        std::unique_ptr<Encoder> encoder;
+        std::unique_ptr<Decoder> decoder;
+        ASSERT_NO_FATAL_FAILURE(make_plain_page_of_width(num_values, 5, false, &values, &encoder, &decoder));
+        auto dst = BinaryColumn::create();
+        ASSERT_NO_FATAL_FAILURE(check_nulls_are_corruption(decoder.get(), nulls, true, dst.get()));
+
+        NullInfos null_infos = make_batch_without_nulls(num_values);
+        Status st =
+                decoder->next_batch_with_nulls(num_values, null_infos, ColumnContentType::VALUE, dst.get(), nullptr);
+        ASSERT_TRUE(st.ok()) << st.to_string();
+        ASSERT_EQ(num_values, dst->size());
+        for (size_t i = 0; i < num_values; ++i) {
+            ASSERT_EQ(values[i], dst->get_slice(i).to_string()) << "value " << i;
+        }
+    }
+    // delta binary packed and byte stream split numbers
+    std::vector<int32_t> values;
+    for (size_t i = 0; i < num_values; ++i) {
+        values.push_back(static_cast<int32_t>(1000 + i * 7));
+    }
+    for (auto encoding_type : {tparquet::Encoding::DELTA_BINARY_PACKED, tparquet::Encoding::BYTE_STREAM_SPLIT}) {
+        SCOPED_TRACE("encoding " + std::to_string(encoding_type));
+        const EncodingInfo* encoding = nullptr;
+        (void)EncodingInfo::get(tparquet::Type::INT32, encoding_type, &encoding);
+        ASSERT_TRUE(encoding != nullptr);
+        std::unique_ptr<Encoder> encoder;
+        ASSERT_TRUE(encoding->create_encoder(&encoder).ok());
+        ASSERT_TRUE(encoder->append(reinterpret_cast<const uint8_t*>(values.data()), values.size()).ok());
+        std::unique_ptr<Decoder> decoder;
+        ASSERT_TRUE(encoding->create_decoder(&decoder).ok());
+        ASSERT_TRUE(decoder->set_data(encoder->build()).ok());
+
+        auto dst = FixedLengthColumn<int32_t>::create();
+        ASSERT_NO_FATAL_FAILURE(check_nulls_are_corruption(decoder.get(), nulls, true, dst.get()));
+        NullInfos null_infos = make_batch_without_nulls(num_values);
+        Status st =
+                decoder->next_batch_with_nulls(num_values, null_infos, ColumnContentType::VALUE, dst.get(), nullptr);
+        ASSERT_TRUE(st.ok()) << st.to_string();
+        ASSERT_EQ(num_values, dst->size());
+        const int32_t* data = reinterpret_cast<const int32_t*>(dst->raw_data());
+        for (size_t i = 0; i < num_values; ++i) {
+            ASSERT_EQ(values[i], data[i]) << "value " << i;
+        }
+    }
+}
+
+// The base class gives the error from the flags too, when the number of NULL rows that the caller gave is wrong.
+TEST_F(ParquetEncodingTest, BaseClassRefusesNullFlagsForNonNullableColumn) {
+    const std::vector<uint8_t> nulls = make_alternating_nulls();
+    std::vector<int32_t> values(count_non_null_rows(nulls), 7);
+    const EncodingInfo* encoding = nullptr;
+    (void)EncodingInfo::get(tparquet::Type::INT32, tparquet::Encoding::DELTA_BINARY_PACKED, &encoding);
+    ASSERT_TRUE(encoding != nullptr);
+    std::unique_ptr<Encoder> encoder;
+    ASSERT_TRUE(encoding->create_encoder(&encoder).ok());
+    ASSERT_TRUE(encoder->append(reinterpret_cast<const uint8_t*>(values.data()), values.size()).ok());
+    std::unique_ptr<Decoder> decoder;
+    ASSERT_TRUE(encoding->create_decoder(&decoder).ok());
+    ASSERT_TRUE(decoder->set_data(encoder->build()).ok());
+
+    NullInfos null_infos = make_dict_null_infos(nulls);
+    null_infos.num_nulls = 0;
+    auto dst = FixedLengthColumn<int32_t>::create();
+    Status st = decoder->next_batch_with_nulls(nulls.size(), null_infos, ColumnContentType::VALUE, dst.get(), nullptr);
+    ASSERT_TRUE(st.is_corruption()) << st.to_string();
+}
+
 } // namespace starrocks::parquet

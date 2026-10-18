@@ -154,6 +154,7 @@ public:
     // range and not on the run.
     Status next_batch_with_nulls(size_t count, const NullInfos& null_infos, ColumnContentType content_type, Column* dst,
                                  const FilterData* filter) override {
+        RETURN_IF_ERROR(_check_nulls_fit(null_infos, dst, count));
         if (!_filter_gate_open()) {
             filter = nullptr;
         }
@@ -310,8 +311,10 @@ public:
 
     Status _do_next_batch_with_nulls(size_t count, const NullInfos& null_infos, ColumnContentType content_type,
                                      Column* dst, const FilterData* filter) override {
-        DCHECK(dst->is_nullable());
-        if (null_infos.num_ranges <= 2) {
+        // The paths below write the NULL flags to the null column of `dst`. A destination that is not nullable has
+        // no NULL row here, and the base class appends its values. We do not leave the cast to num_ranges, which
+        // comes from the caller.
+        if (!dst->is_nullable() || null_infos.num_ranges <= 2) {
             return Decoder::next_batch_with_nulls(count, null_infos, content_type, dst, filter);
         }
         size_t cur_size = dst->size();
@@ -663,8 +666,10 @@ private:
 
     Status _do_next_batch_with_nulls(size_t count, const NullInfos& null_infos, ColumnContentType content_type,
                                      Column* dst, const FilterData* filter) override {
-        DCHECK(dst->is_nullable());
-        if (null_infos.num_ranges <= 1) {
+        // The paths below write the NULL flags to the null column of `dst`. A destination that is not nullable has
+        // no NULL row here, and the base class appends its values. We do not leave the cast to num_ranges, which
+        // comes from the caller.
+        if (!dst->is_nullable() || null_infos.num_ranges <= 1) {
             return Decoder::next_batch_with_nulls(count, null_infos, content_type, dst, filter);
         }
         size_t cur_size = dst->size();

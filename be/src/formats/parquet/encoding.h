@@ -123,6 +123,14 @@ public:
 protected:
     void _next_null_column(size_t count, const NullInfos& null_infos, NullableColumn* dst);
 
+    // A NULL value in a batch for a column that cannot hold NULL means that the file contradicts the schema of the
+    // table, for example a required field of an Iceberg table that was written with NULL values. We fear that going
+    // on would leave the column shorter than the read range and out of step with the other columns of the chunk,
+    // because a column that is not nullable has no place for a NULL row. So the decoders that take NULL rows call
+    // this first and give back its error. The decoder knows neither the file nor the column, and the caller that
+    // does adds them. A batch without NULL rows is fine for a column that is not nullable.
+    Status _check_nulls_fit(const NullInfos& null_infos, const Column* dst, size_t count) const;
+
     // Tells whether to use `filter`. The decoder passes the largest share of the rows that the filter may keep for
     // the filtered decode to pay off, `max_share`. We expect the filtered decode to be slower than the plain one
     // when the filter keeps most of the rows, because it works row by row and gains only on the rows that it
