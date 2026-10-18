@@ -785,9 +785,11 @@ public class PredicateStatisticsCalculator {
         return Collections.unmodifiableList(result);
     }
 
+    // An OR of the values of one expression, as the OR that the normalizer writes for an IN of days, is not counted:
+    // it costs a linear number of estimates, see DisjointOrParts.isSetOfOneExpression.
     private static long countDisConsecutiveOr(ScalarOperator root, long count, boolean isConsecutive) {
         boolean isOr = OperatorType.COMPOUND.equals(root.getOpType()) && ((CompoundPredicateOperator) root).isOr();
-        if (isOr && !isConsecutive) {
+        if (isOr && !isConsecutive && !DisjointOrParts.isSetOfOneExpression(root)) {
             count = count + 1;
         }
 
@@ -936,6 +938,13 @@ public class PredicateStatisticsCalculator {
         public Statistics visitInPredicate(InPredicateOperator predicate, Void context) {
             if (!checkNeedEvalEstimate(predicate)) {
                 return statistics;
+            }
+            // We fear a NOT IN with a NULL in the list estimated as the rest of the rows, while it is never true: a row in
+            // the list is out, and the comparison with NULL is unknown for every other row. So it is the estimate of a
+            // false condition, whatever the left side is.
+            if (predicate.isNotIn() && !predicate.isSubquery() && predicate.getChildren().stream().skip(1)
+                    .anyMatch(value -> value instanceof ConstantOperator constant && constant.isNull())) {
+                return visitConstant(ConstantOperator.FALSE, context);
             }
             Optional<Statistics> mcv = estimateWithMcv(predicate);
             if (mcv.isPresent()) {
@@ -1123,21 +1132,16 @@ public class PredicateStatisticsCalculator {
         /**
          * f(c) NOT IN (v1, ..., vk) over an expression whose equality with a constant the estimate reads, see
          * EstimatePredicateNormalizer#inEqualities, is the rows where f(c) is not NULL less the rows of the IN, so that
-         * the two keep the rows of f(c) together. The IN is the OR of the equalities, which the normalizer writes. It
-         * holds no row when a NULL stands in the list: the comparison with it is never true.
+         * the two keep the rows of f(c) together. The IN is the OR of the equalities, which the normalizer writes.
          */
         private Statistics estimateNotIn(EstimatePredicateNormalizer.InEqualities in) {
             ScalarOperator left = in.left();
-            double rows = 0;
-            if (!in.hasNull()) {
-                ColumnStatistic expression = getExpressionStatistic(left);
-                double notNull = statistics.getOutputRowCount()
-                        * (expression.isUnknown() ? 1 : 1 - expression.getNullsFraction());
-                Statistics inRows = statisticsCalculate(
-                        Utils.compoundOr(EstimatePredicateNormalizer.equalities(left, in.values())), statistics,
-                        useMcv);
-                rows = Math.max(0, notNull - inRows.getOutputRowCount());
-            }
+            ColumnStatistic expression = getExpressionStatistic(left);
+            double notNull = statistics.getOutputRowCount()
+                    * (expression.isUnknown() ? 1 : 1 - expression.getNullsFraction());
+            Statistics inRows = statisticsCalculate(
+                    Utils.compoundOr(EstimatePredicateNormalizer.equalities(left, in.values())), statistics, useMcv);
+            double rows = Math.max(0, notNull - inRows.getOutputRowCount());
             Statistics.Builder builder = Statistics.buildFrom(statistics).setOutputRowCount(rows);
             if (left instanceof ColumnRefOperator column && statistics.getColumnStatistics().containsKey(column)
                     && !statistics.getColumnStatistic(column).isUnknown()) {

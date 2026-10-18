@@ -60,9 +60,19 @@ public class InPredicateLiteralStatisticsTest {
             });
             reference.add(ref);
         }
+        boolean hasNull = literals.stream()
+                .anyMatch(literal -> literal instanceof ConstantOperator constant && constant.isNull());
         for (boolean notIn : List.of(false, true)) {
             Statistics actual = PredicateStatisticsCalculator.statisticsCalculate(
                     new InPredicateOperator(notIn, direct), input);
+            if (notIn && hasNull) {
+                // The reference does not know that a literal is NULL. A NOT IN with a NULL in the list is never true: it
+                // is the estimate of a false condition.
+                Assertions.assertEquals(Double.doubleToLongBits(PredicateStatisticsCalculator.statisticsCalculate(
+                                ConstantOperator.FALSE, input).getOutputRowCount()),
+                        Double.doubleToLongBits(actual.getOutputRowCount()), "row count of NOT IN with NULL");
+                continue;
+            }
             Statistics expected = PredicateStatisticsCalculator.statisticsCalculate(
                     new InPredicateOperator(notIn, reference), referenceInput.build());
             Assertions.assertEquals(Double.doubleToLongBits(expected.getOutputRowCount()),

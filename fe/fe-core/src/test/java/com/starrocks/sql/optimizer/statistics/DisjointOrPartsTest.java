@@ -278,4 +278,58 @@ public class DisjointOrPartsTest {
                 compare(BinaryType.EQ, new CastOperator(IntegerType.LARGEINT, E), ConstantOperator.createLargeInt(
                         java.math.BigInteger.TWO))));
     }
+
+    @Test
+    public void testOrOfTheValuesOfOneExpressionIsASetOfOneExpression() {
+        // Equalities, in any number and with repeats; the parts need not be apart.
+        Assertions.assertTrue(DisjointOrParts.isSetOfOneExpression(Utils.compoundOr(eq(E, 1), eq(E, 2))));
+        Assertions.assertTrue(DisjointOrParts.isSetOfOneExpression(Utils.compoundOr(eq(E, 1), eq(E, 1), eq(E, 3))));
+        List<ScalarOperator> many = new ArrayList<>();
+        for (int i = 0; i < 100; i++) {
+            many.add(eq(E, i));
+        }
+        Assertions.assertTrue(DisjointOrParts.isSetOfOneExpression(Utils.compoundOr(many)));
+        // Intervals and half lines of the expression, apart or not, and a point next to them.
+        Assertions.assertTrue(DisjointOrParts.isSetOfOneExpression(Utils.compoundOr(
+                range(E, BinaryType.GE, 1, BinaryType.LT, 5), range(E, BinaryType.GE, 3, BinaryType.LT, 9))));
+        Assertions.assertTrue(DisjointOrParts.isSetOfOneExpression(Utils.compoundOr(
+                compare(BinaryType.LT, E, number(1)), eq(E, 4), compare(BinaryType.GE, E, number(9)))));
+        // Nested ORs are the parts of one.
+        Assertions.assertTrue(DisjointOrParts.isSetOfOneExpression(Utils.compoundOr(
+                Utils.compoundOr(eq(E, 1), eq(E, 2)), Utils.compoundOr(eq(E, 3), eq(E, 4)))));
+        // The LIKE conditions of prefixes of a string expression, and its equalities.
+        Assertions.assertTrue(DisjointOrParts.isSetOfOneExpression(Utils.compoundOr(like("ab%"), like("ac%"))));
+        Assertions.assertTrue(DisjointOrParts.isSetOfOneExpression(Utils.compoundOr(like("ab%"), like("abc%"),
+                text(BinaryType.EQ, "b"))));
+    }
+
+    @Test
+    public void testOrOfOtherPartsIsNotASetOfOneExpression() {
+        // Another expression in any place.
+        Assertions.assertFalse(DisjointOrParts.isSetOfOneExpression(Utils.compoundOr(eq(E, 1), eq(F, 2))));
+        Assertions.assertFalse(DisjointOrParts.isSetOfOneExpression(Utils.compoundOr(eq(E, 1), eq(E, 2), eq(F, 3))));
+        Assertions.assertFalse(DisjointOrParts.isSetOfOneExpression(Utils.compoundOr(eq(F, 1), eq(E, 2), eq(E, 3))));
+        // A part of another form: <>, IN, NOT, an AND of two expressions, an OR under an AND, NULL, a comparison with an
+        // expression, and a LIKE with more than a prefix.
+        Assertions.assertFalse(DisjointOrParts.isSetOfOneExpression(Utils.compoundOr(eq(E, 1),
+                compare(BinaryType.NE, E, number(2)))));
+        Assertions.assertFalse(DisjointOrParts.isSetOfOneExpression(Utils.compoundOr(eq(E, 1),
+                new InPredicateOperator(false, E, number(2), number(3)))));
+        Assertions.assertFalse(DisjointOrParts.isSetOfOneExpression(Utils.compoundOr(eq(E, 1),
+                new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.NOT, eq(E, 2)))));
+        Assertions.assertFalse(DisjointOrParts.isSetOfOneExpression(Utils.compoundOr(eq(E, 1),
+                Utils.compoundAnd(compare(BinaryType.GE, E, number(5)), compare(BinaryType.LT, F, number(9))))));
+        Assertions.assertFalse(DisjointOrParts.isSetOfOneExpression(Utils.compoundOr(eq(E, 1),
+                Utils.compoundAnd(compare(BinaryType.GE, E, number(5)), Utils.compoundOr(eq(E, 7), eq(E, 8))))));
+        Assertions.assertFalse(DisjointOrParts.isSetOfOneExpression(Utils.compoundOr(eq(E, 1),
+                compare(BinaryType.EQ, E, ConstantOperator.createNull(IntegerType.INT)))));
+        Assertions.assertFalse(DisjointOrParts.isSetOfOneExpression(Utils.compoundOr(eq(E, 1),
+                compare(BinaryType.EQ, E, F))));
+        Assertions.assertFalse(DisjointOrParts.isSetOfOneExpression(Utils.compoundOr(like("ab%"), like("a_%"))));
+        // An interval with no value is not told, as for the parts that are apart.
+        Assertions.assertFalse(DisjointOrParts.isSetOfOneExpression(Utils.compoundOr(eq(E, 1),
+                range(E, BinaryType.GT, 5, BinaryType.LT, 3))));
+        // A string expression and a number are two expressions.
+        Assertions.assertFalse(DisjointOrParts.isSetOfOneExpression(Utils.compoundOr(eq(E, 1), like("ab%"))));
+    }
 }

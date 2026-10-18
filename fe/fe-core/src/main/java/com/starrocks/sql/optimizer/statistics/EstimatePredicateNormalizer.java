@@ -100,13 +100,14 @@ final class EstimatePredicateNormalizer {
 
     // The values of the IN list that are not NULL, without duplicates, and the left side, for an IN that is the OR of
     // the equalities of its values.
-    record InEqualities(ScalarOperator left, List<ScalarOperator> values, boolean hasNull) {
+    record InEqualities(ScalarOperator left, List<ScalarOperator> values) {
     }
 
     /**
      * The left side and the values of an IN or NOT IN over an expression whose equality with a constant the estimate
      * reads from the statistics of its column, see the rules above; empty for any other one. A NULL in the list is
-     * not a value: it matches no row.
+     * not a value: it matches no row. NOT IN with a NULL in the list is never true, which the estimate of the IN reads
+     * before it asks for the equalities.
      */
     static Optional<InEqualities> inEqualities(InPredicateOperator predicate) {
         List<ScalarOperator> children = predicate.getChildren();
@@ -116,12 +117,10 @@ final class EstimatePredicateNormalizer {
         }
         ScalarOperator left = predicate.getChild(0);
         List<ScalarOperator> values = new ArrayList<>(children.size() - 1);
-        boolean hasNull = false;
         for (int i = 1; i < children.size(); i++) {
             if (!(children.get(i) instanceof ConstantOperator constant)) {
                 return Optional.empty();
             }
-            hasNull |= constant.isNull();
             if (!constant.isNull() && !values.contains(constant)) {
                 values.add(constant);
             }
@@ -142,7 +141,7 @@ final class EstimatePredicateNormalizer {
         } else {
             reads = false;
         }
-        return reads ? Optional.of(new InEqualities(left, values, hasNull)) : Optional.empty();
+        return reads ? Optional.of(new InEqualities(left, values)) : Optional.empty();
     }
 
     /** left = v for each value. */

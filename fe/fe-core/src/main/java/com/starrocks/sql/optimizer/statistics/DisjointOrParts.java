@@ -75,6 +75,26 @@ final class DisjointOrParts {
         return apart;
     }
 
+    /**
+     * Whether every part of the OR is a set of values of one expression, of the forms above: equalities, intervals and
+     * LIKE conditions of prefixes of it. The estimate of such an OR takes one estimate of each part, or two, and the
+     * parts have no OR under them, so its cost is linear in the number of parts. We fear the cost that grows with the
+     * ORs that stand one inside another through an AND, which the count of ORs guards against, and an OR of this kind
+     * does not add to it: an IN of days is an OR of the equalities of a day, and it must not take the place of an OR
+     * that is there to be counted.
+     */
+    static boolean isSetOfOneExpression(ScalarOperator or) {
+        ScalarOperator common = null;
+        for (ScalarOperator part : Utils.extractDisjunctive(or)) {
+            Range range = rangeOf(part);
+            if (range == null || common != null && !common.equals(range.expression())) {
+                return false;
+            }
+            common = range.expression();
+        }
+        return common != null;
+    }
+
     private static Range rangeOf(ScalarOperator part) {
         if (part instanceof LikePredicateOperator like && !like.isRegexp() && like.getChild(0).getType().isStringType()) {
             // The strings that start with p are those from p up to the first string after all of them.

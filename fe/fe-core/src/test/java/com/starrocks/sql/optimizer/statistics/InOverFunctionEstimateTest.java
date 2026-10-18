@@ -55,6 +55,9 @@ public class InOverFunctionEstimateTest {
     private static final double ROWS = 1_000_000;
     private static final ColumnRefOperator D = new ColumnRefOperator(1, IntegerType.INT, "d", true);
     private static final ColumnRefOperator TEXT = new ColumnRefOperator(2, VarcharType.VARCHAR, "created_at", true);
+    private static final ColumnRefOperator E = new ColumnRefOperator(3, IntegerType.INT, "e", true);
+    private static final ColumnRefOperator F = new ColumnRefOperator(4, VarcharType.VARCHAR, "f", true);
+    private static final ColumnRefOperator A = new ColumnRefOperator(5, IntegerType.INT, "a", true);
     private static final StringDateFormat ISO = StringDateFormat.parse("%Y-%m-%dT%H:%i:%s.%fZ");
 
     private TimeZone savedZone;
@@ -193,6 +196,121 @@ public class InOverFunctionEstimateTest {
         Assertions.assertEquals(2400 + 7400, stringRows(in(false, prefix, text("2026-08-14"), text("2026-08-15"))), 1e-6);
     }
 
+    // The days with the columns of the groups and of the parts: e from 0 to 100 and f of 20 values, which the groups
+    // read, and a of 100 values.
+    private static Statistics wide() {
+        return Statistics.builder().setOutputRowCount(ROWS)
+                .addColumnStatistic(D, new ColumnStatistic(17197, 20727, 0, 4, 805))
+                .addColumnStatistic(E, new ColumnStatistic(0, 100, 0, 4, 101))
+                .addColumnStatistic(F, new ColumnStatistic(Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY, 0, 8, 20))
+                .addColumnStatistic(A, new ColumnStatistic(1, 100, 0, 4, 100)).build();
+    }
+
+    private static double wideRows(ScalarOperator predicate) {
+        return PredicateStatisticsCalculator.statisticsCalculate(predicate, wide()).getOutputRowCount();
+    }
+
+    // (e >= 0 OR f = 'Xi'), the group that keeps every row: the OR of two expressions.
+    private static List<ScalarOperator> groups(int count) {
+        List<ScalarOperator> groups = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            groups.add(Utils.compoundOr(new BinaryPredicateOperator(BinaryType.GE, E, ConstantOperator.createInt(0)),
+                    eq(F, ConstantOperator.createVarchar("X" + i))));
+        }
+        return groups;
+    }
+
+    private static ScalarOperator andGroups(ScalarOperator predicate, int count) {
+        List<ScalarOperator> conjuncts = new ArrayList<>();
+        conjuncts.add(predicate);
+        conjuncts.addAll(groups(count));
+        return Utils.compoundAnd(conjuncts);
+    }
+
+    private static ScalarOperator[] ints(int... values) {
+        ScalarOperator[] constants = new ScalarOperator[values.length];
+        for (int i = 0; i < values.length; i++) {
+            constants[i] = ConstantOperator.createInt(values[i]);
+        }
+        return constants;
+    }
+
+    private static ScalarOperator interval(int from, int to) {
+        return Utils.compoundAnd(new BinaryPredicateOperator(BinaryType.GE, D, ConstantOperator.createInt(from)),
+                new BinaryPredicateOperator(BinaryType.LT, D, ConstantOperator.createInt(to)));
+    }
+
+    @Test
+    public void testInOverTheDayNextToManyOrGroupsIsNotAnotherGroup() {
+        // The groups keep every row, so the IN of two days is two values of 805 whatever the number of groups, as the IN
+        // on the column is. The OR that the IN becomes is the OR of one expression, which costs a linear number of
+        // estimates, and it must not take the place of the sixteenth group.
+        double two = 2 * ROWS / 805;
+        ScalarOperator inDays = in(false, day(), date(1, 15), date(1, 16));
+        ScalarOperator inColumn = in(false, D, ints(20468, 20469));
+        for (int groups : List.of(0, 1, 15, 16)) {
+            Assertions.assertEquals(two, wideRows(andGroups(inDays, groups)), 1e-6, "groups " + groups);
+            Assertions.assertEquals(two, wideRows(andGroups(inColumn, groups)), 1e-6, "groups " + groups);
+        }
+        // The OR of intervals of one expression is such an OR as well; the two intervals have no common point and add.
+        ScalarOperator first = interval(18000, 18010);
+        ScalarOperator second = interval(19000, 19010);
+        double sum = wideRows(first) + wideRows(second);
+        Assertions.assertEquals(2 * ROWS * 10 / 3530, sum, 1e-6);
+        for (int groups : List.of(0, 15, 16)) {
+            Assertions.assertEquals(sum, wideRows(andGroups(Utils.compoundOr(first, second), groups)), 1e-6,
+                    "groups " + groups);
+        }
+    }
+
+    @Test
+    public void testOrOfTwoExpressionsIsStillAGroup() {
+        // The OR of d = 20468 and e = 5 is a group: with 15 other groups there are 16 and the estimate is of the OR, with
+        // 16 others there are 17 and the estimate is the one of an OR of many groups, the greater of the two parts.
+        ScalarOperator or = Utils.compoundOr(eq(D, ConstantOperator.createInt(20468)),
+                eq(E, ConstantOperator.createInt(5)));
+        double regular = wideRows(or);
+        Assertions.assertEquals(regular, wideRows(andGroups(or, 15)), 1e-6);
+        Assertions.assertEquals(Math.max(ROWS / 805, ROWS / 101), wideRows(andGroups(or, 16)), 1e-6);
+        Assertions.assertTrue(regular > wideRows(andGroups(or, 16)));
+    }
+
+    private static ScalarOperator partOfDays(int a, boolean byFunction) {
+        ScalarOperator days = byFunction ? in(false, day(), date(1, 15), date(1, 16), date(1, 17))
+                : in(false, D, ints(20468, 20469, 20470));
+        return Utils.compoundAnd(eq(A, ConstantOperator.createInt(a)), days);
+    }
+
+    private static ScalarOperator orOfParts(int count, boolean byFunction) {
+        List<ScalarOperator> parts = new ArrayList<>();
+        for (int a = 1; a <= count; a++) {
+            parts.add(partOfDays(a, byFunction));
+        }
+        return Utils.compoundOr(parts);
+    }
+
+    @Test
+    public void testOrOfSixteenPartsWithAnInOverTheDayIsNotBelowItsSubsetOfEight() {
+        // Each part is a = k AND the IN of three days; the IN becomes an OR of one expression inside each part. They are
+        // not groups: the OR of sixteen parts is one, and is estimated as the OR of eight is, by adding the parts.
+        for (boolean byFunction : List.of(true, false)) {
+            double eight = wideRows(orOfParts(8, byFunction));
+            double sixteen = wideRows(orOfParts(16, byFunction));
+            Assertions.assertTrue(sixteen > eight, byFunction + " " + sixteen + " " + eight);
+        }
+        // The same parts with the IN on the column, which is no OR, give the same estimates.
+        Assertions.assertEquals(wideRows(orOfParts(8, false)), wideRows(orOfParts(8, true)), 1e-6);
+        Assertions.assertEquals(wideRows(orOfParts(16, false)), wideRows(orOfParts(16, true)), 1e-6);
+        // Each part is 3 values of 805 in 1 of 100 values of a: 37.27 rows. The estimate of an OR of parts that are not
+        // apart takes from the sum the rows that each part has in common with the earlier ones, so it is below the sum.
+        double part = ROWS / 100 * 3 / 805;
+        Assertions.assertEquals(part, wideRows(partOfDays(1, true)), 1e-6);
+        Assertions.assertEquals(291.1366459627329, wideRows(orOfParts(8, true)), 1e-6);
+        Assertions.assertEquals(581.2732919254659, wideRows(orOfParts(16, true)), 1e-6);
+        Assertions.assertTrue(wideRows(orOfParts(8, true)) < 8 * part);
+        Assertions.assertTrue(wideRows(orOfParts(16, true)) < 16 * part);
+    }
+
     @Test
     public void testOrderOfTheValuesDoesNotChangeTheEstimate() {
         Assertions.assertEquals(rows(in(false, day(), date(1, 15), date(1, 16))),
@@ -201,17 +319,62 @@ public class InOverFunctionEstimateTest {
 
     @Test
     public void testLongListKeepsTheDefault() {
-        // 51 values: more than the list that is estimated as equalities; the default of an IN, the half of the rows.
-        ScalarOperator[] values = new ScalarOperator[51];
+        // 1025 values are one more than the list that is estimated as equalities: the default of an IN, the half of the
+        // rows.
+        int limit = 1024;
+        ScalarOperator[] values = new ScalarOperator[limit + 1];
         for (int i = 0; i < values.length; i++) {
-            values[i] = ConstantOperator.createDatetime(LocalDateTime.of(2025, 1, 1, 0, 0).plusDays(i));
+            values[i] = ConstantOperator.createDatetime(LocalDateTime.of(2000, 1, 1, 0, 0).plusDays(i));
         }
         Assertions.assertEquals(ROWS / 2, rows(in(false, day(), values)), 1e-6);
-        // 50 values are equalities: the rows of 50 values of 805, not the half.
-        ScalarOperator[] fifty = Arrays.copyOf(values, 50);
-        Assertions.assertTrue(rows(in(false, day(), fifty)) < ROWS / 10);
-        System.out.println("IN 50 values " + rows(in(false, day(), fifty)) + ", IN 51 values "
-                + rows(in(false, day(), values)));
+        // 1024 values are equalities: the one row an estimate takes for each of the days that the table does not hold,
+        // and not the half of the rows.
+        ScalarOperator[] equalities = Arrays.copyOf(values, limit);
+        Assertions.assertEquals(limit, rows(in(false, day(), equalities)), 1e-6);
+    }
+
+    @Test
+    public void testInOfTheLongestListIsEstimatedInLessThanHalfASecond() {
+        int limit = 1024;
+        // By a monotone function of the column: 500 days of the column, the last ones, and the days after them.
+        ScalarOperator[] dates = new ScalarOperator[limit];
+        List<ScalarOperator> dateEqualities = new ArrayList<>();
+        for (int i = 0; i < limit; i++) {
+            dates[i] = ConstantOperator.createDatetime(java.time.LocalDate.ofEpochDay(20727 - 499 + i).atStartOfDay());
+            dateEqualities.add(eq(day(), dates[i]));
+        }
+        // By a prefix of a string date: the last day of the table, which has 2400 rows, and the days after it.
+        ScalarOperator prefix = prefixOf("left", 10);
+        ScalarOperator[] days = new ScalarOperator[limit];
+        List<ScalarOperator> dayEqualities = new ArrayList<>();
+        for (int i = 0; i < limit; i++) {
+            days[i] = text(java.time.LocalDate.of(2026, 8, 19).plusDays(i).toString());
+            dayEqualities.add(eq(prefix, days[i]));
+        }
+        // The first estimate of a JVM loads the classes and runs cold, which is not what the planner of a running FE
+        // pays: we time the second one.
+        long start = System.nanoTime();
+        double inRows = rows(in(false, day(), dates));
+        long coldFunctionMillis = (System.nanoTime() - start) / 1_000_000;
+        start = System.nanoTime();
+        double stringRows = stringRows(in(false, prefix, days));
+        long coldPrefixMillis = (System.nanoTime() - start) / 1_000_000;
+        start = System.nanoTime();
+        rows(in(false, day(), dates));
+        long functionMillis = (System.nanoTime() - start) / 1_000_000;
+        start = System.nanoTime();
+        stringRows(in(false, prefix, days));
+        long prefixMillis = (System.nanoTime() - start) / 1_000_000;
+        System.out.println("MEASURED IN of " + limit + " values: function " + coldFunctionMillis + " ms cold, " + functionMillis
+                + " ms; prefix of a string date " + coldPrefixMillis + " ms cold, " + prefixMillis + " ms");
+        Assertions.assertTrue(functionMillis < 500, "function " + functionMillis + " ms");
+        Assertions.assertTrue(prefixMillis < 500, "prefix " + prefixMillis + " ms");
+        // The OR of the equalities has the same rows: 500 days of 805 values of the column and the one row an estimate
+        // takes for each of the others; the 2400 rows of the last day of the table and one row for each day after it.
+        Assertions.assertEquals(rows(Utils.compoundOr(dateEqualities)), inRows, 1e-6);
+        Assertions.assertEquals(500 * ROWS / 805 + (limit - 500), inRows, 1e-6);
+        Assertions.assertEquals(stringRows(Utils.compoundOr(dayEqualities)), stringRows, 1e-6);
+        Assertions.assertEquals(2400 + (limit - 1), stringRows, 1e-6);
     }
 
     @Test
@@ -231,6 +394,35 @@ public class InOverFunctionEstimateTest {
         Assertions.assertEquals(ROWS - rows(in(false, D, ConstantOperator.createInt(20468),
                 ConstantOperator.createInt(20469))), rows(in(true, D, ConstantOperator.createInt(20468),
                 ConstantOperator.createInt(20469))), 1e-6);
+    }
+
+    @Test
+    public void testNotInWithANullInTheListIsFalse() {
+        ConstantOperator nullInt = ConstantOperator.createNull(IntegerType.INT);
+        ConstantOperator nullText = ConstantOperator.createNull(VarcharType.VARCHAR);
+        // Never true, whatever the left side is: the estimate of a false condition, which keeps the one row an estimate
+        // keeps. A column of whole numbers, with the NULL at any place of the list, and the list of a NULL alone.
+        double none = rows(ConstantOperator.FALSE);
+        Assertions.assertEquals(1, none, 1e-6);
+        ConstantOperator a = ConstantOperator.createInt(20468);
+        ConstantOperator b = ConstantOperator.createInt(20469);
+        for (ScalarOperator notIn : List.of(in(true, D, a, nullInt), in(true, D, nullInt, a), in(true, D, a, nullInt, b),
+                in(true, D, nullInt), in(true, D, nullInt, nullInt))) {
+            Assertions.assertEquals(none, rows(notIn), 1e-6, notIn.toString());
+        }
+        // A function of the column, a string date column, a prefix of it, and an expression no bound is read from.
+        Assertions.assertEquals(none, rows(in(true, day(), date(1, 15), ConstantOperator.createNull(DateType.DATETIME))),
+                1e-6);
+        Assertions.assertEquals(none, stringRows(in(true, TEXT, text("2026-08-15T06:30:00.000000Z"), nullText)), 1e-6);
+        Assertions.assertEquals(none, stringRows(in(true, prefixOf("left", 10), text("2026-08-15"), nullText)), 1e-6);
+        Assertions.assertEquals(none, stringRows(in(true, call("lower", TEXT), text("a"), nullText)), 1e-6);
+        Assertions.assertEquals(none, stringRows(in(true, TEXT, nullText)), 1e-6);
+        // Within an OR the false part adds nothing, and a NOT of it keeps what the estimate of NOT keeps.
+        ScalarOperator equality = eq(D, a);
+        Assertions.assertEquals(rows(equality), rows(Utils.compoundOr(in(true, D, a, nullInt), equality)), 1e-6);
+        // An IN with a NULL, and a NOT IN without one, are estimated as before.
+        Assertions.assertEquals(rows(in(false, D, a)), rows(in(false, D, a, nullInt)), 1e-6);
+        Assertions.assertEquals(ROWS - 2 * ROWS / 805, rows(in(true, D, a, b)), 1e-6);
     }
 
     @Test
@@ -301,16 +493,13 @@ public class InOverFunctionEstimateTest {
     @Test
     public void testLongListOverAPrefixOfAStringDateKeepsTheDefault() {
         ScalarOperator prefix = prefixOf("left", 10);
-        ScalarOperator[] values = new ScalarOperator[51];
+        int limit = 1024;
+        ScalarOperator[] values = new ScalarOperator[limit + 1];
         for (int i = 0; i < values.length; i++) {
-            values[i] = text(String.format("2026-08-%02d", 1 + i % 28));
+            values[i] = text(java.time.LocalDate.of(2027, 1, 1).plusDays(i).toString());
         }
-        values[50] = text("2026-09-30");
-        for (int i = 0; i < 50; i++) {
-            values[i] = text(String.format("2026-%02d-%02d", 1 + i / 28 + 5, 1 + i % 28));
-        }
-        // 50 days of June and July, which the table does not hold: the one row an estimate takes for each.
-        Assertions.assertEquals(50, stringRows(in(false, prefix, Arrays.copyOf(values, 50))), 1e-6);
+        // 1024 days, which the table does not hold: the one row an estimate takes for each.
+        Assertions.assertEquals(limit, stringRows(in(false, prefix, Arrays.copyOf(values, limit))), 1e-6);
         Assertions.assertEquals(strings().getOutputRowCount() / 2, stringRows(in(false, prefix, values)), 1e-6);
     }
 
