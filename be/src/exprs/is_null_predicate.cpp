@@ -39,7 +39,19 @@ public:
 
     StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* ptr) override {
         ASSIGN_OR_RETURN(ColumnPtr column, _children[0]->evaluate_checked(context, ptr));
+        return is_null(column);
+    }
 
+    StatusOr<ColumnPtr> evaluate_selected(ExprContext* context, Chunk* chunk,
+                                          const std::vector<uint32_t>& rows) override {
+        if (rows.empty()) return ColumnHelper::create_column(_type, is_nullable());
+        if (!pass_selection_to_children(this)) return Expr::evaluate_selected(context, chunk, rows);
+        ASSIGN_OR_RETURN(ColumnPtr column, _children[0]->evaluate_selected(context, chunk, rows));
+        return is_null(column);
+    }
+
+private:
+    static ColumnPtr is_null(const ColumnPtr& column) {
         if (column->only_null()) {
             return ColumnHelper::create_const_column<TYPE_BOOLEAN>(true, column->size());
         }
@@ -74,7 +86,19 @@ public:
 
     StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* ptr) override {
         ASSIGN_OR_RETURN(ColumnPtr column, _children[0]->evaluate_checked(context, ptr));
+        return is_not_null(column);
+    }
 
+    StatusOr<ColumnPtr> evaluate_selected(ExprContext* context, Chunk* chunk,
+                                          const std::vector<uint32_t>& rows) override {
+        if (rows.empty()) return ColumnHelper::create_column(_type, is_nullable());
+        if (!pass_selection_to_children(this)) return Expr::evaluate_selected(context, chunk, rows);
+        ASSIGN_OR_RETURN(ColumnPtr column, _children[0]->evaluate_selected(context, chunk, rows));
+        return is_not_null(column);
+    }
+
+private:
+    static ColumnPtr is_not_null(const ColumnPtr& column) {
         if (column->only_null()) {
             return ColumnHelper::create_const_column<TYPE_BOOLEAN>(false, column->size());
         }

@@ -302,6 +302,16 @@ public:
     // The slots that get_slot_ids() reports, sorted and without duplicates.
     const std::vector<SlotId>& sorted_unique_slot_ids() const;
 
+    // True when a function call in this subtree has a kernel that reads its input by row ids. We want an
+    // operator above such a function to pass the row selection down, so that the kernel needs no copy of its
+    // input. Without such a kernel every child would copy its own input, and one shared copy for the whole
+    // subtree is cheaper, so then the operator keeps the shared copy.
+    //
+    // This is computed on the first call and kept in the node, because every operator asks it for every chunk
+    // and a walk of the subtree per call is too expensive. prepare() sets the function descriptors, so we
+    // expect the first call after the tree is prepared, and no change of the tree after it.
+    bool has_selected_kernel() const;
+
     // Return true if this expr or any of its children support ngram bloom filter, otherwise return flase
     virtual bool support_ngram_bloom_filter(ExprContext* context) const;
 
@@ -376,6 +386,10 @@ protected:
     /// Releases cache entries to LibCache in all nodes of the Expr tree.
     virtual void close();
 
+    // True when this node itself is a function call with a selection-aware kernel. has_selected_kernel()
+    // looks for such a node in the subtree.
+    virtual bool has_own_selected_kernel() const { return false; }
+
     // ------------------------------------------------------------------------------------
     // Data Members:
     // **NOTE** that when adding a new data member, please check whether it need to be added into `Expr::Expr(const Expr&)`.
@@ -436,10 +450,15 @@ private:
     static Status create_vectorized_expr(ObjectPool* pool, const TExprNode& texpr_node, Expr** expr,
                                          RuntimeState* state);
 
-    // The cached results of has_indirect_inputs() and sorted_unique_slot_ids(). Expr(const Expr&) does
-    // not copy them: a LazyValue starts empty in a copy.
+    // The cached results of has_indirect_inputs(), sorted_unique_slot_ids() and has_selected_kernel().
+    // Expr(const Expr&) does not copy them: a LazyValue starts empty in a copy.
     LazyValue<bool> _has_indirect_inputs;
     LazyValue<std::vector<SlotId>> _sorted_unique_slot_ids;
+    LazyValue<bool> _has_selected_kernel;
 };
+
+// Operators call this to decide whether to pass the row selection to their children. We expect it to pay off
+// only when a function with a selection-aware kernel is in the subtree of expr.
+bool pass_selection_to_children(const Expr* expr);
 
 } // namespace starrocks

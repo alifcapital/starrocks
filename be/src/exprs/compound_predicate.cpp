@@ -51,16 +51,15 @@ public:
 
     StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* ptr) override {
         ASSIGN_OR_RETURN(auto l, _children[0]->evaluate_checked(context, ptr));
-        int l_falses = ColumnHelper::count_false_with_notnull(l);
+        return and_with_right(std::move(l), [&] { return _children[1]->evaluate_checked(context, ptr); });
+    }
 
-        // left all false and not null
-        if (l_falses == l->size()) {
-            return Column::mutate(std::move(l));
-        }
-
-        ASSIGN_OR_RETURN(auto r, _children[1]->evaluate_checked(context, ptr));
-
-        return VectorizedLogicPredicateBinaryFunction<AndNullImpl, AndImpl>::template evaluate<TYPE_BOOLEAN>(l, r);
+    StatusOr<ColumnPtr> evaluate_selected(ExprContext* context, Chunk* chunk,
+                                          const std::vector<uint32_t>& rows) override {
+        if (rows.empty()) return ColumnHelper::create_column(_type, is_nullable());
+        if (!pass_selection_to_children(this)) return Expr::evaluate_selected(context, chunk, rows);
+        ASSIGN_OR_RETURN(auto l, _children[0]->evaluate_selected(context, chunk, rows));
+        return and_with_right(std::move(l), [&] { return _children[1]->evaluate_selected(context, chunk, rows); });
     }
 
 #ifdef STARROCKS_JIT_ENABLE
@@ -109,6 +108,21 @@ public:
             << ", rhs_is_constant=" << _children[1]->is_constant() << ", expr (" << expr_debug_string << ") )";
         return out.str();
     }
+
+private:
+    template <typename EvaluateRight>
+    static StatusOr<ColumnPtr> and_with_right(ColumnPtr l, EvaluateRight&& evaluate_right) {
+        int l_falses = ColumnHelper::count_false_with_notnull(l);
+
+        // left all false and not null
+        if (l_falses == l->size()) {
+            return Column::mutate(std::move(l));
+        }
+
+        ASSIGN_OR_RETURN(auto r, evaluate_right());
+
+        return VectorizedLogicPredicateBinaryFunction<AndNullImpl, AndImpl>::template evaluate<TYPE_BOOLEAN>(l, r);
+    }
 };
 
 /**
@@ -130,16 +144,15 @@ public:
     DEFINE_COMPOUND_CONSTRUCT(VectorizedOrCompoundPredicate);
     StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* ptr) override {
         ASSIGN_OR_RETURN(auto l, _children[0]->evaluate_checked(context, ptr));
+        return or_with_right(std::move(l), [&] { return _children[1]->evaluate_checked(context, ptr); });
+    }
 
-        int l_trues = ColumnHelper::count_true_with_notnull(l);
-        // left all true and not null
-        if (l_trues == l->size()) {
-            return Column::mutate(std::move(l));
-        }
-
-        ASSIGN_OR_RETURN(auto r, _children[1]->evaluate_checked(context, ptr));
-
-        return VectorizedLogicPredicateBinaryFunction<OrNullImpl, OrImpl>::template evaluate<TYPE_BOOLEAN>(l, r);
+    StatusOr<ColumnPtr> evaluate_selected(ExprContext* context, Chunk* chunk,
+                                          const std::vector<uint32_t>& rows) override {
+        if (rows.empty()) return ColumnHelper::create_column(_type, is_nullable());
+        if (!pass_selection_to_children(this)) return Expr::evaluate_selected(context, chunk, rows);
+        ASSIGN_OR_RETURN(auto l, _children[0]->evaluate_selected(context, chunk, rows));
+        return or_with_right(std::move(l), [&] { return _children[1]->evaluate_selected(context, chunk, rows); });
     }
 
 #ifdef STARROCKS_JIT_ENABLE
@@ -189,6 +202,20 @@ public:
             << ", rhs_is_constant=" << _children[1]->is_constant() << ", expr (" << expr_debug_string << ") )";
         return out.str();
     }
+
+private:
+    template <typename EvaluateRight>
+    static StatusOr<ColumnPtr> or_with_right(ColumnPtr l, EvaluateRight&& evaluate_right) {
+        int l_trues = ColumnHelper::count_true_with_notnull(l);
+        // left all true and not null
+        if (l_trues == l->size()) {
+            return Column::mutate(std::move(l));
+        }
+
+        ASSIGN_OR_RETURN(auto r, evaluate_right());
+
+        return VectorizedLogicPredicateBinaryFunction<OrNullImpl, OrImpl>::template evaluate<TYPE_BOOLEAN>(l, r);
+    }
 };
 
 DEFINE_UNARY_FN_WITH_IMPL(CompoundPredNot, l) {
@@ -200,8 +227,15 @@ public:
     DEFINE_COMPOUND_CONSTRUCT(VectorizedNotCompoundPredicate);
     StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* ptr) override {
         ASSIGN_OR_RETURN(auto l, _children[0]->evaluate_checked(context, ptr));
+        return negate(l);
+    }
 
-        return VectorizedStrictUnaryFunction<CompoundPredNot>::template evaluate<TYPE_BOOLEAN>(l);
+    StatusOr<ColumnPtr> evaluate_selected(ExprContext* context, Chunk* chunk,
+                                          const std::vector<uint32_t>& rows) override {
+        if (rows.empty()) return ColumnHelper::create_column(_type, is_nullable());
+        if (!pass_selection_to_children(this)) return Expr::evaluate_selected(context, chunk, rows);
+        ASSIGN_OR_RETURN(auto l, _children[0]->evaluate_selected(context, chunk, rows));
+        return negate(l);
     }
 #ifdef STARROCKS_JIT_ENABLE
 
@@ -244,6 +278,11 @@ public:
             << ", result=" << this->type().debug_string() << ", child_is_constant=" << _children[0]->is_constant()
             << ", expr (" << expr_debug_string << ") )";
         return out.str();
+    }
+
+private:
+    static ColumnPtr negate(const ColumnPtr& l) {
+        return VectorizedStrictUnaryFunction<CompoundPredNot>::template evaluate<TYPE_BOOLEAN>(l);
     }
 };
 

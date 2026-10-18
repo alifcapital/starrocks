@@ -180,6 +180,7 @@ set(EXEC_FILES
         ./exprs/agg/agg_state_functions_test.cpp
         ./exprs/selected_collection_functions_test.cpp
         ./exprs/selected_functions_test.cpp
+        ./exprs/selected_operators_test.cpp
         ./exprs/conditional_two_phase_test.cpp
         ./exprs/ai_functions_test.cpp
         ./exprs/arithmetic_expr_test.cpp

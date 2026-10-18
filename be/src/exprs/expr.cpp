@@ -794,6 +794,25 @@ const std::vector<SlotId>& Expr::sorted_unique_slot_ids() const {
     });
 }
 
+// A child keeps its own result, so the computation here looks at the children without a walk of their subtrees.
+bool Expr::has_selected_kernel() const {
+    return _has_selected_kernel.get([this] {
+        if (has_own_selected_kernel()) {
+            return true;
+        }
+        for (const Expr* child : _children) {
+            if (child->has_selected_kernel()) {
+                return true;
+            }
+        }
+        return false;
+    });
+}
+
+bool pass_selection_to_children(const Expr* expr) {
+    return expr->has_selected_kernel();
+}
+
 namespace {
 // The copy made for a routed branch has only the routed rows, while the provider of the original
 // chunk returns columns with the rows of the original chunk. We wrap that provider so a lazy column

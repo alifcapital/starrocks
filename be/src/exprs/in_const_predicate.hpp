@@ -14,6 +14,8 @@
 
 #pragma once
 
+#include <optional>
+
 #include "column/chunk.h"
 #include "column/column_builder.h"
 #include "column/column_helper.h"
@@ -295,42 +297,20 @@ public:
 
     StatusOr<ColumnPtr> evaluate_with_filter(ExprContext* context, Chunk* ptr, uint8_t* filter) override {
         ASSIGN_OR_RETURN(ColumnPtr lhs, _children[0]->evaluate_checked(context, ptr));
-        if (!_eq_null && ColumnHelper::count_nulls(lhs) == lhs->size()) {
-            return ColumnHelper::create_const_null_column(lhs->size());
-        }
-        bool use_array = is_use_array();
-
-        if (_null_in_set) {
-            if (_eq_null) {
-                if (!use_array) {
-                    return this->template eval_on_chunk<true, true, false>(lhs, filter);
-                } else {
-                    return this->template eval_on_chunk<true, true, true>(lhs, filter);
-                }
-            } else {
-                if (!use_array) {
-                    return this->template eval_on_chunk<true, false, false>(lhs, filter);
-                } else {
-                    return this->template eval_on_chunk<true, false, true>(lhs, filter);
-                }
-            }
-        } else if (lhs->is_nullable()) {
-            if (!use_array) {
-                return this->template eval_on_chunk<false, false, false>(lhs, filter);
-            } else {
-                return this->template eval_on_chunk<false, false, true>(lhs, filter);
-            }
-        } else {
-            if (!use_array) {
-                return eval_on_chunk_both_column_and_set_not_has_null<false>(lhs, filter);
-            } else {
-                return eval_on_chunk_both_column_and_set_not_has_null<true>(lhs, filter);
-            }
-        }
+        return evaluate_lhs(lhs, filter);
     }
 
     StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* ptr) override {
         return evaluate_with_filter(context, ptr, nullptr);
+    }
+
+    // Only the left child depends on the rows, the other children are the constants of the set.
+    StatusOr<ColumnPtr> evaluate_selected(ExprContext* context, Chunk* chunk,
+                                          const std::vector<uint32_t>& rows) override {
+        if (rows.empty()) return ColumnHelper::create_column(_type, is_nullable());
+        if (!pass_selection_to_children(_children[0])) return Expr::evaluate_selected(context, chunk, rows);
+        ASSIGN_OR_RETURN(ColumnPtr lhs, _children[0]->evaluate_selected(context, chunk, rows));
+        return evaluate_lhs(lhs, nullptr);
     }
 
     ColumnPtr get_all_values() const {
@@ -402,6 +382,41 @@ public:
     bool is_use_array() const { return _array_size != 0; }
 
 private:
+    StatusOr<ColumnPtr> evaluate_lhs(const ColumnPtr& lhs, uint8_t* filter) {
+        if (!_eq_null && ColumnHelper::count_nulls(lhs) == lhs->size()) {
+            return ColumnHelper::create_const_null_column(lhs->size());
+        }
+        bool use_array = is_use_array();
+
+        if (_null_in_set) {
+            if (_eq_null) {
+                if (!use_array) {
+                    return this->template eval_on_chunk<true, true, false>(lhs, filter);
+                } else {
+                    return this->template eval_on_chunk<true, true, true>(lhs, filter);
+                }
+            } else {
+                if (!use_array) {
+                    return this->template eval_on_chunk<true, false, false>(lhs, filter);
+                } else {
+                    return this->template eval_on_chunk<true, false, true>(lhs, filter);
+                }
+            }
+        } else if (lhs->is_nullable()) {
+            if (!use_array) {
+                return this->template eval_on_chunk<false, false, false>(lhs, filter);
+            } else {
+                return this->template eval_on_chunk<false, false, true>(lhs, filter);
+            }
+        } else {
+            if (!use_array) {
+                return eval_on_chunk_both_column_and_set_not_has_null<false>(lhs, filter);
+            } else {
+                return eval_on_chunk_both_column_and_set_not_has_null<true>(lhs, filter);
+            }
+        }
+    }
+
     // Note(yan): It's very tempting to use real bitmap, but the real scenario is, the array size is usually small like dict codes.
     // To usse real bitmap involves bit shift, and/or ops, which eats much cpu cycles.
     // Since the bitmap size is quite small, we can use trade memory usage for performance
@@ -462,6 +477,24 @@ public:
     }
 
     StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* ptr) override {
+        std::optional<size_t> num_rows;
+        if (ptr != nullptr) num_rows = ptr->num_rows();
+        return evaluate_inputs([&](Expr* child) { return child->evaluate_checked(context, ptr); }, num_rows);
+    }
+
+    StatusOr<ColumnPtr> evaluate_selected(ExprContext* context, Chunk* chunk,
+                                          const std::vector<uint32_t>& rows) override {
+        if (rows.empty()) return ColumnHelper::create_column(_type, is_nullable());
+        if (!pass_selection_to_children(this)) return Expr::evaluate_selected(context, chunk, rows);
+        return evaluate_inputs([&](Expr* child) { return child->evaluate_selected(context, chunk, rows); },
+                               rows.size());
+    }
+
+private:
+    // `evaluate_child` evaluates a child that is not constant. `num_rows` is the number of rows of its result,
+    // if the caller knows it.
+    template <typename EvaluateChild>
+    StatusOr<ColumnPtr> evaluate_inputs(EvaluateChild&& evaluate_child, std::optional<size_t> num_rows) {
         DCHECK_EQ(_const_input.size(), _children.size());
         auto child_size = _children.size();
         Columns input_data(child_size);
@@ -473,7 +506,7 @@ public:
         for (int i = 0; i < child_size; ++i) {
             value = _const_input[i];
             if (value == nullptr) {
-                ASSIGN_OR_RETURN(value, _children[i]->evaluate_checked(context, ptr));
+                ASSIGN_OR_RETURN(value, evaluate_child(_children[i]));
                 is_const[i] = value->is_constant();
                 all_const &= is_const[i];
             }
@@ -494,7 +527,7 @@ public:
             }
         }
         auto size = columns_ref[0]->size();
-        DCHECK(ptr == nullptr || ptr->num_rows() == size); // ptr is null in tests.
+        DCHECK(!num_rows.has_value() || *num_rows == size); // the chunk is null in tests.
         auto dest_size = size;
         if (all_const) {
             dest_size = 1;
@@ -544,7 +577,6 @@ public:
         }
     }
 
-private:
     const bool _is_not_in{false};
     Columns _const_input;
 };

@@ -139,7 +139,16 @@ public:
     StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* ptr) override {
         ASSIGN_OR_RETURN(auto l, _children[0]->evaluate_checked(context, ptr));
         ASSIGN_OR_RETURN(auto r, _children[1]->evaluate_checked(context, ptr));
-        return VectorizedStrictBinaryFunction<OP>::template evaluate<Type, TYPE_BOOLEAN>(l, r);
+        return compare(l, r);
+    }
+
+    StatusOr<ColumnPtr> evaluate_selected(ExprContext* context, Chunk* chunk,
+                                          const std::vector<uint32_t>& rows) override {
+        if (rows.empty()) return ColumnHelper::create_column(_type, is_nullable());
+        if (!pass_selection_to_children(this)) return Expr::evaluate_selected(context, chunk, rows);
+        ASSIGN_OR_RETURN(auto l, _children[0]->evaluate_selected(context, chunk, rows));
+        ASSIGN_OR_RETURN(auto r, _children[1]->evaluate_selected(context, chunk, rows));
+        return compare(l, r);
     }
 #ifdef STARROCKS_JIT_ENABLE
 
@@ -237,6 +246,11 @@ public:
             << ", rhs_is_constant=" << _children[1]->is_constant() << ", expr (" << expr_debug_string << ") )";
         return out.str();
     }
+
+private:
+    static ColumnPtr compare(const ColumnPtr& l, const ColumnPtr& r) {
+        return VectorizedStrictBinaryFunction<OP>::template evaluate<Type, TYPE_BOOLEAN>(l, r);
+    }
 };
 
 class ArrayPredicate final : public Predicate {
@@ -249,7 +263,20 @@ public:
     StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* ptr) override {
         ASSIGN_OR_RETURN(auto l, _children[0]->evaluate_checked(context, ptr));
         ASSIGN_OR_RETURN(auto r, _children[1]->evaluate_checked(context, ptr));
+        return compare(l, r);
+    }
 
+    StatusOr<ColumnPtr> evaluate_selected(ExprContext* context, Chunk* chunk,
+                                          const std::vector<uint32_t>& rows) override {
+        if (rows.empty()) return ColumnHelper::create_column(_type, is_nullable());
+        if (!pass_selection_to_children(this)) return Expr::evaluate_selected(context, chunk, rows);
+        ASSIGN_OR_RETURN(auto l, _children[0]->evaluate_selected(context, chunk, rows));
+        ASSIGN_OR_RETURN(auto r, _children[1]->evaluate_selected(context, chunk, rows));
+        return compare(l, r);
+    }
+
+private:
+    StatusOr<ColumnPtr> compare(const ColumnPtr& l, const ColumnPtr& r) {
         if (l->only_null() || r->only_null()) {
             return ColumnHelper::create_const_null_column(l->size());
         }
@@ -281,7 +308,6 @@ public:
         }
     }
 
-private:
     EvalCmpZero _comparator;
 };
 
@@ -296,7 +322,20 @@ public:
     StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* chunk) override {
         ASSIGN_OR_RETURN(auto l, _children[0]->evaluate_checked(context, chunk));
         ASSIGN_OR_RETURN(auto r, _children[1]->evaluate_checked(context, chunk));
+        return compare(l, r);
+    }
 
+    StatusOr<ColumnPtr> evaluate_selected(ExprContext* context, Chunk* chunk,
+                                          const std::vector<uint32_t>& rows) override {
+        if (rows.empty()) return ColumnHelper::create_column(_type, is_nullable());
+        if (!pass_selection_to_children(this)) return Expr::evaluate_selected(context, chunk, rows);
+        ASSIGN_OR_RETURN(auto l, _children[0]->evaluate_selected(context, chunk, rows));
+        ASSIGN_OR_RETURN(auto r, _children[1]->evaluate_selected(context, chunk, rows));
+        return compare(l, r);
+    }
+
+private:
+    static StatusOr<ColumnPtr> compare(const ColumnPtr& l, const ColumnPtr& r) {
         if (l->only_null() || r->only_null()) {
             return ColumnHelper::create_const_null_column(l->size());
         }
@@ -349,7 +388,20 @@ public:
     StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* chunk) override {
         ASSIGN_OR_RETURN(auto l, _children[0]->evaluate_checked(context, chunk));
         ASSIGN_OR_RETURN(auto r, _children[1]->evaluate_checked(context, chunk));
+        return compare(l, r);
+    }
 
+    StatusOr<ColumnPtr> evaluate_selected(ExprContext* context, Chunk* chunk,
+                                          const std::vector<uint32_t>& rows) override {
+        if (rows.empty()) return ColumnHelper::create_column(_type, is_nullable());
+        if (!pass_selection_to_children(this)) return Expr::evaluate_selected(context, chunk, rows);
+        ASSIGN_OR_RETURN(auto l, _children[0]->evaluate_selected(context, chunk, rows));
+        ASSIGN_OR_RETURN(auto r, _children[1]->evaluate_selected(context, chunk, rows));
+        return compare(l, r);
+    }
+
+private:
+    static StatusOr<ColumnPtr> compare(const ColumnPtr& l, const ColumnPtr& r) {
         if (l->only_null() && r->only_null()) {
             return ColumnHelper::create_const_column<TYPE_BOOLEAN>(true, l->size());
         }
@@ -412,40 +464,16 @@ public:
     StatusOr<ColumnPtr> evaluate_checked(ExprContext* context, Chunk* ptr) override {
         ASSIGN_OR_RETURN(auto l, _children[0]->evaluate_checked(context, ptr));
         ASSIGN_OR_RETURN(auto r, _children[1]->evaluate_checked(context, ptr));
+        return compare(l, r);
+    }
 
-        ColumnViewer<Type> v1(l);
-        ColumnViewer<Type> v2(r);
-        Columns list = {l, r};
-
-        size_t size = list[0]->size();
-        ColumnBuilder<TYPE_BOOLEAN> builder(size);
-        for (int row = 0; row < size; ++row) {
-            auto null1 = v1.is_null(row);
-            auto null2 = v2.is_null(row);
-
-            if (null1 & null2) {
-                // all null = true
-                builder.append(true);
-            } else if (null1 ^ null2) {
-                // one null = false
-                builder.append(false);
-            } else {
-                // all not null = value eq
-                using CppType = RunTimeCppType<Type>;
-                CppType x = v1.value(row);
-                CppType y = v2.value(row);
-                if constexpr (std::is_floating_point_v<CppType>) {
-                    // Null-safe equal is "not distinct from": NaN is not distinct from NaN,
-                    // unlike plain '=' which keeps IEEE NaN != NaN.
-                    builder.append((std::isnan(x) && std::isnan(y)) ||
-                                   OP::template apply<CppType, CppType, bool>(x, y));
-                } else {
-                    builder.append(OP::template apply<CppType, CppType, bool>(x, y));
-                }
-            }
-        }
-
-        return builder.build(ColumnHelper::is_all_const(list));
+    StatusOr<ColumnPtr> evaluate_selected(ExprContext* context, Chunk* chunk,
+                                          const std::vector<uint32_t>& rows) override {
+        if (rows.empty()) return ColumnHelper::create_column(_type, is_nullable());
+        if (!pass_selection_to_children(this)) return Expr::evaluate_selected(context, chunk, rows);
+        ASSIGN_OR_RETURN(auto l, _children[0]->evaluate_selected(context, chunk, rows));
+        ASSIGN_OR_RETURN(auto r, _children[1]->evaluate_selected(context, chunk, rows));
+        return compare(l, r);
     }
 #ifdef STARROCKS_JIT_ENABLE
 
@@ -499,6 +527,43 @@ public:
             << ", result=" << this->type().debug_string() << ", lhs_is_constant=" << _children[0]->is_constant()
             << ", rhs_is_constant=" << _children[1]->is_constant() << ", expr (" << expr_debug_string << ") )";
         return out.str();
+    }
+
+private:
+    static ColumnPtr compare(const ColumnPtr& l, const ColumnPtr& r) {
+        ColumnViewer<Type> v1(l);
+        ColumnViewer<Type> v2(r);
+        Columns list = {l, r};
+
+        size_t size = list[0]->size();
+        ColumnBuilder<TYPE_BOOLEAN> builder(size);
+        for (int row = 0; row < size; ++row) {
+            auto null1 = v1.is_null(row);
+            auto null2 = v2.is_null(row);
+
+            if (null1 & null2) {
+                // all null = true
+                builder.append(true);
+            } else if (null1 ^ null2) {
+                // one null = false
+                builder.append(false);
+            } else {
+                // all not null = value eq
+                using CppType = RunTimeCppType<Type>;
+                CppType x = v1.value(row);
+                CppType y = v2.value(row);
+                if constexpr (std::is_floating_point_v<CppType>) {
+                    // Null-safe equal is "not distinct from": NaN is not distinct from NaN,
+                    // unlike plain '=' which keeps IEEE NaN != NaN.
+                    builder.append((std::isnan(x) && std::isnan(y)) ||
+                                   OP::template apply<CppType, CppType, bool>(x, y));
+                } else {
+                    builder.append(OP::template apply<CppType, CppType, bool>(x, y));
+                }
+            }
+        }
+
+        return builder.build(ColumnHelper::is_all_const(list));
     }
 };
 
