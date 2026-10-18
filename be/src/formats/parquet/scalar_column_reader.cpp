@@ -30,6 +30,17 @@
 
 namespace starrocks::parquet {
 
+static std::string describe_column(const ParquetField* field) {
+    return field != nullptr ? field->name : std::string("?");
+}
+
+// The column index, the offset index and the bloom filter are optional, and a caller that gets an error from
+// one of them goes on without it. So we log the error here, where the file is known to be wrong.
+static Status invalid_index(const std::string& message) {
+    LOG(WARNING) << message;
+    return Status::Corruption(message);
+}
+
 // FixedValueColumnReader
 Status FixedValueColumnReader::read_range(const Range<uint64_t>& range, const Filter* filter, ColumnPtr& dst) {
     Column* dst_col = dst->as_mutable_raw_ptr();
@@ -92,19 +103,103 @@ void RawColumnReader::collect_column_io_range(std::vector<io::SharedBufferedInpu
     }
     if ((types & ColumnIOType::PAGE_INDEX) != 0) {
         // only active column need column index
-        if (column.__isset.column_index_offset && active) {
+        // the offset and length come from the footer, and a range that is not in the file is not read
+        if (column.__isset.column_index_offset && active &&
+            _check_region(column.column_index_offset, column.column_index_length, kMaxPageIndexBytes, "column index")
+                    .ok()) {
             auto r = io::SharedBufferedInputStream::IORange(column.column_index_offset, column.column_index_length);
             ranges->emplace_back(r);
         }
         // all column need offset index
-        if (column.__isset.offset_index_offset) {
+        if (column.__isset.offset_index_offset &&
+            _check_region(column.offset_index_offset, column.offset_index_length, kMaxPageIndexBytes, "offset index")
+                    .ok()) {
             auto r = io::SharedBufferedInputStream::IORange(column.offset_index_offset, column.offset_index_length);
             ranges->emplace_back(r);
         }
     }
 }
 
+Status RawColumnReader::_check_region(int64_t offset, int64_t length, int64_t max_length, const char* what) const {
+    const uint64_t file_size = _opts.file_size;
+    if (offset < 0 || length < 0 || length > max_length ||
+        (file_size > 0 &&
+         (static_cast<uint64_t>(offset) > file_size || static_cast<uint64_t>(length) > file_size - offset))) {
+        return invalid_index(fmt::format(
+                "Invalid {} of parquet column '{}', offset={}, length={}, file size={}, file: {}", what,
+                describe_column(get_column_parquet_field()), offset, length, file_size, _opts.file->filename()));
+    }
+    return Status::OK();
+}
+
+Status RawColumnReader::_validate_offset_index(const tparquet::OffsetIndex& offset_index) const {
+    const auto& pages = offset_index.page_locations;
+    bool valid = !pages.empty() && pages[0].first_row_index == 0;
+    for (size_t i = 0; valid && i < pages.size(); ++i) {
+        const auto& page = pages[i];
+        valid = page.offset >= 0 && page.compressed_page_size > 0 &&
+                (_opts.file_size == 0 ||
+                 (static_cast<uint64_t>(page.offset) <= _opts.file_size &&
+                  static_cast<uint64_t>(page.compressed_page_size) <= _opts.file_size - page.offset)) &&
+                (i == 0 || (page.first_row_index > pages[i - 1].first_row_index && page.offset > pages[i - 1].offset));
+    }
+    // Each page holds at least one value and starts at a row of the row group, so the pages cannot be more than
+    // the values of the chunk, and the last page starts before the end of the row group.
+    if (valid) {
+        const int64_t num_values = get_chunk_metadata()->meta_data.num_values;
+        valid = static_cast<int64_t>(pages.size()) <= num_values &&
+                (_opts.row_group_meta == nullptr || pages.back().first_row_index < _opts.row_group_meta->num_rows);
+    }
+    if (!valid) {
+        return invalid_index(fmt::format(
+                "Invalid offset index of parquet column '{}' with {} pages, the chunk has {} values and the row "
+                "group has {} rows, file: {}",
+                describe_column(get_column_parquet_field()), pages.size(), get_chunk_metadata()->meta_data.num_values,
+                _opts.row_group_meta != nullptr ? _opts.row_group_meta->num_rows : -1, _opts.file->filename()));
+    }
+    return Status::OK();
+}
+
+StatusOr<tparquet::OffsetIndex*> RawColumnReader::get_offset_index(const uint64_t rg_first_row) {
+    if (_offset_index_ctx == nullptr) {
+        // a footer written without the length of the offset index cannot be read as a whole
+        if (!get_chunk_metadata()->__isset.offset_index_length) {
+            return Status::NotSupported("The offset index has no length");
+        }
+        const int64_t offset_index_offset = get_chunk_metadata()->offset_index_offset;
+        const int32_t offset_index_length = get_chunk_metadata()->offset_index_length;
+        RETURN_IF_ERROR(_check_region(offset_index_offset, offset_index_length, kMaxPageIndexBytes, "offset index"));
+        if (offset_index_length == 0) {
+            return invalid_index(fmt::format("Empty offset index of parquet column '{}', file: {}",
+                                             describe_column(get_column_parquet_field()), _opts.file->filename()));
+        }
+        std::vector<uint8_t> offset_index_data(offset_index_length);
+        RETURN_IF_ERROR(_opts.file->read_at_fully(offset_index_offset, offset_index_data.data(), offset_index_length));
+
+        // We keep the index only after it is read and checked, so that a failure leaves no half-built index
+        // for the next caller to find.
+        auto ctx = std::make_unique<ColumnOffsetIndexCtx>();
+        ctx->rg_first_row = rg_first_row;
+        uint32_t length = offset_index_length;
+        RETURN_IF_ERROR(
+                deserialize_thrift_msg(offset_index_data.data(), &length, TProtocolType::COMPACT, &ctx->offset_index));
+        RETURN_IF_ERROR(_validate_offset_index(ctx->offset_index));
+        _offset_index_ctx = std::move(ctx);
+    }
+    return &_offset_index_ctx->offset_index;
+}
+
 void RawColumnReader::select_offset_index(const SparseRange<uint64_t>& range, const uint64_t rg_first_row) {
+    // The pages are selected once. The selection appends one entry per page, and the reader is wrapped with a
+    // reader that takes its page count from that selection, so a second call would leave twice the pages of the
+    // offset index in the selection and wrap the reader again. The caller calls once for a reader. If it
+    // calls again, the first selection is the one that the I/O ranges and the reads follow.
+    if (_offset_index_ctx != nullptr && !_offset_index_ctx->page_selected.empty()) {
+        return;
+    }
+    if (range.size() == 0) {
+        return;
+    }
     if (_offset_index_ctx == nullptr) {
         if (!get_chunk_metadata()->__isset.offset_index_offset) {
             return;
@@ -295,21 +390,43 @@ StatusOr<bool> RawColumnReader::_page_index_zone_map_filter(const std::vector<co
 
     SCOPED_RAW_TIMER(&_opts.stats->page_index_ns);
 
-    // get column index
-    int64_t column_index_offset = chunk_meta->column_index_offset;
-    uint32_t column_index_length = chunk_meta->column_index_length;
+    // a footer written without the length of the column index cannot be read as a whole
+    if (!chunk_meta->__isset.column_index_length) {
+        return false;
+    }
 
-    std::vector<uint8_t> page_index_data;
-    page_index_data.reserve(column_index_length);
+    // get column index
+    const int64_t column_index_offset = chunk_meta->column_index_offset;
+    const int32_t column_index_length = chunk_meta->column_index_length;
+    RETURN_IF_ERROR(_check_region(column_index_offset, column_index_length, kMaxPageIndexBytes, "column index"));
+    if (column_index_length == 0) {
+        return invalid_index(fmt::format("Empty column index of parquet column '{}', file: {}",
+                                         describe_column(get_column_parquet_field()), _opts.file->filename()));
+    }
+
+    std::vector<uint8_t> page_index_data(column_index_length);
     RETURN_IF_ERROR(_opts.file->read_at_fully(column_index_offset, page_index_data.data(), column_index_length));
 
     tparquet::ColumnIndex column_index;
-    RETURN_IF_ERROR(deserialize_thrift_msg(page_index_data.data(), &column_index_length, TProtocolType::COMPACT,
-                                           &column_index));
+    uint32_t length = column_index_length;
+    RETURN_IF_ERROR(deserialize_thrift_msg(page_index_data.data(), &length, TProtocolType::COMPACT, &column_index));
 
     ASSIGN_OR_RETURN(const tparquet::OffsetIndex* offset_index, get_offset_index(rg_first_row));
 
+    // The pages are the entries of the column index, and the code below takes the matching entry of every
+    // list by the position, so the lists must be as long as the pages, and each page must start inside the
+    // row group.
     const size_t page_num = column_index.min_values.size();
+    if (column_index.max_values.size() != page_num || column_index.null_pages.size() != page_num ||
+        offset_index->page_locations.size() != page_num ||
+        (page_num > 0 && static_cast<uint64_t>(offset_index->page_locations.back().first_row_index) >= rg_num_rows)) {
+        return invalid_index(fmt::format(
+                "Inconsistent page index of parquet column '{}': {} min values, {} max values, {} null pages, {} "
+                "pages in the offset index, row group has {} rows, file: {}",
+                describe_column(get_column_parquet_field()), page_num, column_index.max_values.size(),
+                column_index.null_pages.size(), offset_index->page_locations.size(), rg_num_rows,
+                _opts.file->filename()));
+    }
     const std::vector<bool> null_pages = column_index.null_pages;
 
     MutableColumnPtr min_column = ColumnHelper::create_column(col_type, true);
@@ -373,26 +490,72 @@ StatusOr<bool> RawColumnReader::_page_index_zone_map_filter(const std::vector<co
     return true;
 }
 
-Status RawColumnReader::_init_column_bloom_filter(int offset, int length, BloomFilter& bloom_filter) const {
+Status RawColumnReader::_init_column_bloom_filter(int64_t offset, int32_t length, BloomFilter& bloom_filter) const {
+    // A bloom filter is a header, then a bitset of at most BloomFilter::MAXIMUM_BYTES. The footer gives the
+    // length of both when it knows it, and 0 when it does not.
+    constexpr int64_t kMaxRegionBytes = BloomFilter::MAXIMUM_BYTES + 1024;
+    RETURN_IF_ERROR(_check_region(offset, length, kMaxRegionBytes, "bloom filter"));
+    if (length == 0) {
+        RETURN_IF_ERROR(_check_region(offset, SBBF_HEADER_SIZE_ESTIMATE, kMaxRegionBytes, "bloom filter header"));
+    }
+
     std::vector<char> bloom_filter_data;
     tparquet::BloomFilterHeader header;
     uint32_t header_len = SBBF_HEADER_SIZE_ESTIMATE;
     if (length > 0) {
-        bloom_filter_data.resize(length + 1);
+        // the header cannot be longer than the region
+        header_len = std::min<uint32_t>(header_len, length);
+        bloom_filter_data.resize(length);
         RETURN_IF_ERROR(_opts.file->read_at_fully(offset, bloom_filter_data.data(), length));
     } else {
         // if length is not set, read the header first;
-        bloom_filter_data.reserve(header_len);
+        bloom_filter_data.resize(header_len);
         RETURN_IF_ERROR(_opts.file->read_at_fully(offset, bloom_filter_data.data(), header_len));
     }
 
     RETURN_IF_ERROR(deserialize_thrift_msg(reinterpret_cast<const uint8*>(bloom_filter_data.data()), &header_len,
                                            TProtocolType::COMPACT, &header));
-    if (length == 0) {
-        bloom_filter_data.resize(header_len + header.numBytes + 1);
-        RETURN_IF_ERROR(
-                _opts.file->read_at_fully(offset + header_len, bloom_filter_data.data() + header_len, header.numBytes));
+
+    // The header names the algorithm, the hash and the compression of the filter, and we know one of each: the
+    // split block algorithm, xxHash and no compression. A filter of another kind would be probed with the wrong
+    // hash or layout and answer "not present" for values that are present, so we do not use it. A kind that this
+    // version of the format does not have is not set in any of the fields.
+    if (!header.algorithm.__isset.BLOCK || !header.hash.__isset.XXHASH || !header.compression.__isset.UNCOMPRESSED) {
+        return Status::NotSupported(
+                fmt::format("The bloom filter of parquet column '{}' is not a split block, xxHash, uncompressed "
+                            "filter, file: {}",
+                            describe_column(get_column_parquet_field()), _opts.file->filename()));
     }
+
+    // The bitset is a sequence of blocks of BloomFilter::MINIMUM_BYTES, and a probe reads a whole block, so
+    // a bitset that is shorter than a block, or that is not made of blocks, cannot be probed. The size is
+    // also what we allocate and copy, so a size that no real file has is rejected.
+    const uint32_t num_bytes = header.numBytes;
+    if (header.numBytes < 0 || num_bytes < BloomFilter::MINIMUM_BYTES || num_bytes > BloomFilter::MAXIMUM_BYTES ||
+        num_bytes % BloomFilter::MINIMUM_BYTES != 0) {
+        return invalid_index(fmt::format("Invalid bloom filter size {} of parquet column '{}', file: {}",
+                                         header.numBytes, describe_column(get_column_parquet_field()),
+                                         _opts.file->filename()));
+    }
+    const size_t bitset_end = static_cast<size_t>(header_len) + num_bytes;
+    if (length > 0) {
+        if (bitset_end > static_cast<size_t>(length)) {
+            return invalid_index(
+                    fmt::format("Bloom filter of {} bytes after a header of {} bytes does not fit in the {} bytes "
+                                "of parquet column '{}', file: {}",
+                                num_bytes, header_len, length, describe_column(get_column_parquet_field()),
+                                _opts.file->filename()));
+        }
+    } else {
+        RETURN_IF_ERROR(_check_region(offset + header_len, num_bytes, BloomFilter::MAXIMUM_BYTES, "bloom filter"));
+        bloom_filter_data.resize(bitset_end);
+        RETURN_IF_ERROR(
+                _opts.file->read_at_fully(offset + header_len, bloom_filter_data.data() + header_len, num_bytes));
+    }
+
+    // The byte after the bitset is the flag of NULL values. We cut the data there, so that the flag is
+    // the byte that BloomFilter::init takes, whatever the region holds after the bitset.
+    bloom_filter_data.resize(bitset_end + 1);
     if (get_chunk_metadata()->meta_data.__isset.statistics &&
         get_chunk_metadata()->meta_data.statistics.__isset.null_count) {
         if (get_chunk_metadata()->meta_data.statistics.null_count > 0) {
@@ -406,8 +569,7 @@ Status RawColumnReader::_init_column_bloom_filter(int offset, int length, BloomF
         bloom_filter_data.back() = 0;
     }
 
-    return bloom_filter.init(bloom_filter_data.data() + header_len, header.numBytes + 1, Hasher::HashStrategy::XXHASH64,
-                             0);
+    return bloom_filter.init(bloom_filter_data.data() + header_len, num_bytes + 1, Hasher::HashStrategy::XXHASH64, 0);
 }
 
 StatusOr<bool> RawColumnReader::_row_group_bloom_filter(const std::vector<const ColumnPredicate*>& predicates,
@@ -429,7 +591,7 @@ StatusOr<bool> RawColumnReader::_row_group_bloom_filter(const std::vector<const 
 
     bool applicable = check_type_can_apply_bloom_filter(col_type, *get_column_parquet_field());
     if (applicable) {
-        int32_t offset = column_metadata.bloom_filter_offset;
+        int64_t offset = column_metadata.bloom_filter_offset;
         ParquetBlockSplitBloomFilter bloom_filter;
         //parquet format version>= 2.10 has the bloom filter length info.
         if (predicates.empty()) {

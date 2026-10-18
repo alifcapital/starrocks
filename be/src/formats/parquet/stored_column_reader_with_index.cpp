@@ -16,7 +16,9 @@
 
 #include <glog/logging.h>
 
+#include "common/compiler_util.h"
 #include "gen_cpp/parquet_types.h"
+#include "gutil/strings/substitute.h"
 #include "util/defer_op.h"
 
 namespace starrocks {
@@ -27,8 +29,21 @@ namespace starrocks::parquet {
 
 Status StoredColumnReaderWithIndex::read_range(const Range<uint64_t>& range, const Filter* filter,
                                                ColumnContentType content_type, Column* dst) {
-    DCHECK(range.begin() >= _offset_index_ctx->offset_index.page_locations[_cur_page_idx].first_row_index +
-                                    _offset_index_ctx->rg_first_row);
+    const auto& page_locations = _offset_index_ctx->offset_index.page_locations;
+    // The reader indexes the offset index with the page positions that it keeps, and it moves them forward
+    // only. We expect the page positions to be pages of the offset index, and a read to start at or after
+    // the page that the reader is on. If a broken offset index or a caller breaks that, the reader would read
+    // the rows of another page or past the end of the index, so it returns an error.
+    if (UNLIKELY(_page_num == 0 || _page_num != page_locations.size() || _cur_page_idx >= _page_num)) {
+        return Status::InternalError(
+                strings::Substitute("The reader has $0 pages and is on page $1, but the offset index has $2 pages",
+                                    _page_num, _cur_page_idx, page_locations.size()));
+    }
+    if (UNLIKELY(range.begin() < page_locations[_cur_page_idx].first_row_index + _offset_index_ctx->rg_first_row)) {
+        return Status::InternalError(strings::Substitute(
+                "The range starts at row $0, before row $1 where the current page $2 starts", range.begin(),
+                page_locations[_cur_page_idx].first_row_index + _offset_index_ctx->rg_first_row, _cur_page_idx));
+    }
     size_t stop_page_idx = _cur_page_idx;
     while (stop_page_idx < _page_num - 1 &&
            range.end() >= _offset_index_ctx->offset_index.page_locations[stop_page_idx + 1].first_row_index +
@@ -56,7 +71,12 @@ Status StoredColumnReaderWithIndex::read_range(const Range<uint64_t>& range, con
                                         _offset_index_ctx->rg_first_row) {
             _cur_page_idx++;
         }
-        DCHECK(_offset_index_ctx->page_selected[_cur_page_idx]);
+        // A page that no selected range touches was not collected for reading. A read that lands in it
+        // means that the selection and the reads disagree.
+        if (UNLIKELY(!_offset_index_ctx->page_selected[_cur_page_idx])) {
+            return Status::InternalError(strings::Substitute("The range [$0, $1) is in page $2, which is not selected",
+                                                             range.begin(), range.end(), _cur_page_idx));
+        }
 
         RETURN_IF_ERROR(_inner_reader->load_specific_page(
                 _cur_page_idx, _offset_index_ctx->offset_index.page_locations[_cur_page_idx].offset,

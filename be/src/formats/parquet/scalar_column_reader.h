@@ -87,22 +87,7 @@ public:
 
     const tparquet::ColumnChunk* get_chunk_metadata() const override { return _chunk_metadata; }
 
-    StatusOr<tparquet::OffsetIndex*> get_offset_index(const uint64_t rg_first_row) override {
-        if (_offset_index_ctx == nullptr) {
-            _offset_index_ctx = std::make_unique<ColumnOffsetIndexCtx>();
-            _offset_index_ctx->rg_first_row = rg_first_row;
-            int64_t offset_index_offset = get_chunk_metadata()->offset_index_offset;
-            uint32_t offset_index_length = get_chunk_metadata()->offset_index_length;
-            std::vector<uint8_t> offset_index_data;
-            offset_index_data.reserve(offset_index_length);
-            RETURN_IF_ERROR(
-                    _opts.file->read_at_fully(offset_index_offset, offset_index_data.data(), offset_index_length));
-
-            RETURN_IF_ERROR(deserialize_thrift_msg(offset_index_data.data(), &offset_index_length,
-                                                   TProtocolType::COMPACT, &_offset_index_ctx->offset_index));
-        }
-        return &_offset_index_ctx->offset_index;
-    }
+    StatusOr<tparquet::OffsetIndex*> get_offset_index(const uint64_t rg_first_row) override;
 
     void select_offset_index(const SparseRange<uint64_t>& range, const uint64_t rg_first_row) override;
 
@@ -110,7 +95,20 @@ public:
     bool column_all_pages_dict_encoded() const;
 
 private:
-    Status _init_column_bloom_filter(int32_t offset, int32_t length, BloomFilter& bloom_filter) const;
+    // The largest column index or offset index that we read. The sizes come from the footer, and we size a
+    // buffer from them, so we stop an index that no real file has.
+    static constexpr int64_t kMaxPageIndexBytes = 256 * 1024 * 1024;
+
+    // Checks that [offset, offset + length) is a region we may read for `what`: both numbers are not
+    // negative, the length is at most max_length, and the region is inside the file when we know its size.
+    Status _check_region(int64_t offset, int64_t length, int64_t max_length, const char* what) const;
+
+    // Checks that the offset index describes pages in the order of the file, because the readers that use it
+    // index the pages and compute row ranges from it.
+    Status _validate_offset_index(const tparquet::OffsetIndex& offset_index) const;
+
+    // The bloom filter is optional: a caller that gets an error from it goes on without the filter.
+    Status _init_column_bloom_filter(int64_t offset, int32_t length, BloomFilter& bloom_filter) const;
 
 protected:
     StatusOr<bool> _row_group_zone_map_filter(const std::vector<const ColumnPredicate*>& predicates,
