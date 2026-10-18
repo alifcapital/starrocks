@@ -590,8 +590,8 @@ public final class MonotonicInverse {
             .build();
 
     // the fold matches the dow argument case-sensitively ("Monday"/"Mon"/"Mo"); accept
-    // exactly those spellings
-    private static DayOfWeek dowOf(CallOperator call) {
+    // exactly those spellings. The weeks of next_day and previous_day in the registry read the day the same way.
+    static DayOfWeek dowOf(CallOperator call) {
         if (call.getChildren().size() != 2 || !call.getChild(1).isConstantRef()
                 || ((ConstantOperator) call.getChild(1)).isNull()) {
             return null;

@@ -134,13 +134,13 @@ public class MonotonicImageStatisticsTest {
 
     @Test
     public void testMergingFunctionHasNoMoreValuesThanDatesInItsRange() {
-        // last_day maps the 366 days of 2024 to 12 dates; we expect no more distinct values than the 336 dates
-        // between 2024-01-31 and 2024-12-31
+        // last_day maps the 366 days of 2024 to 12 dates. The image of the range has the 336 dates between 2024-01-31
+        // and 2024-12-31, and the months of the range, the period of last_day, bring the distinct values to 12.
         Statistics statistics = input(LocalDateTime.of(2024, 1, 1, 0, 0), LocalDateTime.of(2024, 12, 31, 0, 0), 366);
         CallOperator lastDay = call("last_day", DateType.DATE, List.of(TS));
         ColumnStatistic result = ExpressionStatisticCalculator.calculate(lastDay, statistics);
         Assertions.assertEquals(seconds(LocalDateTime.of(2024, 1, 31, 0, 0)), result.getMinValue());
         Assertions.assertEquals(seconds(LocalDateTime.of(2024, 12, 31, 0, 0)), result.getMaxValue());
-        Assertions.assertEquals(336, result.getDistinctValuesCount());
+        Assertions.assertEquals(12, result.getDistinctValuesCount());
     }
 }

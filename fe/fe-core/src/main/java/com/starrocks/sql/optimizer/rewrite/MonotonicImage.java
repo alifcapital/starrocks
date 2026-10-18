@@ -16,6 +16,7 @@ package com.starrocks.sql.optimizer.rewrite;
 
 import com.google.common.collect.Range;
 import com.starrocks.catalog.FunctionSet;
+import com.starrocks.common.util.DateFormatModel;
 import com.starrocks.common.util.StringDateFormat;
 import com.starrocks.common.util.TimeUtils;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
@@ -274,6 +275,16 @@ public class MonotonicImage {
                         && fitsDigits(MonotonicFunctionRegistry.digitsOnlyLength(
                                 ((ConstantOperator) inner.getChild(1)).getVarchar()), cast.getType())) {
                     return isMonotonicExpression(inner, dateCastColumn, partitionCasts);
+                }
+            }
+            // A cast to a date of date_format(x, f) whose strings the BE reads as the start of their period, in the zone
+            // of the FE: we expect the cast to give the date that the string holds, so it keeps the order of the strings,
+            // which keeps the order of x. A string that the BE reads another way, as '%Y-%m' that it casts to NULL, is
+            // not here.
+            if (cast.getType().isDateType()) {
+                DateFormatModel layout = StringDatePredicateDerivation.renderedLayout(cast.getChild(0));
+                if (layout != null && layout.isSupportedInCurrentTimezone()) {
+                    return isMonotonicExpression(cast.getChild(0), dateCastColumn, partitionCasts);
                 }
             }
             return false;

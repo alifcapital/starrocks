@@ -184,6 +184,24 @@ public class DateFormatModelTest {
         Assertions.assertTrue(DateFormatModel.of("%M".repeat(14)).isExactOnAllRows());
     }
 
+    // The BE gives NULL for a string of 128 bytes or more. Only a format whose shortest string is so long gives NULL for
+    // every date; a long format of escapes or of fields renders shorter strings for some or all dates.
+    @Test
+    public void testFormatThatNeverFitsTheBufferIsNullOnAllRows() {
+        Assertions.assertTrue(DateFormatModel.of("").isNullOnAllRows());
+        Assertions.assertTrue(DateFormatModel.of("a".repeat(128)).isNullOnAllRows());
+        Assertions.assertTrue(DateFormatModel.of("%Y" + "a".repeat(127)).isNullOnAllRows());
+        // 126 bytes of text and a field are 127 bytes, which the BE renders
+        Assertions.assertFalse(DateFormatModel.of("%Y" + "a".repeat(126)).isNullOnAllRows());
+        Assertions.assertFalse(DateFormatModel.of("a".repeat(127)).isNullOnAllRows());
+        // %% is one byte of the string: 70 of them are a format of 140 bytes that renders 70
+        Assertions.assertFalse(DateFormatModel.of("%%".repeat(70)).isNullOnAllRows());
+        Assertions.assertEquals(140, DateFormatModel.of("%%".repeat(70)).formatLength());
+        // the names of the months are 3 bytes at least, but each specifier counts as one byte
+        Assertions.assertFalse(DateFormatModel.of("%M".repeat(64)).isNullOnAllRows());
+        Assertions.assertFalse(DateFormatModel.of("%Y-%m-%d").isNullOnAllRows());
+    }
+
     @Test
     public void testOrderedFormatRendersAndReadsItsStrings() {
         LocalDateTime time = LocalDateTime.of(2024, 3, 5, 7, 8, 9, 123_456_000);

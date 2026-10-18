@@ -18,6 +18,9 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Range;
 import com.starrocks.catalog.FunctionSet;
+import com.starrocks.common.util.DateFormatModel;
+import com.starrocks.common.util.DatePeriod;
+import com.starrocks.common.util.StringDateFormat;
 import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.ast.expression.LargeIntLiteral;
 import com.starrocks.sql.common.ErrorType;
@@ -42,6 +45,7 @@ import com.starrocks.sql.optimizer.rewrite.MinMax;
 import com.starrocks.sql.optimizer.rewrite.MonotonicFunctionRegistry;
 import com.starrocks.sql.optimizer.rewrite.MonotonicImage;
 import com.starrocks.sql.optimizer.rewrite.ScalarOperatorFunctions;
+import com.starrocks.sql.optimizer.rewrite.StringDatePredicateDerivation;
 import com.starrocks.sql.spm.SPMFunctions;
 import com.starrocks.type.BooleanType;
 import com.starrocks.type.Type;
@@ -54,7 +58,6 @@ import java.time.DateTimeException;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
-import java.time.temporal.ChronoUnit;
 import java.time.temporal.IsoFields;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -577,11 +580,68 @@ public class ExpressionStatisticCalculator {
             } else {
                 result = multiaryExpressionCalculate(call, childrenColumnStatistics);
             }
-            if (!result.isUnknown() && !result.isInfiniteRange()) {
-                return result;
+            ColumnStatistic statistic = result;
+            if (result.isUnknown() || result.isInfiniteRange()) {
+                statistic = monotonicImageStatistics(call, childrenColumnStatistics, result)
+                        .map(image -> withMonthShiftHistogram(call, childrenColumnStatistics, image)).orElse(result);
             }
-            return monotonicImageStatistics(call, childrenColumnStatistics, result)
-                    .map(image -> withMonthShiftHistogram(call, childrenColumnStatistics, image)).orElse(result);
+            return withDistinctValuesOfPeriods(call, childrenColumnStatistics, statistic);
+        }
+
+        /**
+         * The distinct values of a call with a period, see MonotonicFunctionRegistry.granularity. The call takes one value
+         * in a period, so we expect no more distinct values than the periods between the ends of the range of its argument.
+         * The monotonic image of last_day(d) has the days of the range, and we fear that a GROUP BY on it gets a group for
+         * each day and not for each month. The range and the other statistics of the call stay as they are.
+         */
+        private ColumnStatistic withDistinctValuesOfPeriods(CallOperator call, List<ColumnStatistic> children,
+                                                            ColumnStatistic statistic) {
+            if (statistic.isUnknown() || statistic.getDistinctValuesCount() <= 1) {
+                return statistic;
+            }
+            final Set<Integer> positions = MonotonicFunctionRegistry.dataArgPositions(call.getFnName());
+            if (positions == null) {
+                return statistic;
+            }
+            final int dataIndex = dataArgumentIndex(call, positions);
+            if (dataIndex < 0 || !(call.getChild(dataIndex).getType().isDate()
+                    || call.getChild(dataIndex).getType().isDatetime())) {
+                return statistic;
+            }
+            final ColumnStatistic input = children.get(dataIndex);
+            if (input.isUnknown() || input.isInfiniteRange() || input.hasNaNValue()) {
+                return statistic;
+            }
+            final Optional<DatePeriod> period = MonotonicFunctionRegistry.granularity(call);
+            if (period.isEmpty()) {
+                return statistic;
+            }
+            try {
+                final long periods = period.get().count(Utils.getDatetimeFromLong((long) input.getMinValue()),
+                        Utils.getDatetimeFromLong((long) input.getMaxValue()));
+                if (periods >= statistic.getDistinctValuesCount()) {
+                    return statistic;
+                }
+                return ColumnStatistic.buildFrom(statistic).setDistinctValuesCount(Math.max(1, periods)).build();
+            } catch (DateTimeException e) {
+                LOG.debug("cannot count the periods of {}", call, e);
+                return statistic;
+            }
+        }
+
+        // The one argument of the call that is not a constant, when the registry admits it as the data argument; -1 when
+        // there are several, none, or it is in another position
+        private static int dataArgumentIndex(CallOperator call, Set<Integer> positions) {
+            int dataIndex = -1;
+            for (int i = 0; i < call.getChildren().size(); i++) {
+                if (!call.getChild(i).isConstantRef()) {
+                    if (dataIndex >= 0) {
+                        return -1;
+                    }
+                    dataIndex = i;
+                }
+            }
+            return dataIndex >= 0 && positions.contains(dataIndex) ? dataIndex : -1;
         }
 
         /**
@@ -681,16 +741,8 @@ public class ExpressionStatisticCalculator {
             if (dataPositions == null || call.getFunction() == null) {
                 return Optional.empty();
             }
-            int dataIndex = -1;
-            for (int i = 0; i < call.getChildren().size(); i++) {
-                if (!call.getChild(i).isConstantRef()) {
-                    if (dataIndex >= 0) {
-                        return Optional.empty();
-                    }
-                    dataIndex = i;
-                }
-            }
-            if (dataIndex < 0 || !dataPositions.contains(dataIndex)) {
+            int dataIndex = dataArgumentIndex(call, dataPositions);
+            if (dataIndex < 0) {
                 return Optional.empty();
             }
             ColumnStatistic input = children.get(dataIndex);
@@ -943,6 +995,14 @@ public class ExpressionStatisticCalculator {
                     maxValue = Double.POSITIVE_INFINITY;
                     break;
                 case FunctionSet.TO_DATE, FunctionSet.DATE:
+                    // date(x) and to_date(x) are the cast of x to a DATE in the BE. We expect CAST(x AS DATE) = d and
+                    // date(x) = d to be estimated alike, so they have the same statistics: the range cut to the days,
+                    // the distinct values no more than the days of the range, and the histogram of the dates.
+                    ColumnStatistic cast = CastStatisticsDerivation.derive(columnStatistic,
+                            callOperator.getChild(0).getType(), callOperator.getType());
+                    if (cast != null) {
+                        return cast;
+                    }
                     if (minMaxValueInfinite) {
                         break;
                     }
@@ -1282,6 +1342,8 @@ public class ExpressionStatisticCalculator {
                     break;
                 case FunctionSet.DATE_TRUNC:
                     return calculateDateTruncStats(callOperator, right);
+                case FunctionSet.DATE_FORMAT:
+                    return calculateDateFormatStats(callOperator, left);
                 case FunctionSet.LTRIM:
                 case FunctionSet.RTRIM:
                     minValue = Double.NEGATIVE_INFINITY;
@@ -1523,6 +1585,74 @@ public class ExpressionStatisticCalculator {
                     .build();
         }
 
+        /**
+         * The statistics of date_format(x, f) of a DATE or a DATETIME with a constant format. We expect the string to be
+         * a function of x cut to the finest field that the format depends on, so its distinct values are no more than
+         * the periods of that field between the cut ends of the range of x, which date_trunc counts for the same range,
+         * and no more than the values that the fields can take: 12 for '%m' whatever the range. A key of a GROUP BY
+         * would otherwise be estimated at the distinct values of x, one for each day of a format of months. A DATE is
+         * rendered as its midnight, so the fields below the day are one value for it.
+         * <p>
+         * The strings of a format that is ordered, rendered on every row and read by the BE as the start of its period
+         * are bounded by the strings of the cut ends. The cast of such a string to a date reads these bounds, see
+         * CastStatisticsDerivation. The NULL rows of the strings that are too long for some dates only are not counted.
+         */
+        private ColumnStatistic calculateDateFormatStats(CallOperator callOperator, ColumnStatistic argument) {
+            final var format = toConstantOperator(callOperator.getChild(1));
+            final Type argumentType = callOperator.getChild(0).getType();
+            if (format.isEmpty() || format.get().isNull() || !format.get().getType().isStringType()
+                    || !(argumentType.isDate() || argumentType.isDatetime()) || argument.hasNaNValue()) {
+                return ColumnStatistic.unknown();
+            }
+            final DateFormatModel model = DateFormatModel.of(format.get().getVarchar());
+            if (model.isNullOnAllRows()) {
+                return ColumnStatistic.builder()
+                        .setNullsFraction(1.0)
+                        .setAverageRowSize(callOperator.getType().getTypeSize())
+                        .setDistinctValuesCount(0)
+                        .build();
+            }
+            final boolean knownRange = !Double.isInfinite(argument.getMinValue())
+                    && !Double.isInfinite(argument.getMaxValue());
+            // Without a range the periods are those of the whole type, as date_trunc counts them
+            final LocalDateTime min = knownRange
+                    ? Utils.getDatetimeFromLong((long) argument.getMinValue()) : ConstantOperator.MIN_DATETIME;
+            final LocalDateTime max = knownRange
+                    ? Utils.getDatetimeFromLong((long) argument.getMaxValue()) : ConstantOperator.MAX_DATETIME;
+            double distinctValues = Math.min(Math.min(argument.getDistinctValuesCount(), rowCount),
+                    model.valueCapacity(min, max));
+            // The periods of a known range are counted for every call that has a period, see
+            // withDistinctValuesOfPeriods. Without a range they are those of the whole type, as date_trunc counts them.
+            if (!knownRange) {
+                final Optional<DatePeriod> period = MonotonicFunctionRegistry.granularity(callOperator);
+                if (period.isPresent()) {
+                    distinctValues = Math.min(distinctValues, period.get().count(min, max));
+                }
+            }
+            return ColumnStatistic.builder()
+                    .setNullsFraction(argument.getNullsFraction())
+                    .setAverageRowSize(model.maxRenderedLength())
+                    .setDistinctValuesCount(Math.max(1, distinctValues))
+                    .setStringBounds(knownRange ? renderedBounds(callOperator, model, min, max) : null)
+                    .build();
+        }
+
+        // The strings of the two ends of the range, cut to the precision of the format, when the strings of date_format
+        // keep the order of the dates and the BE reads them as the start of their period; null otherwise
+        private static StringBounds renderedBounds(CallOperator callOperator, DateFormatModel model, LocalDateTime min,
+                                                   LocalDateTime max) {
+            if (StringDatePredicateDerivation.renderedLayout(callOperator) == null) {
+                return null;
+            }
+            try {
+                return new StringBounds(model.render(StringDateFormat.truncate(min, model.precision())),
+                        model.render(StringDateFormat.truncate(max, model.precision())), StringBounds.WHOLE, false);
+            } catch (RuntimeException e) {
+                LOG.debug("Failed to render the bounds of {}", callOperator, e);
+                return null;
+            }
+        }
+
         private Histogram transformHistogramForDateTrunc(String fmtString, ColumnStatistic dateStatistic,
                                                          Type resultType, double minValue, double maxValue) {
             final var histogram = dateStatistic.getHistogram();
@@ -1570,25 +1700,10 @@ public class ExpressionStatisticCalculator {
             }
         }
 
+        // The periods of a unit of date_trunc from the first to the last of the truncated ends. A unit below the second has
+        // no estimate, since the upper bound of the distinct values would be very high.
         private Optional<Long> estimateDateTruncDistinctValues(String fmt, LocalDateTime minDateTime, LocalDateTime maxDateTime) {
-            Optional<Long> distinctValues = Optional.empty();
-            distinctValues = switch (fmt) {
-                case FunctionSet.YEAR ->
-                        Optional.of(ChronoUnit.YEARS.between(minDateTime.toLocalDate(), maxDateTime.toLocalDate()) + 1L);
-                case FunctionSet.QUARTER -> Optional.of(quarterOrdinal(maxDateTime) - quarterOrdinal(minDateTime) + 1L);
-                case FunctionSet.MONTH ->
-                        Optional.of(ChronoUnit.MONTHS.between(minDateTime.toLocalDate(), maxDateTime.toLocalDate()) + 1L);
-                case FunctionSet.WEEK ->
-                        Optional.of(ChronoUnit.WEEKS.between(minDateTime.toLocalDate(), maxDateTime.toLocalDate()) + 1L);
-                case FunctionSet.DAY ->
-                        Optional.of(ChronoUnit.DAYS.between(minDateTime.toLocalDate(), maxDateTime.toLocalDate()) + 1L);
-                case FunctionSet.HOUR -> Optional.of(ChronoUnit.HOURS.between(minDateTime, maxDateTime) + 1L);
-                case FunctionSet.MINUTE -> Optional.of(ChronoUnit.MINUTES.between(minDateTime, maxDateTime) + 1L);
-                case FunctionSet.SECOND -> Optional.of(ChronoUnit.SECONDS.between(minDateTime, maxDateTime) + 1L);
-                // Do not estimate for more precise truncations (below seconds), since the upper bound NDV would be very high.
-                default -> distinctValues;
-            };
-            return distinctValues;
+            return DatePeriod.ofUnit(fmt).map(period -> period.count(minDateTime, maxDateTime));
         }
 
         private Optional<Long> estimateDateTruncDistinctValues(String fmt, Type resultType) {
@@ -1598,10 +1713,6 @@ public class ExpressionStatisticCalculator {
                 return estimateDateTruncDistinctValues(fmt, truncatedMin.get(), truncatedMax.get());
             }
             return Optional.empty();
-        }
-
-        private long quarterOrdinal(LocalDateTime dateTime) {
-            return dateTime.getYear() * 4L + (dateTime.getMonthValue() - 1L) / 3L;
         }
 
         private ColumnStatistic multiaryExpressionCalculate(CallOperator callOperator,

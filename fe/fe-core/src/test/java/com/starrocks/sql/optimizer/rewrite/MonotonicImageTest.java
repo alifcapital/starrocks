@@ -35,6 +35,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.LocalDateTime;
+import java.util.TimeZone;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -240,6 +241,60 @@ public class MonotonicImageTest {
         MinMax domain = datetimeDomain(LocalDateTime.of(2024, 3, 5, 6, 30, 15), LocalDateTime.of(2024, 3, 7, 10, 20, 30));
         for (String format : new String[] {"%d.%m.%Y", "%y-%m", "%Y-%c", "%m/%d/%Y %h", "%e%c%Y", "%Y%m%d%i", "%W", "%Y-%q"}) {
             assertFalse(MonotonicImage.imageRange(dateFormat(format), dtCol, domain).isPresent(), format);
+        }
+    }
+
+    // The cast of such a string to a date is the date it holds, cut to the period of the format, so the image is the cut of
+    // the ends of the range. The BE casts '%Y-%m' and '%Y' to NULL and reads ten digits as a year of two digits, and no
+    // order of the dates is left there.
+    @Test
+    public void testCastToADateOfAFormatThatTheBackendReadsAsThePeriodStartHasAnImage() {
+        LocalDateTime min = LocalDateTime.of(2024, 3, 5, 6, 30, 15);
+        LocalDateTime max = LocalDateTime.of(2024, 5, 7, 10, 20, 30);
+        for (String format : new String[] {"%Y-%m-01 00:00:00", "%Y-%m-%d", "%Y-%m-%d %H:00:00", "%Y-%m-%d %H:%i:00",
+                "%Y-%m-%dT%H:%i:%s", "%Y-%m-%d %H:%i:%S"}) {
+            DateFormatModel model = DateFormatModel.of(format);
+            Range<ConstantOperator> image = MonotonicImage.imageRange(new CastOperator(DateType.DATETIME, dateFormat(format)),
+                    dtCol, datetimeDomain(min, max)).orElseThrow(() -> new AssertionError(format));
+            assertEquals(StringDateFormat.truncate(min, model.precision()), image.lowerEndpoint().getDatetime(), format);
+            assertEquals(StringDateFormat.truncate(max, model.precision()), image.upperEndpoint().getDatetime(), format);
+            // the FE may refuse to fold the cast of a string with a time to a DATE; if it folds, it keeps the date
+            MonotonicImage.imageRange(new CastOperator(DateType.DATE, dateFormat(format)), dtCol,
+                    datetimeDomain(min, max)).ifPresent(days -> {
+                        assertEquals(StringDateFormat.truncate(min, model.precision()).toLocalDate(),
+                                days.lowerEndpoint().getDatetime().toLocalDate(), format);
+                        assertEquals(StringDateFormat.truncate(max, model.precision()).toLocalDate(),
+                                days.upperEndpoint().getDatetime().toLocalDate(), format);
+                    });
+        }
+        MinMax domain = datetimeDomain(min, max);
+        for (String format : new String[] {"%Y-%m", "%Y", "%Y%m", "%Y%m%d%H", "%Y%m%d%H%i", "%d.%m.%Y", "%y-%m", "%W"}) {
+            assertFalse(MonotonicImage.imageRange(new CastOperator(DateType.DATETIME, dateFormat(format)), dtCol, domain)
+                    .isPresent(), format);
+        }
+        // Only the strings of date_format are admitted: from_unixtime writes the same strings, and the cast of them is not
+        Function unixtimeFn = new Function(new FunctionName("from_unixtime"),
+                new Type[] {IntegerType.BIGINT, VarcharType.VARCHAR}, VarcharType.VARCHAR, false);
+        CallOperator unixtime = new CallOperator("from_unixtime", VarcharType.VARCHAR,
+                ImmutableList.of(epochCol, ConstantOperator.createVarchar("%Y-%m-%d %H:%i:%s")), unixtimeFn);
+        assertFalse(MonotonicImage.imageRange(new CastOperator(DateType.DATETIME, unixtime), epochCol,
+                epochDomain(1717200000L, 1719800000L)).isPresent());
+    }
+
+    // The BE keeps the fields of a string with a Z, while the FE folds it into the zone of the JVM, so the image of its cast
+    // is the range of the strings only where that zone is UTC
+    @Test
+    public void testCastOfAStringWithAZHasAnImageOnlyInUtc() {
+        MinMax domain = datetimeDomain(LocalDateTime.of(2024, 3, 5, 6, 30, 15), LocalDateTime.of(2024, 5, 7, 10, 20, 30));
+        CastOperator cast = new CastOperator(DateType.DATETIME, dateFormat("%Y-%m-%dT%H:%i:%sZ"));
+        TimeZone saved = TimeZone.getDefault();
+        try {
+            TimeZone.setDefault(TimeZone.getTimeZone("Asia/Shanghai"));
+            assertFalse(MonotonicImage.imageRange(cast, dtCol, domain).isPresent());
+            TimeZone.setDefault(TimeZone.getTimeZone("UTC"));
+            assertTrue(MonotonicImage.imageRange(cast, dtCol, domain).isPresent());
+        } finally {
+            TimeZone.setDefault(saved);
         }
     }
 

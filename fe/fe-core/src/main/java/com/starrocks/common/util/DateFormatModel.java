@@ -146,6 +146,8 @@ public final class DateFormatModel {
     // 128 bytes or longer
     private static final int MAX_RENDERED_LENGTH = 127;
     private static final int MAX_FORMAT_LENGTH = 128;
+    // The shortest string that never fits the buffer of the BE: it holds 127 bytes and the terminating zero
+    private static final int NEVER_FITS_LENGTH = 128;
 
     // Times with different digits in every field. A string of only digits whose length is not 4, 8 or 14 and more reads
     // in the BE with a year of two digits, and 2012 and 2001 make such a reading a valid date of another day.
@@ -168,6 +170,8 @@ public final class DateFormatModel {
     private final boolean endsWithSinglePercent;
     private final Set<Field> fields;
     private final int maxRenderedLength;
+    // The text and one byte for each specifier: no string of the format is shorter
+    private final int minRenderedLength;
     private final int formatLength;
     // The number of specifiers of an ordered format, from the year down; 0 when the format is not ordered
     private final int orderedFields;
@@ -218,18 +222,23 @@ public final class DateFormatModel {
         this.endsWithSinglePercent = singlePercent;
         Set<Field> present = EnumSet.noneOf(Field.class);
         int length = 0;
+        int shortest = 0;
         boolean anyText = false;
         for (Token token : tokens) {
             if (token.specifier() != null) {
                 present.add(token.specifier().field());
                 length += token.specifier().width();
+                shortest += 1;
             } else {
-                length += token.text().getBytes(StandardCharsets.UTF_8).length;
+                int bytes = token.text().getBytes(StandardCharsets.UTF_8).length;
+                length += bytes;
+                shortest += bytes;
                 anyText = true;
             }
         }
         this.fields = present;
         this.maxRenderedLength = length;
+        this.minRenderedLength = shortest;
         this.formatLength = format.getBytes(StandardCharsets.UTF_8).length;
         this.hasText = anyText;
         this.orderedFields = orderedFieldsOf(tokens, allKnown);
@@ -316,11 +325,22 @@ public final class DateFormatModel {
     }
 
     /**
-     * Whether the BE renders every row: it gives NULL for the rows whose string would be 127 bytes or more, and for all
-     * rows when the format is 128 bytes or more. A bound on the strings is right only for such a format.
+     * Whether the BE renders every row: it gives NULL for a string that does not fit its buffer of 128 bytes. We count
+     * a string of 127 bytes as not fitting, because the BE also gives NULL a few bytes before the end of the buffer for
+     * the names of the days and months. We take a format of 128 bytes or more as not exact too: the BE renders it row
+     * by row, and we expect such a format to hold a long text. A bound on the strings is right only for an exact format.
      */
     public boolean isExactOnAllRows() {
         return maxRenderedLength < MAX_RENDERED_LENGTH && formatLength < MAX_FORMAT_LENGTH;
+    }
+
+    /**
+     * Whether the BE gives NULL for every date: an empty format, or a format whose shortest string does not fit the
+     * buffer of 128 bytes of the BE. We expect a long text in the format, and then we know the NULL fraction is 1. A format
+     * whose strings are long only for some dates is not here: its NULL rows are not counted.
+     */
+    public boolean isNullOnAllRows() {
+        return formatLength == 0 || minRenderedLength >= NEVER_FITS_LENGTH;
     }
 
     /**

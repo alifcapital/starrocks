@@ -17,11 +17,13 @@ package com.starrocks.sql.optimizer.rewrite;
 import com.google.common.collect.ImmutableMap;
 import com.starrocks.catalog.FunctionSet;
 import com.starrocks.common.util.DateFormatModel;
+import com.starrocks.common.util.DatePeriod;
 import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
+import com.starrocks.type.Type;
 
 import java.util.List;
 import java.util.Map;
@@ -211,6 +213,75 @@ public final class MonotonicFunctionRegistry {
     public static int digitsOnlyLength(String format) {
         DateFormatModel model = DateFormatModel.of(format);
         return model.isDigitsOnly() && model.isExactOnAllRows() ? model.digitCount() : 0;
+    }
+
+    /**
+     * The period of the date argument that a call takes one value on, or empty when the call has none that we know.
+     * We expect the distinct values of such a call to be no more than the periods between the ends of the range of its
+     * argument, so every function that has a period is counted the same way, see DatePeriod. The period depends on the
+     * constants of the call: the unit of date_trunc, the weekday of next_day, the format of date_format.
+     */
+    public interface Granularity {
+        Optional<DatePeriod> of(CallOperator call);
+    }
+
+    /**
+     * The functions with a period. time_slice has none here: it cuts from the year 1 in steps of n units, which the FE fold
+     * does, but no inverse of the registry states it, and the BE is not read for every unit. date and to_date are the cast
+     * of a DATETIME to a DATE, and have the statistics of the cast.
+     */
+    private static final Map<String, Granularity> GRANULARITIES = ImmutableMap.<String, Granularity>builder()
+            .put(FunctionSet.DATE_TRUNC, call -> constantText(call, 0)
+                    .flatMap(unit -> DatePeriod.ofUnit(unit.toLowerCase())))
+            .put(FunctionSet.LAST_DAY, MonotonicFunctionRegistry::lastDayPeriod)
+            // next_day(x, d) = G holds exactly for x in [G-7, G), the week that starts on the day d
+            .put(FunctionSet.NEXT_DAY, call -> Optional.ofNullable(MonotonicInverse.dowOf(call))
+                    .map(DatePeriod::weeks))
+            // previous_day(x, d) = G holds exactly for x in [G+1, G+8), the week that starts on the day after d
+            .put(FunctionSet.PREVIOUS_DAY, call -> Optional.ofNullable(MonotonicInverse.dowOf(call))
+                    .map(day -> DatePeriod.weeks(day.plus(1))))
+            .put(FunctionSet.DATE_FORMAT, MonotonicFunctionRegistry::renderedPeriod)
+            .build();
+
+    public static Optional<DatePeriod> granularity(CallOperator call) {
+        Granularity granularity = GRANULARITIES.get(call.getFnName().toLowerCase());
+        return granularity == null ? Optional.empty() : granularity.of(call);
+    }
+
+    private static Optional<String> constantText(CallOperator call, int position) {
+        if (call.getChildren().size() <= position || !call.getChild(position).isConstantRef()) {
+            return Optional.empty();
+        }
+        ConstantOperator constant = (ConstantOperator) call.getChild(position);
+        return constant.isNull() || !constant.getType().isStringType() ? Optional.empty()
+                : Optional.of(constant.getVarchar());
+    }
+
+    // last_day(x) is the last day of the month of x, and the unit of the second argument can be a quarter or a year
+    private static Optional<DatePeriod> lastDayPeriod(CallOperator call) {
+        if (call.getChildren().size() == 1) {
+            return DatePeriod.ofUnit("month");
+        }
+        if (call.getChildren().size() != 2) {
+            return Optional.empty();
+        }
+        return constantText(call, 1).map(String::toLowerCase)
+                .filter(unit -> unit.equals("month") || unit.equals("quarter") || unit.equals("year"))
+                .flatMap(DatePeriod::ofUnit);
+    }
+
+    // The string of date_format is a function of the date cut to the finest field of the format. A DATE is rendered as its
+    // midnight, so the fields below the day do not count for it.
+    private static Optional<DatePeriod> renderedPeriod(CallOperator call) {
+        Type argument = call.getChildren().isEmpty() ? null : call.getChild(0).getType();
+        if (argument == null || !(argument.isDate() || argument.isDatetime())) {
+            return Optional.empty();
+        }
+        return constantText(call, 1).flatMap(format -> {
+            Optional<DateFormatModel.Field> finest = DateFormatModel.of(format).finestFieldUpTo(
+                    argument.isDate() ? DateFormatModel.Field.DAY : DateFormatModel.Field.MICRO);
+            return finest.isEmpty() ? Optional.of(DatePeriod.single()) : DatePeriod.ofField(finest.get());
+        });
     }
 
     /**
