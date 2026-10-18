@@ -22,6 +22,8 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <optional>
+#include <vector>
 
 #include "column/column_helper.h"
 #include "column/column_viewer.h"
@@ -45,6 +47,7 @@
 #include "formats/parquet/column_reader_factory.h"
 #include "formats/parquet/complex_column_reader.h"
 #include "formats/parquet/lazy_materialization_context.h"
+#include "formats/parquet/parquet_ut_base.h"
 #include "formats/parquet/read_range_planner.h"
 #include "formats/parquet/utils.h"
 #include "formats/reserved_columns.h"
@@ -2161,6 +2164,391 @@ public:
 private:
     size_t _read_count = 0;
 };
+
+// A BIGINT column reader over a fixed list of values. A row that the filter drops gets `placeholder`, as a
+// decoder fills the rows of a page run where no row is kept. Without a placeholder it returns the real
+// value of every row, as a column read for a row that a deletion vector removes does.
+class MockFilteredBigintColumnReader : public ColumnReader {
+public:
+    MockFilteredBigintColumnReader(std::vector<int64_t> values, std::optional<int64_t> placeholder)
+            : ColumnReader(nullptr), _values(std::move(values)), _placeholder(placeholder) {}
+    ~MockFilteredBigintColumnReader() override = default;
+
+    Status prepare() override { return Status::OK(); }
+
+    Status read_range(const Range<uint64_t>& range, const Filter* filter, ColumnPtr& dst_col) override {
+        auto* dst = dst_col->as_mutable_raw_ptr();
+        for (uint64_t i = 0; i < range.span_size(); ++i) {
+            const bool dropped = filter != nullptr && (*filter)[i] == 0;
+            const int64_t value = dropped && _placeholder.has_value() ? *_placeholder : _values[range.begin() + i];
+            dst->append_datum(Datum(value));
+        }
+        return Status::OK();
+    }
+
+    void set_need_parse_levels(bool need_parse_levels) override {}
+    void get_levels(int16_t** def_levels, int16_t** rep_levels, size_t* num_levels) override {}
+    void collect_column_io_range(std::vector<io::SharedBufferedInputStream::IORange>* ranges, int64_t* end_offset,
+                                 ColumnIOTypeFlags types, bool active) override {}
+    void select_offset_index(const SparseRange<uint64_t>& range, const uint64_t rg_first_row) override {}
+
+private:
+    std::vector<int64_t> _values;
+    std::optional<int64_t> _placeholder;
+};
+
+static Status create_bigint_divide_conjunct_ctxs(ObjectPool* pool, RuntimeState* state, SlotId slot_id,
+                                                 int64_t threshold, std::vector<ExprContext*>* conjunct_ctxs) {
+    std::vector<TExpr> t_conjuncts;
+    ParquetUTBase::append_bigint_divide_conjunct(TExprOpcode::GT, slot_id, 100, threshold, &t_conjuncts);
+    RETURN_IF_ERROR(Expr::create_expr_trees(pool, t_conjuncts, conjunct_ctxs, nullptr));
+    RETURN_IF_ERROR(Expr::prepare(*conjunct_ctxs, state));
+    DictOptimizeParser::disable_open_rewrite(conjunct_ctxs);
+    return Expr::open(*conjunct_ctxs, state);
+}
+
+static RuntimeState make_error_for_division_by_zero_state() {
+    TQueryOptions options;
+    options.__set_error_for_division_by_zero(true);
+    return RuntimeState(TUniqueId(), options, TQueryGlobals(), nullptr);
+}
+
+// Covers: a conjunct on a column does not fail on a row that the filter dropped. Each of the two columns
+//         has a conjunct 100 / col > 20, and the column that is read second is read under the filter of the
+//         first one, so it holds 0 in the rows that the first one dropped. The columns are read in a random
+//         order, so both orders must pass.
+TEST_F(GroupReaderTest, SlotConjunctsSkipRowsDroppedByTheOtherColumn) {
+    auto* param = _create_group_reader_param();
+    param->read_cols.clear();
+
+    auto* slot_a = _pool.add(new SlotDescriptor(270, "a", TypeDescriptor::from_logical_type(LogicalType::TYPE_BIGINT)));
+    auto* slot_b = _pool.add(new SlotDescriptor(271, "b", TypeDescriptor::from_logical_type(LogicalType::TYPE_BIGINT)));
+    GroupReaderParam::Column ca{};
+    ca.slot_desc = slot_a;
+    GroupReaderParam::Column cb{};
+    cb.slot_desc = slot_b;
+    param->read_cols.emplace_back(ca);
+    param->read_cols.emplace_back(cb);
+
+    RuntimeState runtime_state = make_error_for_division_by_zero_state();
+    std::vector<ExprContext*> ctx_a, ctx_b;
+    ASSERT_OK(create_bigint_divide_conjunct_ctxs(&_pool, &runtime_state, slot_a->id(), 20, &ctx_a));
+    ASSERT_OK(create_bigint_divide_conjunct_ctxs(&_pool, &runtime_state, slot_b->id(), 20, &ctx_b));
+
+    // 100 / a > 20 keeps the rows 0, 2, 3, 5, and 100 / b > 20 keeps the rows 0, 3.
+    ColumnMaterializer::ColumnReaderMap column_readers;
+    column_readers.emplace(slot_a->id(), std::make_unique<MockFilteredBigintColumnReader>(
+                                                 std::vector<int64_t>{4, 5, 2, 1, 5, 4}, int64_t(0)));
+    column_readers.emplace(slot_b->id(), std::make_unique<MockFilteredBigintColumnReader>(
+                                                 std::vector<int64_t>{3, 10, 5, 1, 10, 7}, int64_t(0)));
+
+    ColumnMaterializer materializer(*param, &column_readers);
+    materializer.add_active_column(0);
+    materializer.add_active_column(1);
+    materializer.rebuild_read_order_ctx();
+    for (auto* ctx : ctx_a) {
+        materializer.add_post_read_conjunct(slot_a->id(), ctx);
+    }
+    for (auto* ctx : ctx_b) {
+        materializer.add_post_read_conjunct(slot_b->id(), ctx);
+    }
+    ASSERT_OK(materializer.init_read_chunk());
+    auto chunk = materializer.create_active_chunk();
+
+    Filter filter(6, 1);
+    auto hit_count = materializer.read_active_range_round_by_round(Range<uint64_t>(0, 6), &filter, &chunk, nullptr);
+    ASSERT_TRUE(hit_count.ok()) << hit_count.status();
+    EXPECT_EQ(2u, hit_count.value());
+    const std::vector<uint8_t> expected{1, 0, 0, 1, 0, 0};
+    ASSERT_EQ(expected.size(), filter.size());
+    for (size_t i = 0; i < expected.size(); ++i) {
+        EXPECT_EQ(expected[i], filter[i]) << "row " << i;
+    }
+
+    Expr::close(ctx_a, &runtime_state);
+    Expr::close(ctx_b, &runtime_state);
+}
+
+// Covers: a conjunct does not fail on a row that a deletion vector removed before the column was read,
+//         even when the reader returns the real value of that row. The value 0 of a deleted row would
+//         make 100 / b fail.
+TEST_F(GroupReaderTest, SlotConjunctSkipsRowsDeletedBeforeTheRead) {
+    auto* param = _create_group_reader_param();
+    param->read_cols.clear();
+
+    auto* slot_b = _pool.add(new SlotDescriptor(272, "b", TypeDescriptor::from_logical_type(LogicalType::TYPE_BIGINT)));
+    GroupReaderParam::Column cb{};
+    cb.slot_desc = slot_b;
+    param->read_cols.emplace_back(cb);
+
+    RuntimeState runtime_state = make_error_for_division_by_zero_state();
+    std::vector<ExprContext*> ctx_b;
+    ASSERT_OK(create_bigint_divide_conjunct_ctxs(&_pool, &runtime_state, slot_b->id(), 20, &ctx_b));
+
+    ColumnMaterializer::ColumnReaderMap column_readers;
+    column_readers.emplace(slot_b->id(), std::make_unique<MockFilteredBigintColumnReader>(
+                                                 std::vector<int64_t>{3, 0, 5, 0, 10}, std::nullopt));
+
+    ColumnMaterializer materializer(*param, &column_readers);
+    materializer.add_active_column(0);
+    materializer.rebuild_read_order_ctx();
+    for (auto* ctx : ctx_b) {
+        materializer.add_post_read_conjunct(slot_b->id(), ctx);
+    }
+    ASSERT_OK(materializer.init_read_chunk());
+    auto chunk = materializer.create_active_chunk();
+
+    // The rows 1 and 3 are deleted. 100 / b > 20 keeps the row 0 only.
+    Filter filter{1, 0, 1, 0, 1};
+    auto hit_count = materializer.read_active_range_round_by_round(Range<uint64_t>(0, 5), &filter, &chunk, nullptr);
+    ASSERT_TRUE(hit_count.ok()) << hit_count.status();
+    EXPECT_EQ(1u, hit_count.value());
+    const std::vector<uint8_t> expected{1, 0, 0, 0, 0};
+    ASSERT_EQ(expected.size(), filter.size());
+    for (size_t i = 0; i < expected.size(); ++i) {
+        EXPECT_EQ(expected[i], filter[i]) << "row " << i;
+    }
+
+    Expr::close(ctx_b, &runtime_state);
+}
+
+// Covers: the conjunct of a reserved field does not fail on a row that the filter dropped. It is
+//         evaluated before the regular columns, on the filter that the deletion vector left.
+TEST_F(GroupReaderTest, ReservedSlotConjunctSkipsRowsDeletedBeforeTheRead) {
+    auto* param = _create_group_reader_param();
+    param->read_cols.clear();
+
+    auto* reserved_slot =
+            _pool.add(new SlotDescriptor(273, "_pos", TypeDescriptor::from_logical_type(LogicalType::TYPE_BIGINT)));
+    auto* active_slot =
+            _pool.add(new SlotDescriptor(274, "a", TypeDescriptor::from_logical_type(LogicalType::TYPE_BIGINT)));
+    GroupReaderParam::Column ca{};
+    ca.slot_desc = active_slot;
+    param->read_cols.emplace_back(ca);
+    param->scanner_ctx->reserved_field_slots = {reserved_slot};
+
+    RuntimeState runtime_state = make_error_for_division_by_zero_state();
+    std::vector<ExprContext*> conjunct_ctxs;
+    ASSERT_OK(create_bigint_divide_conjunct_ctxs(&_pool, &runtime_state, reserved_slot->id(), 20, &conjunct_ctxs));
+
+    ColumnMaterializer::ColumnReaderMap column_readers;
+    column_readers.emplace(reserved_slot->id(), std::make_unique<MockFilteredBigintColumnReader>(
+                                                        std::vector<int64_t>{3, 0, 5, 0, 10}, std::nullopt));
+    column_readers.emplace(active_slot->id(), std::make_unique<MockCountingColumnReader>());
+
+    ColumnMaterializer materializer(*param, &column_readers);
+    materializer.add_active_column(0);
+    materializer.rebuild_read_order_ctx();
+    for (auto* ctx : conjunct_ctxs) {
+        materializer.add_post_read_conjunct(reserved_slot->id(), ctx);
+    }
+    ASSERT_OK(materializer.init_read_chunk());
+    auto chunk = materializer.create_active_chunk();
+
+    // The rows 1 and 3 are deleted. 100 / _pos > 20 keeps the row 0 only.
+    Filter filter{1, 0, 1, 0, 1};
+    auto hit_count = materializer.read_active_range_round_by_round(Range<uint64_t>(0, 5), &filter, &chunk, nullptr);
+    ASSERT_TRUE(hit_count.ok()) << hit_count.status();
+    EXPECT_EQ(1u, hit_count.value());
+    const std::vector<uint8_t> expected{1, 0, 0, 0, 0};
+    ASSERT_EQ(expected.size(), filter.size());
+    for (size_t i = 0; i < expected.size(); ++i) {
+        EXPECT_EQ(expected[i], filter[i]) << "row " << i;
+    }
+
+    Expr::close(conjunct_ctxs, &runtime_state);
+}
+
+// Covers: when the filter keeps every row the conjuncts run on the whole column.
+TEST_F(GroupReaderTest, SlotConjunctKeepsEveryRowWhenFilterKeepsAll) {
+    auto* param = _create_group_reader_param();
+    param->read_cols.clear();
+
+    auto* slot_b = _pool.add(new SlotDescriptor(275, "b", TypeDescriptor::from_logical_type(LogicalType::TYPE_BIGINT)));
+    GroupReaderParam::Column cb{};
+    cb.slot_desc = slot_b;
+    param->read_cols.emplace_back(cb);
+
+    RuntimeState runtime_state = make_error_for_division_by_zero_state();
+    std::vector<ExprContext*> ctx_b;
+    ASSERT_OK(create_bigint_divide_conjunct_ctxs(&_pool, &runtime_state, slot_b->id(), 20, &ctx_b));
+
+    ColumnMaterializer::ColumnReaderMap column_readers;
+    column_readers.emplace(slot_b->id(), std::make_unique<MockFilteredBigintColumnReader>(
+                                                 std::vector<int64_t>{3, 4, 5, 6, 10}, int64_t(0)));
+
+    ColumnMaterializer materializer(*param, &column_readers);
+    materializer.add_active_column(0);
+    materializer.rebuild_read_order_ctx();
+    for (auto* ctx : ctx_b) {
+        materializer.add_post_read_conjunct(slot_b->id(), ctx);
+    }
+    ASSERT_OK(materializer.init_read_chunk());
+    auto chunk = materializer.create_active_chunk();
+
+    // 100 / b is 33, 25, 20, 16, 10, so 100 / b > 20 keeps the rows 0 and 1.
+    Filter filter(5, 1);
+    auto hit_count = materializer.read_active_range_round_by_round(Range<uint64_t>(0, 5), &filter, &chunk, nullptr);
+    ASSERT_TRUE(hit_count.ok()) << hit_count.status();
+    EXPECT_EQ(2u, hit_count.value());
+    const std::vector<uint8_t> expected{1, 1, 0, 0, 0};
+    ASSERT_EQ(expected.size(), filter.size());
+    for (size_t i = 0; i < expected.size(); ++i) {
+        EXPECT_EQ(expected[i], filter[i]) << "row " << i;
+    }
+
+    Expr::close(ctx_b, &runtime_state);
+}
+
+// Reads the BIGINT column b under `filter` as the only active column, and evaluates its conjuncts. A row that the
+// filter drops gets `placeholder`. The conjuncts are `b = equal_to`, if it is set, and then 100 / b > 10, which fails
+// on a row with b = 0. Returns the number of rows left, the filter that is left, and the number of sub-chunk copies
+// that the evaluation made.
+static void eval_bigint_slot_conjuncts(GroupReaderParam* param, ObjectPool* pool, SlotId slot_id,
+                                       const std::vector<int64_t>& values, int64_t placeholder,
+                                       std::optional<int64_t> equal_to, Filter* filter, size_t* hit_count,
+                                       int64_t* subchunk_copies) {
+    param->read_cols.clear();
+    auto* slot =
+            pool->add(new SlotDescriptor(slot_id, "b", TypeDescriptor::from_logical_type(LogicalType::TYPE_BIGINT)));
+    GroupReaderParam::Column column{};
+    column.slot_desc = slot;
+    param->read_cols.emplace_back(column);
+
+    RuntimeState runtime_state = make_error_for_division_by_zero_state();
+    // Expr::create_expr_trees() clears the vector that it fills, so each helper gets its own vector.
+    std::vector<ExprContext*> ctxs;
+    if (equal_to.has_value()) {
+        ASSERT_OK(create_bigint_eq_conjunct_ctxs(pool, &runtime_state, slot->id(), *equal_to, &ctxs));
+    }
+    std::vector<ExprContext*> divide_ctxs;
+    ASSERT_OK(create_bigint_divide_conjunct_ctxs(pool, &runtime_state, slot->id(), 10, &divide_ctxs));
+    ctxs.insert(ctxs.end(), divide_ctxs.begin(), divide_ctxs.end());
+    ASSERT_EQ(equal_to.has_value() ? 2u : 1u, ctxs.size());
+
+    ColumnMaterializer::ColumnReaderMap column_readers;
+    column_readers.emplace(slot->id(), std::make_unique<MockFilteredBigintColumnReader>(values, placeholder));
+
+    ColumnMaterializer materializer(*param, &column_readers);
+    materializer.add_active_column(0);
+    materializer.rebuild_read_order_ctx();
+    for (auto* ctx : ctxs) {
+        materializer.add_post_read_conjunct(slot->id(), ctx);
+    }
+    ASSERT_OK(materializer.init_read_chunk());
+    auto chunk = materializer.create_active_chunk();
+
+    auto result =
+            materializer.read_active_range_round_by_round(Range<uint64_t>(0, values.size()), filter, &chunk, nullptr);
+    ASSERT_TRUE(result.ok()) << result.status();
+    *hit_count = result.value();
+    *subchunk_copies = runtime_state.conditional_two_phase_stats()->subchunk_copies.load();
+
+    Expr::close(ctxs, &runtime_state);
+}
+
+// Covers: the filter drops the rows 1 and 4, which hold a placeholder that the conjunct accepts. The conjunct runs
+//         on the whole column, and no sub-chunk with the kept rows is copied. 100 / b > 10 keeps the rows 2, 3, 5.
+TEST_F(GroupReaderTest, SlotConjunctEvaluatesWholeColumnWhenItSucceeds) {
+    auto* param = _create_group_reader_param();
+    Filter filter{1, 0, 1, 1, 0, 1};
+    size_t hit_count = 0;
+    int64_t subchunk_copies = -1;
+    ASSERT_NO_FATAL_FAILURE(eval_bigint_slot_conjuncts(param, &_pool, 277, {20, 7, 5, 1, 7, 7}, 1, std::nullopt,
+                                                       &filter, &hit_count, &subchunk_copies));
+    EXPECT_EQ(3u, hit_count);
+    const std::vector<uint8_t> expected{0, 0, 1, 1, 0, 1};
+    ASSERT_EQ(expected.size(), filter.size());
+    for (size_t i = 0; i < expected.size(); ++i) {
+        EXPECT_EQ(expected[i], filter[i]) << "row " << i;
+    }
+    EXPECT_EQ(0, subchunk_copies);
+}
+
+// Covers: the placeholder of a dropped row makes the conjunct fail on the whole column, so the conjunct runs again
+//         on the kept rows, with one copy of them, and gives the same rows as above.
+TEST_F(GroupReaderTest, SlotConjunctEvaluatesKeptRowsWhenWholeColumnFails) {
+    auto* param = _create_group_reader_param();
+    Filter filter{1, 0, 1, 1, 0, 1};
+    size_t hit_count = 0;
+    int64_t subchunk_copies = -1;
+    ASSERT_NO_FATAL_FAILURE(eval_bigint_slot_conjuncts(param, &_pool, 278, {20, 7, 5, 1, 7, 7}, 0, std::nullopt,
+                                                       &filter, &hit_count, &subchunk_copies));
+    EXPECT_EQ(3u, hit_count);
+    const std::vector<uint8_t> expected{0, 0, 1, 1, 0, 1};
+    ASSERT_EQ(expected.size(), filter.size());
+    for (size_t i = 0; i < expected.size(); ++i) {
+        EXPECT_EQ(expected[i], filter[i]) << "row " << i;
+    }
+    EXPECT_EQ(1, subchunk_copies);
+}
+
+// Covers: the first conjunct b = 5 runs on the whole column and clears the row 2. The second conjunct fails on the
+//         placeholder 0 of the dropped rows, and the conjuncts run again on the kept rows. The row 2 stays cleared.
+TEST_F(GroupReaderTest, SlotConjunctsKeepResultOfEarlierConjunctWhenWholeColumnFails) {
+    auto* param = _create_group_reader_param();
+    Filter filter{1, 0, 1, 1, 0, 1};
+    size_t hit_count = 0;
+    int64_t subchunk_copies = -1;
+    ASSERT_NO_FATAL_FAILURE(eval_bigint_slot_conjuncts(param, &_pool, 279, {5, 7, 3, 5, 7, 5}, 0, int64_t(5), &filter,
+                                                       &hit_count, &subchunk_copies));
+    EXPECT_EQ(3u, hit_count);
+    const std::vector<uint8_t> expected{1, 0, 0, 1, 0, 1};
+    ASSERT_EQ(expected.size(), filter.size());
+    for (size_t i = 0; i < expected.size(); ++i) {
+        EXPECT_EQ(expected[i], filter[i]) << "row " << i;
+    }
+    EXPECT_GT(subchunk_copies, 0);
+}
+
+// Covers: GroupReader::get_next with a deletion vector. The rows 3 and 7 hold b = 0, and the reader returns the
+//         placeholder 0 for them, so 100 / b > 0 would fail on them. The rows that are left must come out.
+TEST_F(GroupReaderTest, GetNextConjunctSkipsRowsOfDeletionVector) {
+    auto* param = _create_group_reader_param();
+    FileMetaData* file_meta;
+    ASSERT_OK(_create_filemeta(&file_meta, param));
+    param->file_metadata = file_meta;
+    param->file = _create_file();
+    param->chunk_size = config::vector_chunk_size;
+    param->read_cols.clear();
+
+    auto* slot_b = _pool.add(new SlotDescriptor(276, "b", TypeDescriptor::from_logical_type(LogicalType::TYPE_BIGINT)));
+    GroupReaderParam::Column cb{};
+    cb.slot_desc = slot_b;
+    param->read_cols.emplace_back(cb);
+
+    RuntimeState runtime_state = make_error_for_division_by_zero_state();
+    std::vector<ExprContext*> ctx_b;
+    ASSERT_OK(create_bigint_divide_conjunct_ctxs(&_pool, &runtime_state, slot_b->id(), 0, &ctx_b));
+    param->conjunct_ctxs_by_slot[slot_b->id()] = ctx_b;
+
+    roaring64_bitmap_t* bitmap = roaring64_bitmap_create();
+    roaring64_bitmap_add(bitmap, 3);
+    roaring64_bitmap_add(bitmap, 7);
+    SkipRowsContextPtr skip_rows_ctx = std::make_shared<SkipRowsContext>();
+    skip_rows_ctx->deletion_bitmap = std::make_shared<DeletionBitmap>(bitmap);
+
+    auto* group_reader = _pool.add(new GroupReader(*param, 0, skip_rows_ctx, 0));
+    group_reader->_column_readers.emplace(
+            slot_b->id(), std::make_unique<MockFilteredBigintColumnReader>(
+                                  std::vector<int64_t>{1, 2, 3, 0, 5, 6, 7, 0, 9, 10, 11, 12}, int64_t(0)));
+    group_reader->_process_columns_and_conjunct_ctxs();
+    ASSERT_OK(group_reader->_column_materializer->init_read_chunk());
+    prepare_row_range(group_reader);
+
+    auto chunk = _create_chunk(param);
+    size_t row_count = 12;
+    auto status = group_reader->get_next(&chunk, &row_count);
+    ASSERT_TRUE(status.ok() || status.is_end_of_file()) << status;
+    ASSERT_EQ(10u, row_count);
+    const std::vector<int64_t> expected{1, 2, 3, 5, 6, 7, 9, 10, 11, 12};
+    ASSERT_EQ(expected.size(), chunk->num_rows());
+    for (size_t i = 0; i < expected.size(); ++i) {
+        EXPECT_EQ(expected[i], chunk->get_column_by_slot_id(slot_b->id())->get(i).get_int64()) << "row " << i;
+    }
+
+    Expr::close(ctx_b, &runtime_state);
+}
 
 // Covers: ColumnMaterializer::read_active_range_round_by_round returns as soon as a
 //         reserved-slot conjunct filters out every row, without reading the regular

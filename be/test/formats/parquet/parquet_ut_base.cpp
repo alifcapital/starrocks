@@ -89,6 +89,52 @@ void ParquetUTBase::append_bigint_conjunct(TExprOpcode::type opcode, SlotId slot
     tExprs->emplace_back(t_expr);
 }
 
+void ParquetUTBase::append_int_divide_conjunct(TExprOpcode::type opcode, SlotId slot_id, int dividend, int value,
+                                               std::vector<TExpr>* tExprs) {
+    TExprNode pred_node = ExprsTestHelper::create_binary_pred_node(TPrimitiveType::INT, opcode);
+    TExprNode divide_node;
+    divide_node.node_type = TExprNodeType::ARITHMETIC_EXPR;
+    divide_node.num_children = 2;
+    divide_node.__set_opcode(TExprOpcode::DIVIDE);
+    divide_node.type = ExprsTestHelper::IntTTypeDesc;
+    divide_node.__set_is_nullable(true);
+    TExprNode dividend_literal = ExprsTestHelper::create_literal<TYPE_INT, int32_t>(dividend, false);
+    TExprNode int_col_ref = ExprsTestHelper::create_slot_expr_node_t<TYPE_INT>(0, slot_id, true);
+    TExprNode int_literal = ExprsTestHelper::create_literal<TYPE_INT, int32_t>(value, false);
+
+    TExpr t_expr;
+    t_expr.nodes.emplace_back(pred_node);
+    t_expr.nodes.emplace_back(divide_node);
+    t_expr.nodes.emplace_back(dividend_literal);
+    t_expr.nodes.emplace_back(int_col_ref);
+    t_expr.nodes.emplace_back(int_literal);
+
+    tExprs->emplace_back(t_expr);
+}
+
+void ParquetUTBase::append_bigint_divide_conjunct(TExprOpcode::type opcode, SlotId slot_id, int64_t dividend,
+                                                  int64_t value, std::vector<TExpr>* tExprs) {
+    TExprNode pred_node = ExprsTestHelper::create_binary_pred_node(TPrimitiveType::BIGINT, opcode);
+    TExprNode divide_node;
+    divide_node.node_type = TExprNodeType::ARITHMETIC_EXPR;
+    divide_node.num_children = 2;
+    divide_node.__set_opcode(TExprOpcode::DIVIDE);
+    divide_node.type = ExprsTestHelper::BigIntTTypeDesc;
+    divide_node.__set_is_nullable(true);
+    TExprNode dividend_literal = ExprsTestHelper::create_literal<TYPE_BIGINT, int64_t>(dividend, false);
+    TExprNode int_col_ref = ExprsTestHelper::create_slot_expr_node_t<TYPE_BIGINT>(0, slot_id, true);
+    TExprNode int_literal = ExprsTestHelper::create_literal<TYPE_BIGINT, int64_t>(value, false);
+
+    TExpr t_expr;
+    t_expr.nodes.emplace_back(pred_node);
+    t_expr.nodes.emplace_back(divide_node);
+    t_expr.nodes.emplace_back(dividend_literal);
+    t_expr.nodes.emplace_back(int_col_ref);
+    t_expr.nodes.emplace_back(int_literal);
+
+    tExprs->emplace_back(t_expr);
+}
+
 void ParquetUTBase::append_datetime_conjunct(TExprOpcode::type opcode, SlotId slot_id, const std::string& value,
                                              std::vector<TExpr>* tExprs) {
     TExprNode pred_node = ExprsTestHelper::create_binary_pred_node(TPrimitiveType::DATETIME, opcode);

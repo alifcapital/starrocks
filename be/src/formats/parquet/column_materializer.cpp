@@ -17,8 +17,11 @@
 #include <fmt/format.h>
 
 #include <algorithm>
+#include <stdexcept>
+#include <vector>
 
 #include "column/chunk.h"
+#include "column/column_helper.h"
 #include "common/config.h"
 #include "exec/exec_node.h"
 #include "exprs/expr.h"
@@ -29,6 +32,78 @@
 #include "util/defer_op.h"
 
 namespace starrocks::parquet {
+
+namespace {
+
+// ANDs the boolean result of a conjunct, which was evaluated on the rows listed in `rows`, into
+// `filter`, with NULL as false as in ExecNode::eval_conjuncts_into_filter(). We expect `filter` to be 1
+// at every row of `rows`, so only a row that the conjunct rejects changes it. The rejected rows are also
+// removed from `rows`, so the next conjunct sees only the rows that are still kept.
+Status and_selected_result_into_filter(const ColumnPtr& result, std::vector<uint32_t>* rows, Filter* filter) {
+    const size_t num_rows = rows->size();
+    if (!result->is_constant() && result->size() != num_rows) {
+        return Status::InternalError(
+                fmt::format("conjunct returned {} rows for {} selected rows", result->size(), num_rows));
+    }
+    const size_t true_count = ColumnHelper::count_true_with_notnull(result);
+    if (true_count == result->size()) {
+        return Status::OK();
+    }
+    if (true_count == 0) {
+        for (uint32_t row : *rows) {
+            (*filter)[row] = 0;
+        }
+        rows->clear();
+        return Status::OK();
+    }
+
+    // The result is not constant here, so it has one value per row of `rows`.
+    Filter pass(num_rows, 1);
+    ColumnHelper::merge_two_filters(result, &pass);
+    uint32_t* row_ids = rows->data();
+    size_t kept = 0;
+    for (size_t i = 0; i < num_rows; ++i) {
+        const uint8_t keep = pass[i] != 0;
+        (*filter)[row_ids[i]] = keep;
+        row_ids[kept] = row_ids[i];
+        kept += keep;
+    }
+    rows->resize(kept);
+    return Status::OK();
+}
+
+// Evaluates the conjuncts of one column on the rows that `filter` keeps and clears in `filter` the rows
+// that a conjunct rejects. `filter` has one byte per row of `chunk`. A conjunct sees the rows that the
+// conjuncts before it kept. Returns the number of rows that are still kept.
+StatusOr<size_t> eval_conjuncts_on_kept_rows(const std::vector<ExprContext*>& ctxs, Chunk* chunk, Filter* filter) {
+    // Every position is written and only the kept ones are counted, so the loop has no branch.
+    std::vector<uint32_t> rows(filter->size());
+    size_t num_rows = 0;
+    for (uint32_t i = 0; i < filter->size(); ++i) {
+        rows[num_rows] = i;
+        num_rows += (*filter)[i] != 0;
+    }
+    rows.resize(num_rows);
+
+    for (auto* ctx : ctxs) {
+        if (rows.empty()) {
+            return 0;
+        }
+        auto evaluate = [&]() -> StatusOr<ColumnPtr> {
+            // Same error conversion as ExprContext::evaluate().
+            try {
+                return ctx->root()->evaluate_selected(ctx, chunk, rows);
+            } catch (std::runtime_error& e) {
+                return Status::RuntimeError(fmt::format("Expr evaluate meet error: {}", e.what()));
+            }
+        };
+        ASSIGN_OR_RETURN(ColumnPtr result, evaluate());
+        RETURN_IF_ERROR(and_selected_result_into_filter(result, &rows, filter));
+    }
+    return rows.size();
+}
+
+} // namespace
 
 ColumnMaterializer::ColumnMaterializer(const GroupReaderParam& param, ColumnReaderMap* column_readers)
         : _param(param), _column_readers(column_readers) {
@@ -247,7 +322,32 @@ StatusOr<size_t> ColumnMaterializer::eval_slot_conjuncts(const std::vector<ExprC
     ColumnPtr& column = (*chunk)->get_column_by_slot_id(slot_id);
     temp_chunk->append_column(column, slot_id);
     temp_chunk->set_missing_column_provider((*chunk)->missing_column_provider());
-    return ExecNode::eval_conjuncts_into_filter(ctxs, temp_chunk.get(), filter);
+
+    // The column was read under the filter, so a row that the filter dropped holds a placeholder (NULL, or
+    // the default of the type) or the value of a deleted row, and not a value of the query. We fear that a
+    // conjunct raises an error on it (division by zero, an overflow, a UDF that gets a NULL it does not
+    // expect). We also fear the cost of the safe way: evaluating only the kept rows copies them into a
+    // sub-chunk for every conjunct, and with one dropped row that is nearly a copy of the whole column. We
+    // expect a conjunct to fail on a placeholder rarely, so we evaluate the whole column first, as for a
+    // filter that keeps every row. A dropped row is 0 in the filter, so its result does not change the
+    // filter. Only when this evaluation fails we evaluate the conjuncts again on the kept rows, where no
+    // placeholder is read, and return that result and its error.
+    const size_t kept_rows = SIMD::count_nonzero(*filter);
+    if (kept_rows == filter->size()) {
+        return ExecNode::eval_conjuncts_into_filter(ctxs, temp_chunk.get(), filter);
+    }
+    if (kept_rows == 0) {
+        return 0;
+    }
+    DCHECK_EQ(column->size(), filter->size());
+    // ExprContext::evaluate() turns an exception of the expression into the error status.
+    StatusOr<size_t> hit_count = ExecNode::eval_conjuncts_into_filter(ctxs, temp_chunk.get(), filter);
+    if (hit_count.ok()) {
+        return hit_count;
+    }
+    // The conjuncts that ran before the failing one have cleared only the rows that they reject on the
+    // kept rows, so the filter still holds every row that can pass.
+    return eval_conjuncts_on_kept_rows(ctxs, temp_chunk.get(), filter);
 }
 
 Status ColumnMaterializer::read_range(const std::vector<int>& read_columns, const Range<uint64_t>& range,

@@ -37,6 +37,12 @@ public:
     static void append_int_conjunct(TExprOpcode::type opcode, SlotId slot_id, int value, std::vector<TExpr>* tExprs);
     static void append_bigint_conjunct(TExprOpcode::type opcode, SlotId slot_id, int64_t value,
                                        std::vector<TExpr>* tExprs);
+    // dividend / slot <opcode> value. With error_for_division_by_zero set, evaluating it on a row where the
+    // slot is 0 fails with "Division by zero".
+    static void append_int_divide_conjunct(TExprOpcode::type opcode, SlotId slot_id, int dividend, int value,
+                                           std::vector<TExpr>* tExprs);
+    static void append_bigint_divide_conjunct(TExprOpcode::type opcode, SlotId slot_id, int64_t dividend, int64_t value,
+                                              std::vector<TExpr>* tExprs);
     static void append_datetime_conjunct(TExprOpcode::type opcode, SlotId slot_id, const std::string& value,
                                          std::vector<TExpr>* tExprs);
     static void append_decimal_conjunct(TExprOpcode::type opcode, SlotId slot_id, const std::string& value,

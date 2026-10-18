@@ -111,6 +111,9 @@ public:
     Status rewrite_dict_conjuncts_to_predicate(bool* is_group_filtered);
     Status filter_dict_column(SlotId slot_id, ColumnPtr& column, Filter* filter,
                               const std::vector<std::string>& sub_field_path, const size_t& layer);
+    // ANDs the conjuncts of one slot into filter and returns the number of rows left in it. The slot's column
+    // was read under filter, so the rows that filter has dropped hold placeholders. The conjuncts are
+    // evaluated on the whole column, and only if that fails, on the rows that filter keeps.
     StatusOr<size_t> eval_slot_conjuncts(const std::vector<ExprContext*>& ctxs, SlotId slot_id, ChunkPtr* chunk,
                                          Filter* filter);
 

@@ -1286,6 +1286,44 @@ TEST_F(FileReaderTest, TestGetNextWithSkipID) {
     ASSERT_TRUE(status.is_end_of_file());
 }
 
+// Covers: the conjunct of a column is not evaluated on a row that a deletion vector removes. Row 0 of the file
+//         holds c1 = 0, so 100 / c1 fails with "Division by zero" when the reader evaluates it on that row.
+TEST_F(FileReaderTest, TestConjunctSkipsRowsOfDeletionVector) {
+    TQueryOptions options;
+    options.__set_error_for_division_by_zero(true);
+    RuntimeState runtime_state(TUniqueId(), options, TQueryGlobals(), nullptr);
+
+    roaring64_bitmap_t* bitmap = roaring64_bitmap_create();
+    roaring64_bitmap_add(bitmap, 0);
+    SkipRowsContextPtr skip_rows_ctx = std::make_shared<SkipRowsContext>();
+    skip_rows_ctx->deletion_bitmap = std::make_shared<DeletionBitmap>(bitmap);
+    auto file = _create_file(_file2_path);
+    auto file_reader =
+            std::make_shared<FileReader>(config::vector_chunk_size, file.get(), std::filesystem::file_size(_file2_path),
+                                         _mock_datacache_options(), nullptr, skip_rows_ctx);
+
+    // 100 / c1 > 0
+    auto* ctx = _create_file2_base_context();
+    std::vector<TExpr> t_conjuncts;
+    ParquetUTBase::append_int_divide_conjunct(TExprOpcode::GT, 0, 100, 0, &t_conjuncts);
+    ParquetUTBase::create_conjunct_ctxs(&_pool, &runtime_state, &t_conjuncts, &ctx->conjunct_ctxs_by_slot[0]);
+    ASSERT_OK(file_reader->init(ctx));
+
+    // Rows 1..9 pass, and the row with c1 = NULL does not.
+    auto chunk = _create_chunk();
+    Status status = file_reader->get_next(&chunk);
+    ASSERT_TRUE(status.ok()) << status;
+    ASSERT_EQ(9, chunk->num_rows());
+    for (int i = 0; i < 9; ++i) {
+        EXPECT_EQ(i + 1, chunk->get_column_by_index(0)->get(i).get_int32()) << "row " << i;
+    }
+
+    status = file_reader->get_next(&chunk);
+    ASSERT_TRUE(status.is_end_of_file());
+
+    Expr::close(ctx->conjunct_ctxs_by_slot[0], &runtime_state);
+}
+
 TEST_F(FileReaderTest, TestGetNextPartition) {
     auto file_reader = _create_file_reader(_file1_path);
     // init
