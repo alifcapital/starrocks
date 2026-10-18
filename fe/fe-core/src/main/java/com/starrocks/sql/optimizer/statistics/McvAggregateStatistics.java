@@ -120,7 +120,14 @@ final class McvAggregateStatistics {
                 new MultiColumnCombinedStats(groups, groups, keys, head, nullCounts));
         for (int i = 0; i < keys.size(); i++) {
             ColumnRefOperator key = keys.get(i);
-            ColumnStatistic.Builder column = ColumnStatistic.buildFrom(output.getColumnStatistic(key)).setHistogram(null);
+            // The aggregate gives the only key of a GROUP BY the histogram of its distinct values, see
+            // StatisticsCalculator.distinctValueHistogram. The histogram of the input counts rows, not groups, and an
+            // output that still holds it, as the one TopNAggregationCost.groupDistribution builds, drops it.
+            ColumnStatistic.Builder column = ColumnStatistic.buildFrom(output.getColumnStatistic(key));
+            ColumnStatistic inputKey = input.getColumnStatistic(key);
+            if (inputKey != null && inputKey.getHistogram() == output.getColumnStatistic(key).getHistogram()) {
+                column.setHistogram(null);
+            }
             if (complete) {
                 column.setDistinctValuesCount(marginals.get(i).size() - (marginals.get(i).containsKey(null) ? 1 : 0));
                 column.setNullsFraction(marginals.get(i).getOrDefault(null, 0L) / (double) groups);

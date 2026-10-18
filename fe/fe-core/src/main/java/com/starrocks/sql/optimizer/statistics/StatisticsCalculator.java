@@ -1279,9 +1279,13 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
         for (ColumnRefOperator groupByColumn : groupBys) {
             ColumnStatistic groupByColumnStatics = inputStatistics.getColumnStatistic(groupByColumn);
             ColumnStatistic.Builder statsBuilder = buildFrom(groupByColumnStatics);
-            if (inputStatistics.getMultiColumnCombinedStats().entrySet().stream()
+            // Grouping changes frequencies: the input's histogram does not describe output groups.
+            if (groupBys.size() == 1) {
+                statsBuilder.setHistogram(groupByColumnStatics.getHistogram() == null ? null
+                        : distinctValueHistogram(groupByColumnStatics.getHistogram(),
+                                groupByColumnStatics.getDistinctValuesCount(), groupByColumn.getType()));
+            } else if (inputStatistics.getMultiColumnCombinedStats().entrySet().stream()
                     .anyMatch(entry -> entry.getKey().contains(groupByColumn) && entry.getValue().hasDistribution())) {
-                // Grouping changes frequencies: the input's histogram does not describe output groups.
                 statsBuilder.setHistogram(null);
             }
             if (groupByColumnStatics.getNullsFraction() == 0) {
@@ -1293,6 +1297,73 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
             groupStatisticsMap.put(groupByColumn, statsBuilder.build());
         }
         return estimateGroupCount(groupBys, groupStatisticsMap.keySet(), inputStatistics);
+    }
+
+    /**
+     * The histogram of the only key of a GROUP BY after it. We want a filter or a join on the key above the aggregate
+     * to count groups, and the values of the key keep their shape: a bucket holds as many groups as it held distinct
+     * values, and a most common value holds one. A histogram of strings or with a bucket of unknown range is dropped.
+     * <p>
+     * A bucket without its own count of distinct values, as the buckets a range filter leaves, holds at most its rows
+     * and, for integers and dates, at most the values of its range: the rows of the days are often skewed while every
+     * day is there. These buckets then share the distinct values outside the most common ones that the buckets with
+     * their own count leave, scaled down when they claim more.
+     * <p>
+     * With several keys a value of one key stands in as many groups as it has distinct combinations with the other
+     * keys: one, when the other keys repeat with it, up to its rows, when every row is a group. Its share of the
+     * groups lies between its share of the distinct values and its share of the rows, and the statistics do not tell
+     * where, so such a key keeps the histogram of its input, as before the GROUP BY.
+     */
+    static Histogram distinctValueHistogram(Histogram histogram, double distinctValues, Type type) {
+        if (histogram.hasStringValues() || histogram.hasUnknownRange() || !Double.isFinite(distinctValues)) {
+            return null;
+        }
+        Map<String, Long> mcv = new HashMap<>();
+        histogram.getMCV().keySet().forEach(value -> mcv.put(value, 1L));
+        double tailValues = Math.max(0, distinctValues - mcv.size());
+        List<Bucket> source = histogram.getBuckets();
+        long[] rows = new long[source.size()];
+        double[] values = new double[source.size()];
+        double known = 0;
+        double estimated = 0;
+        long previous = 0;
+        for (int i = 0; i < rows.length; i++) {
+            Bucket bucket = source.get(i);
+            rows[i] = bucket.getCount() - previous;
+            previous = bucket.getCount();
+            if (bucket.getDistinctCount().isPresent()) {
+                values[i] = bucket.getDistinctCount().get();
+                known += values[i];
+            } else {
+                values[i] = Math.min(rows[i], valuesInBucket(type, bucket));
+                estimated += values[i];
+            }
+        }
+        double room = Math.max(0, tailValues - known);
+        double scale = estimated > room ? room / estimated : 1;
+        List<Bucket> buckets = new ArrayList<>(source.size());
+        long cumulative = 0;
+        for (int i = 0; i < rows.length; i++) {
+            Bucket bucket = source.get(i);
+            double bucketValues = bucket.getDistinctCount().isPresent() ? values[i] : values[i] * scale;
+            long groups = Math.max(rows[i] > 0 ? 1 : 0, Math.min(rows[i], (long) Math.ceil(bucketValues)));
+            cumulative += groups;
+            buckets.add(new Bucket(bucket.getLower(), bucket.getUpper(), cumulative,
+                    bucket.getUpperRepeats() > 0 && groups > 0 ? 1L : 0L, groups));
+        }
+        return buckets.isEmpty() ? new Histogram(mcv) : new Histogram(buckets, mcv);
+    }
+
+    // The values a bucket can hold: the integers or the days of its range, unbounded for other types. A date is the
+    // seconds of its midnight in the zone of the FE, where a day across a change of the clock is 23 or 25 hours.
+    private static double valuesInBucket(Type type, Bucket bucket) {
+        if (type.isFixedPointType()) {
+            return Math.floor(bucket.getUpper()) - Math.ceil(bucket.getLower()) + 1;
+        }
+        if (type.isDate()) {
+            return Math.round((bucket.getUpper() - bucket.getLower()) / (24.0 * 3600)) + 1;
+        }
+        return Double.POSITIVE_INFINITY;
     }
 
     /**
