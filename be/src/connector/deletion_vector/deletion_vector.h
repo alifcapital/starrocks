@@ -33,6 +33,13 @@ public:
     Status deserialized_inline_dv(std::string& encoded_bitmap_data, const SkipRowsContextPtr& skip_rows_ctx);
     StatusOr<std::string> get_absolute_path(const std::string& table_location) const;
 
+    // fill_row_indexes() reads the size field of a deletion vector at `offset`, and then `size_in_bytes` bytes of the
+    // magic number and the bitmap. We want each of these reads to land in a shared buffer, so we plan this region and
+    // nothing else, cut into ranges of at most `max_range_size` bytes, the largest range that the stream keeps as one
+    // buffer.
+    static std::vector<io::SharedBufferedInputStream::IORange> build_io_ranges(int64_t offset, int64_t size_in_bytes,
+                                                                               int64_t max_range_size);
+
     const bool is_inline() {
         return _deletion_vector_descriptor->__isset.storageType && _deletion_vector_descriptor->storageType == "i";
     }

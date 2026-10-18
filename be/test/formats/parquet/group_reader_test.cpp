@@ -58,6 +58,7 @@
 #include "simd/simd.h"
 #include "storage/column_expr_predicate.h"
 #include "storage/runtime_filter_predicate.h"
+#include "storage/types.h"
 #include "testutil/exprs_test_helper.h"
 #include "testutil/scoped_updater.h"
 
@@ -1635,6 +1636,65 @@ TEST_F(GroupReaderTest, ReadRangePlannerShouldCoalesceByShareOfRowGroups) {
     // Without lazy ranges there is nothing to decide.
     counters.set(10, 0);
     EXPECT_TRUE(planner.should_coalesce_active_lazy(0));
+}
+
+namespace {
+
+// A reader that notes the flags that the planner hands it.
+class FlagsRecordingColumnReader : public MockIORangeColumnReader {
+public:
+    FlagsRecordingColumnReader() : MockIORangeColumnReader(std::vector<io::SharedBufferedInputStream::IORange>{}) {}
+
+    void collect_column_io_range(std::vector<io::SharedBufferedInputStream::IORange>* ranges, int64_t* end_offset,
+                                 ColumnIOTypeFlags types, bool active) override {
+        seen_types.push_back(types);
+        MockIORangeColumnReader::collect_column_io_range(ranges, end_offset, types, active);
+    }
+
+    std::vector<ColumnIOTypeFlags> seen_types;
+};
+
+} // namespace
+
+// The probe of the bloom filters visits the columns of the predicate tree only. We fear that the filter of another column is
+// planned and loaded with the ranges next to it for nothing, so the planner hands the flag of the bloom filter to a
+// column only when the tree has a predicate on it, and hands the other flags to every column.
+TEST_F(GroupReaderTest, ReadRangePlannerPlansABloomFilterOnlyForAColumnWithAPredicate) {
+    auto* param = _create_group_reader_param();
+    // a predicate on the column with the slot id 1
+    ColumnPredicate* predicate = new_column_eq_predicate(get_type_info(TYPE_BIGINT), 1, "5");
+    param->scanner_ctx->predicates.predicate_free_pool.emplace_back(predicate);
+    PredicateAndNode root;
+    root.add_child(PredicateColumnNode(predicate));
+    param->scanner_ctx->predicates.predicate_tree = PredicateTree::create(std::move(root));
+
+    std::unordered_map<int32_t, std::unique_ptr<ColumnReader>> readers;
+    auto without_predicate = std::make_unique<FlagsRecordingColumnReader>();
+    auto with_predicate = std::make_unique<FlagsRecordingColumnReader>();
+    auto* without_predicate_ptr = without_predicate.get();
+    auto* with_predicate_ptr = with_predicate.get();
+    readers.emplace(0, std::move(without_predicate));
+    readers.emplace(1, std::move(with_predicate));
+    ReadRangePlanner planner(*param, &readers);
+
+    std::vector<io::SharedBufferedInputStream::IORange> ranges;
+    int64_t end_offset = 0;
+    const ColumnIOTypeFlags kNone = ColumnIOType::INVALID;
+    const ColumnIOTypeFlags kPageIndex = ColumnIOType::PAGE_INDEX;
+    const ColumnIOTypeFlags kBloomFilter = ColumnIOType::BLOOM_FILTER;
+    planner.collect_ranges({0, 1}, true, &ranges, &end_offset, kPageIndex | kBloomFilter);
+    EXPECT_EQ((std::vector<ColumnIOTypeFlags>{kPageIndex}), without_predicate_ptr->seen_types);
+    EXPECT_EQ((std::vector<ColumnIOTypeFlags>{kPageIndex | kBloomFilter}), with_predicate_ptr->seen_types);
+
+    // the lazy columns are planned the same way
+    planner.pre_plan_lazy_ranges({0, 1}, &end_offset, kBloomFilter);
+    EXPECT_EQ(kNone, without_predicate_ptr->seen_types.back());
+    EXPECT_EQ(kBloomFilter, with_predicate_ptr->seen_types.back());
+
+    // a scan without a context has no tree, so no column has a predicate
+    param->scanner_ctx = nullptr;
+    planner.collect_ranges({1}, true, &ranges, &end_offset, kPageIndex | kBloomFilter);
+    EXPECT_EQ(kPageIndex, with_predicate_ptr->seen_types.back());
 }
 
 // Covers: GroupReader::prepare coalesces small lazy ranges and keeps big lazy ranges apart for the same share

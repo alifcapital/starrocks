@@ -145,7 +145,13 @@ private:
     // The bloom filter is optional: a caller that gets an error from it goes on without the filter.
     Status _init_column_bloom_filter(int64_t offset, int32_t length, BloomFilter& bloom_filter) const;
 
+    // Appends the region that _init_column_bloom_filter() reads for this column, when the probe of the column reads it.
+    void _collect_bloom_filter_io_range(std::vector<io::SharedBufferedInputStream::IORange>* ranges) const;
+
 protected:
+    // The type that the column probes its bloom filter with, or nullptr for a reader that never probes it.
+    virtual const TypeDescriptor* _bloom_filter_type() const { return nullptr; }
+
     // Reads the range with the stored reader. The stored reader can skip the pages that hold no selected row of a
     // read under a filter through the offset index, so the first read of the column where that can happen loads the
     // offset index.
@@ -281,8 +287,8 @@ public:
         return _row_group_bloom_filter(predicates, pred_relation, *_col_type, rg_first_row, rg_num_rows);
     }
 
-    void collect_column_io_range(std::vector<io::SharedBufferedInputStream::IORange>* ranges, int64_t* end_offset,
-                                 ColumnIOTypeFlags types, bool active) override;
+protected:
+    const TypeDescriptor* _bloom_filter_type() const override { return _col_type; }
 
 private:
     template <bool LAZY_DICT_DECODE, bool LAZY_CONVERT>
@@ -370,8 +376,8 @@ public:
                                        rg_first_row, rg_num_rows);
     }
 
-    void collect_column_io_range(std::vector<io::SharedBufferedInputStream::IORange>* ranges, int64_t* end_offset,
-                                 ColumnIOTypeFlags types, bool active) override;
+protected:
+    const TypeDescriptor* _bloom_filter_type() const override;
 
 private:
     Status _check_current_dict();
@@ -422,9 +428,6 @@ public:
         return _page_index_zone_map_filter(predicates, row_ranges, pred_relation,
                                            TypeDescriptor(LogicalType::TYPE_VARCHAR), rg_first_row, rg_num_rows);
     }
-
-    void collect_column_io_range(std::vector<io::SharedBufferedInputStream::IORange>* ranges, int64_t* end_offset,
-                                 ColumnIOTypeFlags types, bool active) override;
 
 private:
     const GlobalDictMap* _dict = nullptr;

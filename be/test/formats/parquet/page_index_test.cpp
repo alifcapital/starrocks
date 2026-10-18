@@ -16,6 +16,7 @@
 
 #include <filesystem>
 #include <limits>
+#include <map>
 #include <random>
 #include <tuple>
 #include <utility>
@@ -27,10 +28,12 @@
 #include "common/config.h"
 #include "exec/hdfs_scanner/hdfs_scanner.h"
 #include "exprs/binary_predicate.h"
+#include "formats/parquet/complex_column_reader.h"
 #include "formats/parquet/file_reader.h"
 #include "formats/parquet/group_reader.h"
 #include "formats/parquet/offset_index_skip_advisor.h"
 #include "formats/parquet/parquet_block_split_bloom_filter.h"
+#include "formats/parquet/parquet_test_util/recording_input_stream.h"
 #include "formats/parquet/parquet_test_util/util.h"
 #include "formats/parquet/parquet_ut_base.h"
 #include "formats/parquet/scalar_column_reader.h"
@@ -39,6 +42,9 @@
 #include "io/cache_input_stream.h"
 #include "io/shared_buffered_input_stream.h"
 #include "io/string_input_stream.h"
+#include "storage/column_predicate.h"
+#include "storage/types.h"
+#include "testutil/scoped_updater.h"
 #include "util/thrift_util.h"
 
 namespace starrocks::parquet {
@@ -802,6 +808,9 @@ public:
     // The column is nested in a list, so it has repetition levels.
     void set_max_rep_level(int16_t max_rep_level) { _field.level_info.max_rep_level = max_rep_level; }
 
+    // The column is stored with another physical type than INT32.
+    void set_physical_type(tparquet::Type::type physical_type) { _field.physical_type = physical_type; }
+
     // The feedback of the scan on the offset indexes, which must outlive the reader.
     void set_skip_advisor(OffsetIndexSkipAdvisor* advisor) { _opts.offset_index_skip_advisor = advisor; }
 
@@ -820,6 +829,8 @@ public:
     }
 
     ScalarColumnReader* reader() { return _reader.get(); }
+    // The reader is a child of another reader, and the rest of the env must outlive it.
+    std::unique_ptr<ScalarColumnReader> release_reader() { return std::move(_reader); }
     tparquet::ColumnChunk* chunk() { return &_chunk; }
 
 private:
@@ -2011,6 +2022,235 @@ TEST_F(BloomFilterRegionTest, RegionOutsideTheFile) {
         ParquetBlockSplitBloomFilter far_bloom_filter;
         ASSERT_FALSE(env.reader()->_init_column_bloom_filter(int64_t{1} << 32, size, far_bloom_filter).ok());
     }
+}
+
+// The probe of a bloom filter reads the region of the filter with one read. We expect the scan to plan that region, so
+// that the read lands in a shared buffer and is not a request of its own, and to plan nothing that the probe does not
+// read, because the stream loads a planned range together with the ranges next to it.
+class BloomFilterIoRangeTest : public BloomFilterRegionTest {
+protected:
+    using IORange = io::SharedBufferedInputStream::IORange;
+    static constexpr int64_t kFilterOffset = 100;
+    // The chunk is larger than any filter, so the adaptive check applies the filter.
+    static constexpr int64_t kChunkBytes = int64_t{1} << 32;
+
+    void SetUp() override {
+        _filter = make_bloom_filter(64, 64);
+        _file = std::string(kFilterOffset, '\0') + _filter + std::string(50, '\0');
+    }
+
+    int32_t filter_length() const { return static_cast<int32_t>(_filter.size()); }
+
+    // The footer of the chunk has the region of the filter.
+    void describe_filter(IndexEnv* env) {
+        env->set_row_group_rows(10);
+        auto& meta = env->chunk()->meta_data;
+        meta.total_compressed_size = kChunkBytes;
+        meta.__set_bloom_filter_offset(kFilterOffset);
+        meta.__set_bloom_filter_length(filter_length());
+    }
+
+    static std::vector<IORange> plan(ColumnReader* reader, ColumnIOTypeFlags types = ColumnIOType::BLOOM_FILTER,
+                                     bool active = true) {
+        std::vector<IORange> ranges;
+        int64_t end_offset = 0;
+        reader->collect_column_io_range(&ranges, &end_offset, types, active);
+        return ranges;
+    }
+
+    // The ranges that the probe of the column is going to read, as pairs of offset and size.
+    static std::vector<std::pair<int64_t, int64_t>> planned(ColumnReader* reader,
+                                                            ColumnIOTypeFlags types = ColumnIOType::BLOOM_FILTER) {
+        std::vector<std::pair<int64_t, int64_t>> result;
+        for (const auto& range : plan(reader, types)) {
+            result.emplace_back(range.offset, range.size);
+        }
+        return result;
+    }
+
+    std::string _filter;
+    std::string _file;
+};
+
+TEST_F(BloomFilterIoRangeTest, PlannedFilterIsReadFromASharedBuffer) {
+    // without the plan the read of the filter is a request of its own
+    {
+        auto recording = std::make_shared<RecordingInputStream>(_file);
+        auto stream = std::make_shared<io::SharedBufferedInputStream>(recording, "string-file", _file.size());
+        IndexEnv env(stream, _file.size());
+        describe_filter(&env);
+        ParquetBlockSplitBloomFilter bloom_filter;
+        ASSERT_TRUE(env.reader()->_init_column_bloom_filter(kFilterOffset, filter_length(), bloom_filter).ok());
+        ASSERT_EQ(1, stream->direct_io_count());
+        ASSERT_EQ(0, stream->shared_io_count());
+    }
+
+    auto recording = std::make_shared<RecordingInputStream>(_file);
+    auto stream = std::make_shared<io::SharedBufferedInputStream>(recording, "string-file", _file.size());
+    IndexEnv env(stream, _file.size());
+    describe_filter(&env);
+
+    // the plan is the region that the read takes
+    const std::vector<IORange> ranges = plan(env.reader());
+    ASSERT_EQ(1U, ranges.size());
+    ASSERT_EQ(kFilterOffset, ranges[0].offset);
+    ASSERT_EQ(filter_length(), ranges[0].size);
+    ASSERT_TRUE(stream->set_io_ranges(ranges).ok());
+
+    ParquetBlockSplitBloomFilter bloom_filter;
+    ASSERT_TRUE(env.reader()->_init_column_bloom_filter(kFilterOffset, filter_length(), bloom_filter).ok());
+    ASSERT_EQ(1, stream->shared_io_count());
+    ASSERT_EQ(0, stream->direct_io_count());
+    // the file is read once, and only for the region of the filter
+    ASSERT_EQ((std::vector<std::pair<int64_t, int64_t>>{{kFilterOffset, kFilterOffset + filter_length()}}),
+              recording->ranges());
+}
+
+// The probe of a column goes through row_group_bloom_filter(), which decides if the filter is read at all. A filter that
+// the probe reads is in the plan.
+TEST_F(BloomFilterIoRangeTest, FilterThatTheProbeReadsIsPlanned) {
+    auto recording = std::make_shared<RecordingInputStream>(_file);
+    auto stream = std::make_shared<io::SharedBufferedInputStream>(recording, "string-file", _file.size());
+    IndexEnv env(stream, _file.size());
+    describe_filter(&env);
+    ASSERT_TRUE(stream->set_io_ranges(plan(env.reader())).ok());
+
+    // the filter is empty, so it proves that the value is not in the row group
+    std::unique_ptr<ColumnPredicate> predicate(new_column_eq_predicate(get_type_info(TYPE_INT), 0, "5"));
+    ASSERT_TRUE(predicate->support_original_bloom_filter());
+    auto filtered = env.reader()->row_group_bloom_filter({predicate.get()}, CompoundNodeType::AND, 0, 10);
+    ASSERT_TRUE(filtered.ok()) << filtered.status().to_string();
+    ASSERT_TRUE(filtered.value());
+    ASSERT_EQ(1, stream->shared_io_count());
+    ASSERT_EQ(0, stream->direct_io_count());
+}
+
+TEST_F(BloomFilterIoRangeTest, FilterThatTheProbeDoesNotReadIsNotPlanned) {
+    // the plan of a column that reads its filter
+    {
+        IndexEnv env(_file);
+        describe_filter(&env);
+        ASSERT_EQ((std::vector<std::pair<int64_t, int64_t>>{{kFilterOffset, filter_length()}}), planned(env.reader()));
+    }
+    // the other flags do not plan it
+    {
+        IndexEnv env(_file);
+        describe_filter(&env);
+        ASSERT_TRUE(planned(env.reader(), ColumnIOType::INVALID).empty());
+        ASSERT_TRUE(planned(env.reader(), ColumnIOType::PAGE_INDEX | ColumnIOType::OFFSET_INDEX).empty());
+    }
+    // the chunk has no filter
+    {
+        IndexEnv env(_file);
+        env.set_row_group_rows(10);
+        env.chunk()->meta_data.total_compressed_size = kChunkBytes;
+        ASSERT_TRUE(planned(env.reader()).empty());
+    }
+    // The footer has no length of the filter, or an empty one: the reader reads the header, and then a bitset of a
+    // size that only the header tells, so there is no region to plan.
+    {
+        IndexEnv env(_file);
+        env.set_row_group_rows(10);
+        env.chunk()->meta_data.total_compressed_size = kChunkBytes;
+        env.chunk()->meta_data.__set_bloom_filter_offset(kFilterOffset);
+        ASSERT_TRUE(planned(env.reader()).empty());
+        env.chunk()->meta_data.__set_bloom_filter_length(0);
+        ASSERT_TRUE(planned(env.reader()).empty());
+    }
+    // a region that the reader refuses: before the file, negative, behind the end of the file, larger than a filter
+    for (const auto& [offset, length] : std::vector<std::pair<int64_t, int32_t>>{
+                 {-1, 64},
+                 {kFilterOffset, -5},
+                 {static_cast<int64_t>(_file.size()), 64},
+                 {kFilterOffset, static_cast<int32_t>(_file.size())},
+                 {kFilterOffset, static_cast<int32_t>(BloomFilter::MAXIMUM_BYTES) + 2048}}) {
+        IndexEnv env(_file);
+        describe_filter(&env);
+        env.chunk()->meta_data.__set_bloom_filter_offset(offset);
+        env.chunk()->meta_data.__set_bloom_filter_length(length);
+        ASSERT_TRUE(planned(env.reader()).empty()) << offset << " " << length;
+    }
+    // the same limit as the reader has, when the size of the file is not known
+    {
+        IndexEnv env(_file, /*known_file_size=*/false);
+        describe_filter(&env);
+        env.chunk()->meta_data.__set_bloom_filter_length(static_cast<int32_t>(BloomFilter::MAXIMUM_BYTES) + 1024);
+        ASSERT_EQ(1U, planned(env.reader()).size());
+        env.chunk()->meta_data.__set_bloom_filter_length(static_cast<int32_t>(BloomFilter::MAXIMUM_BYTES) + 1025);
+        ASSERT_TRUE(planned(env.reader()).empty());
+    }
+    // the type of the column cannot use the filter, so the probe returns before it reads it
+    {
+        IndexEnv env(_file);
+        describe_filter(&env);
+        env.set_physical_type(tparquet::Type::INT64);
+        ASSERT_TRUE(planned(env.reader()).empty());
+    }
+    // the adaptive check skips a filter that is larger than the bytes of the rows that the probe keeps
+    {
+        IndexEnv env(_file);
+        describe_filter(&env);
+        env.chunk()->meta_data.total_compressed_size = filter_length();
+        ASSERT_TRUE(planned(env.reader()).empty());
+        env.chunk()->meta_data.total_compressed_size = filter_length() + 1000;
+        ASSERT_EQ(1U, planned(env.reader()).size());
+    }
+    {
+        SCOPED_UPDATE(bool, config::parquet_reader_enable_adpative_bloom_filter, false);
+        IndexEnv env(_file);
+        describe_filter(&env);
+        ASSERT_TRUE(planned(env.reader()).empty());
+    }
+}
+
+// The low cardinality reader probes a filter as a string column does. The reader of strings that are not dictionary
+// encoded has no probe, so it plans no filter.
+TEST_F(BloomFilterIoRangeTest, DictionaryReadersPlanTheFilterOfTheirProbe) {
+    IndexEnv env(_file);
+    describe_filter(&env);
+    env.set_physical_type(tparquet::Type::BYTE_ARRAY);
+
+    LowCardColumnReader low_card(*env.reader(), nullptr, 0);
+    LowRowsColumnReader low_rows(*env.reader(), nullptr, 0);
+    // the INT column does not use the filter of a string column, and the low cardinality reader reads a string column
+    ASSERT_TRUE(planned(env.reader()).empty());
+    ASSERT_EQ((std::vector<std::pair<int64_t, int64_t>>{{kFilterOffset, filter_length()}}), planned(&low_card));
+    ASSERT_TRUE(planned(&low_rows).empty());
+}
+
+// A struct reader passes the flag to its subfields, because the probe reads the filter of a subfield. A list, a map
+// and a variant have no probe of their children, so they plan no filter, and the other flags still pass.
+TEST_F(BloomFilterIoRangeTest, ComplexReadersPassTheFlagToTheChildrenThatTheProbeReads) {
+    auto make_child = [&]() {
+        auto env = std::make_unique<IndexEnv>(_file);
+        describe_filter(env.get());
+        return env;
+    };
+    const std::pair<int64_t, int64_t> filter_range{kFilterOffset, filter_length()};
+    const std::pair<int64_t, int64_t> pages_range{0, kChunkBytes};
+    ParquetField parent;
+    const ColumnIOTypeFlags types = ColumnIOType::PAGES | ColumnIOType::BLOOM_FILTER;
+
+    auto struct_child = make_child();
+    std::map<std::string, ColumnReaderPtr> children;
+    children.emplace("a", struct_child->release_reader());
+    StructColumnReader struct_reader(&parent, std::move(children));
+    ASSERT_EQ((std::vector<std::pair<int64_t, int64_t>>{pages_range, filter_range}), planned(&struct_reader, types));
+
+    auto list_child = make_child();
+    ListColumnReader list_reader(&parent, list_child->release_reader());
+    ASSERT_EQ((std::vector<std::pair<int64_t, int64_t>>{pages_range}), planned(&list_reader, types));
+
+    auto key_child = make_child();
+    auto value_child = make_child();
+    MapColumnReader map_reader(&parent, key_child->release_reader(), value_child->release_reader());
+    ASSERT_EQ((std::vector<std::pair<int64_t, int64_t>>{pages_range, pages_range}), planned(&map_reader, types));
+
+    auto metadata_child = make_child();
+    auto variant_value_child = make_child();
+    VariantColumnReader variant_reader(&parent, metadata_child->release_reader(),
+                                       variant_value_child->release_reader());
+    ASSERT_EQ((std::vector<std::pair<int64_t, int64_t>>{pages_range, pages_range}), planned(&variant_reader, types));
 }
 
 namespace {

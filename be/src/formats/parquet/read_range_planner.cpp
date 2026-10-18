@@ -18,6 +18,7 @@
 #include <atomic>
 
 #include "common/config.h"
+#include "exec/hdfs_scanner/hdfs_scanner.h"
 #include "formats/parquet/column_reader.h"
 #include "formats/parquet/group_reader.h"
 
@@ -28,9 +29,19 @@ ReadRangePlanner::ReadRangePlanner(const GroupReaderParam& param, ColumnReaderMa
 
 void ReadRangePlanner::collect_ranges(const std::vector<int>& column_indices, bool is_active, std::vector<IORange>* out,
                                       int64_t* end_offset, ColumnIOTypeFlags types) {
+    // The probe of the bloom filters visits the columns of the predicate tree only. We fear that a filter of another
+    // column is planned, never read, and loaded with the ranges next to it, so we plan the filter of a column only
+    // when the tree has a predicate on it.
+    const PredicateTree* predicate_tree =
+            _param.scanner_ctx != nullptr ? &_param.scanner_ctx->predicates.predicate_tree : nullptr;
     for (const auto& index : column_indices) {
         const auto& column = _param.read_cols[index];
-        (*_column_readers)[column.slot_id()]->collect_column_io_range(out, end_offset, types, is_active);
+        ColumnIOTypeFlags column_types = types;
+        if ((types & ColumnIOType::BLOOM_FILTER) != 0 &&
+            (predicate_tree == nullptr || !predicate_tree->contains_column(static_cast<ColumnId>(column.slot_id())))) {
+            column_types &= ~ColumnIOType::BLOOM_FILTER;
+        }
+        (*_column_readers)[column.slot_id()]->collect_column_io_range(out, end_offset, column_types, is_active);
     }
 }
 

@@ -20,6 +20,8 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <random>
 #include <set>
@@ -47,6 +49,7 @@
 #include "formats/parquet/page_index_read_advisor.h"
 #include "formats/parquet/page_reader.h"
 #include "formats/parquet/parquet_block_split_bloom_filter.h"
+#include "formats/parquet/parquet_test_util/recording_input_stream.h"
 #include "formats/parquet/parquet_test_util/util.h"
 #include "formats/parquet/parquet_ut_base.h"
 #include "formats/parquet/predicate_filter_evaluator.h"
@@ -3254,6 +3257,53 @@ TEST_F(FileReaderTest, bloom_filter_or_branch_without_verdict) {
     EXPECT_EQ(row_groups_after_filter({{{Op::EQ, "v00001"}}, {{Op::EQ, "v00002"}}}), 1);
     // (s = 'v00001') OR (s = 'v00003' AND s != 'zz'): both branches are proven empty.
     EXPECT_EQ(row_groups_after_filter({{{Op::EQ, "v00001"}}, {{Op::EQ, "v00003"}, {Op::NE, "zz"}}}), 0);
+}
+
+// The file reader plans the bloom filter of a column that has a predicate, so the filter is read with one request
+// through the shared buffer, and not with a request of its own.
+TEST_F(FileReaderTest, bloom_filter_is_read_through_the_planned_buffer) {
+    const std::string file = "./be/test/formats/parquet/test_data/bloom_filter_or_branches.parquet";
+    Utils::SlotDesc slot_descs[] = {{"k", TYPE_INT_DESC}, {"s", TYPE_VARCHAR_DESC}, {""}};
+
+    auto* ctx = _create_scan_context(slot_descs, slot_descs, file);
+    // s = 'v00001', which the bloom filter proves absent
+    ColumnPredicate* predicate = new_column_eq_predicate(get_type_info(TYPE_VARCHAR), 1, "v00001");
+    ctx->predicates.predicate_free_pool.emplace_back(predicate);
+    PredicateAndNode root;
+    root.add_child(PredicateColumnNode(predicate));
+    ctx->predicates.predicate_tree = PredicateTree::create(std::move(root));
+
+    std::ifstream in(file, std::ios::binary);
+    std::string contents((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    ASSERT_FALSE(contents.empty());
+    auto recording = std::make_shared<RecordingInputStream>(contents);
+    auto sb_stream = std::make_shared<io::SharedBufferedInputStream>(recording, file, contents.size());
+    RandomAccessFile random_access_file(sb_stream, file);
+    FileReader file_reader(config::vector_chunk_size, &random_access_file, contents.size(), DataCacheOptions(),
+                           sb_stream.get());
+    ASSERT_OK(file_reader.init(ctx));
+    EXPECT_EQ(file_reader.row_group_size(), 0);
+
+    const auto& meta = file_reader.get_file_metadata()->t_metadata().row_groups[0].columns[1].meta_data;
+    ASSERT_TRUE(meta.__isset.bloom_filter_offset);
+    ASSERT_TRUE(meta.__isset.bloom_filter_length);
+    const int64_t begin = meta.bloom_filter_offset;
+    const int64_t length = meta.bloom_filter_length;
+    // The read of the filter has loaded the shared buffer that the file reader planned for it. A read that is not planned
+    // is direct, and then the planned buffer stays unloaded.
+    auto shared_buffer = sb_stream->find_shared_buffer(begin, length);
+    ASSERT_TRUE(shared_buffer.ok()) << shared_buffer.status().to_string();
+    EXPECT_GT(shared_buffer.value()->buffer.capacity(), 0);
+    EXPECT_GT(sb_stream->shared_io_count(), 0);
+    // the buffer is read from the file once, and the read takes the whole filter
+    int reads_of_the_buffer = 0;
+    for (const auto& [read_begin, read_end] : recording->ranges()) {
+        if (read_begin == shared_buffer.value()->offset &&
+            read_end == shared_buffer.value()->offset + shared_buffer.value()->size) {
+            ++reads_of_the_buffer;
+        }
+    }
+    EXPECT_EQ(1, reads_of_the_buffer);
 }
 
 TEST_F(FileReaderTest, read_parquet_bloom_filter_by_parquet_hadoop) {

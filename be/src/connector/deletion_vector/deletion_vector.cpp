@@ -87,17 +87,26 @@ StatusOr<std::unique_ptr<RandomAccessFile>> DeletionVector::open_random_access_f
                                   .datacache_options = _ctx.datacache_options};
     ASSIGN_OR_RETURN(auto file,
                      HdfsScanner::create_random_access_file(shared_buffered_input_stream, cache_input_stream, options));
-    std::vector<io::SharedBufferedInputStream::IORange> io_ranges{};
-    int64_t offset = _deletion_vector_descriptor->offset;
-    int64_t length = _deletion_vector_descriptor->sizeInBytes + DV_SIZE_LENGTH;
-    while (offset < length) {
-        const int64_t remain_length = std::min(static_cast<int64_t>(config::io_coalesce_read_max_buffer_size), length);
-        io_ranges.emplace_back(offset, remain_length);
-        offset += remain_length;
-    }
+    // The stream sizes its buffers with its own coalesce options, so we cut the ranges by the same number.
+    const auto io_ranges =
+            build_io_ranges(_deletion_vector_descriptor->offset, _deletion_vector_descriptor->sizeInBytes,
+                            shared_buffered_input_stream->coalesce_options().max_buffer_size);
 
     RETURN_IF_ERROR(shared_buffered_input_stream->set_io_ranges(io_ranges));
     return file;
+}
+
+std::vector<io::SharedBufferedInputStream::IORange> DeletionVector::build_io_ranges(int64_t offset,
+                                                                                    int64_t size_in_bytes,
+                                                                                    int64_t max_range_size) {
+    std::vector<io::SharedBufferedInputStream::IORange> io_ranges;
+    const int64_t end = offset + DV_SIZE_LENGTH + size_in_bytes;
+    // We fear that a limit that is not positive never advances the loop, so with such a limit the region is one range.
+    const int64_t step = max_range_size > 0 ? max_range_size : std::max<int64_t>(end - offset, 1);
+    for (int64_t begin = offset; begin < end; begin += step) {
+        io_ranges.emplace_back(begin, std::min(step, end - begin));
+    }
+    return io_ranges;
 }
 
 Status DeletionVector::deserialized_inline_dv(std::string& encoded_bitmap_data,

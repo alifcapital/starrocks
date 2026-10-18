@@ -44,6 +44,10 @@ static Status invalid_index(const std::string& message) {
     return Status::Corruption(message);
 }
 
+// A bloom filter is a header, then a bitset of at most BloomFilter::MAXIMUM_BYTES. The footer gives the
+// length of both when it knows it, and 0 when it does not.
+static constexpr int64_t kMaxBloomFilterRegionBytes = BloomFilter::MAXIMUM_BYTES + 1024;
+
 // FixedValueColumnReader
 Status FixedValueColumnReader::read_range(const Range<uint64_t>& range, const Filter* filter, ColumnPtr& dst) {
     Column* dst_col = dst->as_mutable_raw_ptr();
@@ -140,6 +144,48 @@ void RawColumnReader::collect_column_io_range(std::vector<io::SharedBufferedInpu
             ranges->emplace_back(r);
         }
     }
+    if ((types & ColumnIOType::BLOOM_FILTER) != 0) {
+        _collect_bloom_filter_io_range(ranges);
+    }
+}
+
+// We want the read of the filter in _init_column_bloom_filter() to land in a shared buffer, and to share a request with
+// the ranges next to it. We fear that the stream loads a filter that no probe reads: it joins the ranges that are close
+// to each other, so an unused filter next to a used range is loaded with it. So we plan the region only when the probe
+// of this column (_row_group_bloom_filter()) is going to read it:
+// - The column probes a filter, and its type can use the filter.
+// - The footer gives the length. Without it the reader reads the header, and then the bitset, whose size is in the
+//   header only. We cannot tell where the region ends, and a range of the header alone joins no other range, so we plan
+//   nothing.
+// - The region passes the check of the reader. We fear that a wrong region in the footer overlaps another range, which
+//   makes set_io_ranges() fail for the whole file, while the reader would only go on without the filter.
+// - The adaptive check does not skip the filter. It skips a filter that is larger than the bytes of the rows that the
+//   probe keeps. The probe never keeps more than the row group, so a filter that is skipped for the row group is
+//   skipped for any span.
+void RawColumnReader::_collect_bloom_filter_io_range(
+        std::vector<io::SharedBufferedInputStream::IORange>* ranges) const {
+    const TypeDescriptor* col_type = _bloom_filter_type();
+    const tparquet::ColumnChunk* chunk = get_chunk_metadata();
+    const ParquetField* field = get_column_parquet_field();
+    if (col_type == nullptr || chunk == nullptr || field == nullptr) {
+        return;
+    }
+    const tparquet::ColumnMetaData& meta = chunk->meta_data;
+    if (!meta.__isset.bloom_filter_offset || !meta.__isset.bloom_filter_length || meta.bloom_filter_length <= 0) {
+        return;
+    }
+    if (!check_type_can_apply_bloom_filter(*col_type, *field)) {
+        return;
+    }
+    const int64_t num_rows = _opts.row_group_meta != nullptr ? _opts.row_group_meta->num_rows : meta.num_values;
+    if (!adaptive_judge_if_apply_bloom_filter(num_rows).value_or(true)) {
+        return;
+    }
+    if (!_check_region(meta.bloom_filter_offset, meta.bloom_filter_length, kMaxBloomFilterRegionBytes, "bloom filter")
+                 .ok()) {
+        return;
+    }
+    ranges->emplace_back(meta.bloom_filter_offset, meta.bloom_filter_length);
 }
 
 Status RawColumnReader::_check_region(int64_t offset, int64_t length, int64_t max_length, const char* what) const {
@@ -736,12 +782,10 @@ StatusOr<bool> RawColumnReader::_page_index_zone_map_filter(const std::vector<co
 }
 
 Status RawColumnReader::_init_column_bloom_filter(int64_t offset, int32_t length, BloomFilter& bloom_filter) const {
-    // A bloom filter is a header, then a bitset of at most BloomFilter::MAXIMUM_BYTES. The footer gives the
-    // length of both when it knows it, and 0 when it does not.
-    constexpr int64_t kMaxRegionBytes = BloomFilter::MAXIMUM_BYTES + 1024;
-    RETURN_IF_ERROR(_check_region(offset, length, kMaxRegionBytes, "bloom filter"));
+    RETURN_IF_ERROR(_check_region(offset, length, kMaxBloomFilterRegionBytes, "bloom filter"));
     if (length == 0) {
-        RETURN_IF_ERROR(_check_region(offset, SBBF_HEADER_SIZE_ESTIMATE, kMaxRegionBytes, "bloom filter header"));
+        RETURN_IF_ERROR(
+                _check_region(offset, SBBF_HEADER_SIZE_ESTIMATE, kMaxBloomFilterRegionBytes, "bloom filter header"));
     }
 
     // Both reads below are reads of the bloom filter region.
@@ -1122,21 +1166,6 @@ Status ScalarColumnReader::finalize_lazy_state(ColumnPtr& col) {
     return Status::OK();
 }
 
-void ScalarColumnReader::collect_column_io_range(std::vector<io::SharedBufferedInputStream::IORange>* ranges,
-                                                 int64_t* end_offset, ColumnIOTypeFlags types, bool active) {
-    RawColumnReader::collect_column_io_range(ranges, end_offset, types, active);
-    const auto& column = *get_chunk_metadata();
-    if ((types & ColumnIOType::BLOOM_FILTER) != 0) {
-        if (column.meta_data.__isset.bloom_filter_offset && column.meta_data.__isset.bloom_filter_length && active) {
-            if (check_type_can_apply_bloom_filter(*_col_type, *get_column_parquet_field())) {
-                auto r = io::SharedBufferedInputStream::IORange(column.meta_data.bloom_filter_offset,
-                                                                column.meta_data.bloom_filter_length);
-                ranges->emplace_back(r);
-            }
-        }
-    }
-}
-
 // LowCardColumnReader
 
 Status LowCardColumnReader::read_range(const Range<uint64_t>& range, const Filter* filter, ColumnPtr& dst) {
@@ -1281,19 +1310,8 @@ Status LowCardColumnReader::_check_current_dict() {
     return Status::OK();
 }
 
-void LowCardColumnReader::collect_column_io_range(std::vector<io::SharedBufferedInputStream::IORange>* ranges,
-                                                  int64_t* end_offset, ColumnIOTypeFlags types, bool active) {
-    RawColumnReader::collect_column_io_range(ranges, end_offset, types, active);
-    const auto& column = *get_chunk_metadata();
-    if ((types & ColumnIOType::BLOOM_FILTER) != 0) {
-        if (column.meta_data.__isset.bloom_filter_offset && column.meta_data.__isset.bloom_filter_length && active) {
-            if (check_type_can_apply_bloom_filter(TypeDescriptor(TYPE_VARCHAR), *get_column_parquet_field())) {
-                auto r = io::SharedBufferedInputStream::IORange(column.meta_data.bloom_filter_offset,
-                                                                column.meta_data.bloom_filter_length);
-                ranges->emplace_back(r);
-            }
-        }
-    }
+const TypeDescriptor* LowCardColumnReader::_bloom_filter_type() const {
+    return &TYPE_VARCHAR_DESC;
 }
 
 // LowRowsColumnReader
@@ -1365,21 +1383,6 @@ Status LowRowsColumnReader::finalize_lazy_state(ColumnPtr& col) {
         col = std::move(saved);
     }
     return Status::OK();
-}
-
-void LowRowsColumnReader::collect_column_io_range(std::vector<io::SharedBufferedInputStream::IORange>* ranges,
-                                                  int64_t* end_offset, ColumnIOTypeFlags types, bool active) {
-    RawColumnReader::collect_column_io_range(ranges, end_offset, types, active);
-    const auto& column = *get_chunk_metadata();
-    if ((types & ColumnIOType::BLOOM_FILTER) != 0) {
-        if (column.meta_data.__isset.bloom_filter_offset && column.meta_data.__isset.bloom_filter_length && active) {
-            if (check_type_can_apply_bloom_filter(TypeDescriptor(TYPE_VARCHAR), *get_column_parquet_field())) {
-                auto r = io::SharedBufferedInputStream::IORange(column.meta_data.bloom_filter_offset,
-                                                                column.meta_data.bloom_filter_length);
-                ranges->emplace_back(r);
-            }
-        }
-    }
 }
 
 } // namespace starrocks::parquet

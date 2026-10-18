@@ -20,6 +20,13 @@
 
 namespace starrocks::parquet {
 
+// A bloom filter is probed on a scalar column and on a subfield of a struct only (StructColumnReader::
+// row_group_bloom_filter()). We fear that a list, a map or a variant plans the filters of its children, which no probe
+// reads, and that the stream loads them with the ranges next to them. So these readers do not pass the flag on.
+inline ColumnIOTypeFlags without_bloom_filter(ColumnIOTypeFlags types) {
+    return types & ~ColumnIOType::BLOOM_FILTER;
+}
+
 class ListColumnReader final : public ColumnReader {
 public:
     explicit ListColumnReader(const ParquetField* parquet_field, std::unique_ptr<ColumnReader>&& element_reader)
@@ -44,7 +51,7 @@ public:
 
     void collect_column_io_range(std::vector<io::SharedBufferedInputStream::IORange>* ranges, int64_t* end_offset,
                                  ColumnIOTypeFlags types, bool active) override {
-        _element_reader->collect_column_io_range(ranges, end_offset, types, active);
+        _element_reader->collect_column_io_range(ranges, end_offset, without_bloom_filter(types), active);
     }
 
     void collect_page_cache_io_chunks(io::SharedBufferedInputStream* stream,
@@ -111,10 +118,10 @@ public:
     void collect_column_io_range(std::vector<io::SharedBufferedInputStream::IORange>* ranges, int64_t* end_offset,
                                  ColumnIOTypeFlags types, bool active) override {
         if (_key_reader != nullptr) {
-            _key_reader->collect_column_io_range(ranges, end_offset, types, active);
+            _key_reader->collect_column_io_range(ranges, end_offset, without_bloom_filter(types), active);
         }
         if (_value_reader != nullptr) {
-            _value_reader->collect_column_io_range(ranges, end_offset, types, active);
+            _value_reader->collect_column_io_range(ranges, end_offset, without_bloom_filter(types), active);
         }
     }
 
@@ -327,10 +334,10 @@ public:
     void collect_column_io_range(std::vector<io::SharedBufferedInputStream::IORange>* ranges, int64_t* end_offset,
                                  ColumnIOTypeFlags types, bool active) override {
         if (_metadata_reader != nullptr) {
-            _metadata_reader->collect_column_io_range(ranges, end_offset, types, active);
+            _metadata_reader->collect_column_io_range(ranges, end_offset, without_bloom_filter(types), active);
         }
         if (_value_reader != nullptr) {
-            _value_reader->collect_column_io_range(ranges, end_offset, types, active);
+            _value_reader->collect_column_io_range(ranges, end_offset, without_bloom_filter(types), active);
         }
     }
 
