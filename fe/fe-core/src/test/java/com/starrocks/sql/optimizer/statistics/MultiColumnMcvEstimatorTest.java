@@ -493,12 +493,18 @@ public class MultiColumnMcvEstimatorTest {
         // The combined NDV of the whole group says nothing about the two read columns.
         Assertions.assertNull(statistics.getLargestSubsetMCStats(Set.of(STATUS, GATE)));
 
-        // Without component counts the independence share of a tuple needs the unread column's statistics.
+        // Without component counts the unread column takes the share of its value in the head rows, 0.7 for
+        // type = 0, in the independence share of a tuple.
         List<MultiColumnCombinedStats.McvEntry> mcv = List.of(
                 new MultiColumnCombinedStats.McvEntry(List.of("approved", "0", "0"), 500),
                 new MultiColumnCombinedStats.McvEntry(List.of("declined", "1", "0"), 200));
-        Assertions.assertTrue(MultiColumnMcvEstimator.estimate(Utils.extractConjuncts(predicate),
-                statisticsWithUnreadColumn(mcv)).isEmpty());
+        Statistics withoutCounts = statisticsWithUnreadColumn(mcv);
+        Assertions.assertTrue(MultiColumnMcvEstimator.estimate(Utils.extractConjuncts(predicate), withoutCounts)
+                .isPresent());
+        double simple = sel(eq(STATUS, ConstantOperator.createVarchar("approved")), withoutCounts)
+                * sel(eq(GATE, ConstantOperator.createInt(0)), withoutCounts);
+        Assertions.assertEquals(ROWS * (0.5 + clampTail(simple - simple * 0.7, 0.7)),
+                estimateRows(predicate, withoutCounts), 1e-6);
     }
 
     @Test

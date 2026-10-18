@@ -260,6 +260,7 @@ public class MultiColumnMcvEstimator {
         double mcvTotalSel = stats.getMcvDistribution().getTotalShare();
         double mcvBaseSel = 0;
         double minHeadShare = stats.getMcvDistribution().getMinShare();
+        Map<Integer, Map<String, Long>> headCounts = new HashMap<>();
         for (MultiColumnCombinedStats.McvEntry entry : stats.getMcv()) {
             double share = entry.getCount() / rowCount;
             Optional<Boolean> matches = matchesAll(entry, stats.getMcvDistribution(), columns, conjuncts, evaluator);
@@ -270,7 +271,7 @@ public class MultiColumnMcvEstimator {
                 continue;
             }
             mcvSel += share;
-            OptionalDouble base = baseShare(entry, columns, rowCount, statistics, valueSelectivityCache);
+            OptionalDouble base = baseShare(entry, stats, rowCount, statistics, valueSelectivityCache, headCounts);
             if (base.isEmpty()) {
                 return OptionalDouble.empty();
             }
@@ -352,10 +353,11 @@ public class MultiColumnMcvEstimator {
     /**
      * The share of the rows that independence attributes to a tuple: the product of the shares of its
      * components. Exact from the collected component counts; otherwise estimated from the single-column
-     * statistics, which needs every column of the group to be read by the query.
+     * statistics of the columns the query reads, and from the head itself for the columns it does not read.
      */
-    private static OptionalDouble baseShare(MultiColumnCombinedStats.McvEntry entry, List<ColumnRefOperator> columns,
-                                            double rowCount, Statistics statistics, Map<String, Double> cache) {
+    private static OptionalDouble baseShare(MultiColumnCombinedStats.McvEntry entry, MultiColumnCombinedStats stats,
+                                            double rowCount, Statistics statistics, Map<String, Double> cache,
+                                            Map<Integer, Map<String, Long>> headCounts) {
         double base = 1.0;
         if (entry.hasComponentCounts()) {
             for (Long count : entry.getComponentCounts()) {
@@ -363,14 +365,32 @@ public class MultiColumnMcvEstimator {
             }
             return OptionalDouble.of(base);
         }
+        List<ColumnRefOperator> columns = stats.getColumns();
         for (int i = 0; i < columns.size() && i < entry.getValues().size(); i++) {
             ColumnRefOperator column = columns.get(i);
             if (column == null) {
-                return OptionalDouble.empty();
+                // The conditional head that a filter keeps has no component counts, and the filter takes the
+                // marginals of the group's columns away from their statistics. We want the conditions estimated
+                // after the filter to use this head; without it they get the column statistics without the
+                // marginal, 1 / NDV for an equality. A column the query does not read has no statistics, so we take
+                // the rows of the value in the head. The tail estimate this share enters is clamped to the rows
+                // outside the head.
+                Map<String, Long> counts = headCounts.computeIfAbsent(i, position -> headComponentCounts(stats, position));
+                base *= counts.getOrDefault(entry.getValues().get(i), 0L) / rowCount;
+                continue;
             }
             base *= columnValueSelectivity(column, entry.getValues().get(i), statistics, cache);
         }
         return OptionalDouble.of(base);
+    }
+
+    // The rows of each value at a position of the head tuples, with a null key for NULL.
+    private static Map<String, Long> headComponentCounts(MultiColumnCombinedStats stats, int position) {
+        Map<String, Long> counts = new HashMap<>();
+        for (MultiColumnCombinedStats.McvEntry entry : stats.getMcv()) {
+            counts.merge(entry.getValues().get(position), entry.getCount(), Long::sum);
+        }
+        return counts;
     }
 
     // Equality on the columns themselves: one value tuple satisfies the conjunction.
