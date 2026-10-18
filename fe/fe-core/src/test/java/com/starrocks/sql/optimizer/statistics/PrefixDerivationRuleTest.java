@@ -162,17 +162,78 @@ public class PrefixDerivationRuleTest {
 
     @Test
     public void testShapesThatAreNotWritten() {
-        // More characters than x holds, a start after the first character, a pattern that is more than a prefix.
+        // More characters than x holds, a start after the first character, a % among the characters of the pattern or
+        // before them, characters after the %, and a pattern that does not end with %.
         Assertions.assertNull(written(like(left(9), "103%")));
         Assertions.assertNull(written(like(call("substr", C, ConstantOperator.createInt(2), ConstantOperator.createInt(3)),
                 "03%")));
-        Assertions.assertNull(written(like(left(5), "10_%")));
         Assertions.assertNull(written(like(left(5), "%103")));
         Assertions.assertNull(written(like(left(5), "10%3%")));
+        Assertions.assertNull(written(like(left(5), "10_%3")));
+        Assertions.assertNull(written(like(left(5), "10_")));
+        Assertions.assertNull(written(like(C, "%_")));
+        Assertions.assertNull(written(like(C, "1031%_")));
         // They are estimated as before.
-        for (ScalarOperator like : List.of(like(left(9), "103%"), like(left(5), "10_%"), like(left(5), "%103"))) {
+        for (ScalarOperator like : List.of(like(left(9), "103%"), like(left(5), "%103"), like(left(5), "10_%3"))) {
             Assertions.assertEquals(plainRows(like), rows(like), 1e-6, like.toString());
         }
+    }
+
+    @Test
+    public void testPatternOfFixedWidthStartAndOnePercentIsWrittenOverX() {
+        // The characters before the % are at most 8, the characters of x: the pattern is written as it stands.
+        for (String pattern : List.of("1031_%", "103_%", "_031%", "10_1_%", "1031234_%", "_%")) {
+            Assertions.assertEquals(like(X, pattern), written(like(C, pattern)), pattern);
+        }
+        // The same over the first characters of c, when the characters before the % are at most the length of the prefix.
+        Assertions.assertEquals(like(X, "1031_%"), written(like(left(5), "1031_%")));
+        Assertions.assertEquals(like(X, "10_%"), written(like(left(5), "10_%")));
+        Assertions.assertEquals(like(X, "10_%"), written(like(left(3), "10_%")));
+        Assertions.assertEquals(like(X, "1_%"), written(like(left(2), "1_%")));
+        Assertions.assertEquals(like(X, "_%"), written(like(left(1), "_%")));
+        // A pattern of 9 characters before the % is more than x holds.
+        Assertions.assertNull(written(like(C, "10312345_%")));
+        Assertions.assertNull(written(like(C, "_________%")));
+        // A string of 3 characters has no 5 characters to match: false on every value, as for the pattern of a prefix.
+        Assertions.assertEquals(ConstantOperator.createBoolean(false), written(like(left(3), "1031_%")));
+        Assertions.assertEquals(ConstantOperator.createBoolean(false), written(like(left(4), "103__%")));
+        Assertions.assertEquals(ConstantOperator.createBoolean(false), written(like(left(1), "1_%")));
+    }
+
+    @Test
+    public void testPatternOfFixedWidthStartIsEstimatedOverX() {
+        // 600 rows start with 103, 300 with 104; the strings of the head have 8 characters.
+        Assertions.assertEquals(600, rows(like(C, "1031_%")), 1e-6);
+        Assertions.assertEquals(600, rows(like(C, "103_%")), 1e-6);
+        Assertions.assertEquals(600, rows(like(C, "_031%")), 1e-6);
+        Assertions.assertEquals(600, rows(like(C, "1031234_%")), 1e-6);
+        Assertions.assertEquals(300, rows(like(C, "104_%")), 1e-6);
+        Assertions.assertEquals(900, rows(like(C, "10_%")), 1e-6);
+        Assertions.assertEquals(900, rows(like(C, "_%")), 1e-6);
+        // No value of the head matches: one row, the floor of an estimate.
+        Assertions.assertEquals(1, rows(like(C, "105_%")), 1e-6);
+        Assertions.assertEquals(1, rows(like(C, "1031236_%")), 1e-6);
+        // The first characters of c.
+        Assertions.assertEquals(600, rows(like(left(5), "1031_%")), 1e-6);
+        Assertions.assertEquals(900, rows(like(left(3), "10_%")), 1e-6);
+        Assertions.assertEquals(1, rows(like(left(3), "1031_%")), 1e-6);
+        // The negation leaves the NULL rows out: 1000 - 100 - 600.
+        Assertions.assertEquals(300, rows(not(like(C, "1031_%"))), 1e-6);
+        // A pattern with more characters than x holds is estimated as before.
+        Assertions.assertEquals(plainRows(like(C, "10312345_%")), rows(like(C, "10312345_%")), 1e-6);
+    }
+
+    @Test
+    public void testPatternOfFixedWidthStartIsNotAboveThePrefixItStartsWith() {
+        // Without the statistic on x the estimate of 'p_%' is the default share of the rows, which
+        // passes the 1 row of the prefix that no value of the head starts with; over x it is the rows of the head.
+        Assertions.assertEquals(250, plainRows(like(C, "1031_%")), 1e-6);
+        Assertions.assertEquals(250, plainRows(like(C, "105_%")), 1e-6);
+        for (String prefix : List.of("1031", "104", "103", "105")) {
+            Assertions.assertTrue(rows(like(C, prefix + "_%")) <= rows(like(C, prefix + "%")), prefix);
+        }
+        Assertions.assertEquals(1, rows(like(C, "105%")), 1e-6);
+        Assertions.assertEquals(1, rows(like(C, "105_%")), 1e-6);
     }
 
     private static ScalarOperator compare(BinaryType type, String value) {

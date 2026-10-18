@@ -58,11 +58,14 @@ import java.util.OptionalDouble;
  * <li>f(c) IN (v1, ..., vk) with k up to IN_AS_OR_LIMIT is the OR of f(c) = vi, for a function f whose comparison
  * with a constant reads bounds on its column, for a prefix of a column of dates and for the column of dates itself.
  * NOT IN stays: its estimate is the complement of the IN and belongs to the estimate of the IN.</li>
- * <li>c LIKE 'p%' on a column of dates is c >= 'p' AND c < successor(p), without the second bound when no string is
- * above every string that starts with p.</li>
  * <li>The ranges of one column of whole numbers or days in a conjunction that keep one value are the equality of the
  * column with it, when the column has statistics.</li>
  * </ul>
+ * We fear that a rewrite which serves one source of the estimate hides the condition from the others, so only the
+ * rewrites that every source reads without losing information are made here. c LIKE 'p%' on a column of dates is not
+ * among them: the statistics of the column read it as the interval c >= 'p' AND c < successor(p), while the statistics
+ * on expressions read the prefix, and a prefix longer than they hold would be read as a range of the prefix they hold.
+ * The estimate of the LIKE chooses the interval for the statistics of the column.
  * The rules apply until no rule applies, so the result of one is read by the next. An atom that the estimate skips is
  * left as it is, and a rewritten atom takes the flags of the atom it replaces. The same object comes back when
  * nothing is rewritten, so a predicate in the normal form is returned as it is, and the check for a condition to
@@ -195,11 +198,8 @@ final class EstimatePredicateNormalizer {
 
     private static boolean atomHasCandidate(ScalarOperator atom) {
         if (atom instanceof LikePredicateOperator like) {
-            if (like.isRegexp()) {
-                return like.getChild(1) instanceof ConstantOperator pattern && !pattern.isNull()
-                        && pattern.getType().isStringType() && pattern.getVarchar().startsWith("^");
-            }
-            return like.getChild(0) instanceof ColumnRefOperator column && isDateColumn(column);
+            return like.isRegexp() && like.getChild(1) instanceof ConstantOperator pattern && !pattern.isNull()
+                    && pattern.getType().isStringType() && pattern.getVarchar().startsWith("^");
         }
         if (atom instanceof BinaryPredicateOperator binary) {
             return binary.getBinaryType() == BinaryType.EQ && prefixCall(binary.getChild(0)) != null
@@ -235,7 +235,7 @@ final class EstimatePredicateNormalizer {
     }
 
     // A column of strings whose table declares the format of its dates with a day, and that is not a virtual column.
-    private static boolean isDateColumn(ColumnRefOperator column) {
+    static boolean isDateColumn(ColumnRefOperator column) {
         if (!column.getType().isStringType() || ExpressionStatisticsEstimator.isVirtualColumn(column)) {
             return false;
         }
@@ -330,7 +330,8 @@ final class EstimatePredicateNormalizer {
         return PrefixDerivationRule.escapeLike(prefix) + "%";
     }
 
-    private static ScalarOperator likeOfPrefix(ScalarOperator left, String prefix) {
+    /** left LIKE 'p%', the strings that start with the prefix. */
+    static ScalarOperator likeOfPrefix(ScalarOperator left, String prefix) {
         return new LikePredicateOperator(LikePredicateOperator.LikeType.LIKE, left,
                 ConstantOperator.createVarchar(likeOfPrefix(prefix)));
     }
@@ -438,7 +439,7 @@ final class EstimatePredicateNormalizer {
                 return null;
             }
             if (atom instanceof LikePredicateOperator like) {
-                return like.isRegexp() ? regexpAsLikes(like) : likeAsPeriod(like);
+                return like.isRegexp() ? regexpAsLikes(like) : null;
             }
             if (atom instanceof BinaryPredicateOperator binary) {
                 return prefixEqualityAsLike(binary);
@@ -467,29 +468,6 @@ final class EstimatePredicateNormalizer {
                 return null;
             }
             return likeOfPrefix(call.column(), prefix);
-        }
-
-        // column LIKE 'p%' keeps the strings from p up to the first string after every string that starts with p, so
-        // it is column >= p AND column < successor(p), without the upper bound when no string is above all those with
-        // the prefix. We want the rows of any prefix p of the strings of a column of dates, such as 2026-08-15,
-        // 2026-08-1 or 2026-0, and not only of a prefix that is a period: a prefix inside a period must not be
-        // estimated above the period that holds it. The two bounds are estimated as any comparisons of the column.
-        private static ScalarOperator likeAsPeriod(LikePredicateOperator like) {
-            if (!(like.getChild(0) instanceof ColumnRefOperator column) || !isDateColumn(column)) {
-                return null;
-            }
-            Optional<String> prefix = LikePatternEstimator.pattern(like)
-                    .flatMap(LikePatternEstimator.LikePattern::fixedPrefix);
-            if (prefix.isEmpty()) {
-                return null;
-            }
-            List<ScalarOperator> bounds = new ArrayList<>(2);
-            bounds.add(new BinaryPredicateOperator(BinaryType.GE, column, ConstantOperator.createVarchar(prefix.get())));
-            String end = ExpressionStatisticsEstimator.successor(prefix.get());
-            if (end != null) {
-                bounds.add(new BinaryPredicateOperator(BinaryType.LT, column, ConstantOperator.createVarchar(end)));
-            }
-            return Utils.compoundAnd(bounds);
         }
 
         private static ScalarOperator inAsEqualities(InPredicateOperator in) {

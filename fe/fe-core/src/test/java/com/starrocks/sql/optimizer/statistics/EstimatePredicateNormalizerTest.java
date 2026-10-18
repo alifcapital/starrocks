@@ -158,11 +158,6 @@ public class EstimatePredicateNormalizerTest {
                 : call(name, VarcharType.VARCHAR, column, ConstantOperator.createInt(length));
     }
 
-    // col >= from AND col < to
-    private static ScalarOperator interval(String from, String to) {
-        return Utils.compoundAnd(compare(BinaryType.GE, TEXT, text(from)), compare(BinaryType.LT, TEXT, text(to)));
-    }
-
     // days_add('1970-01-01', d), the day of the column as a DATETIME.
     private static ScalarOperator dayOfD() {
         return call("days_add", DateType.DATETIME, ConstantOperator.createDatetime(LocalDateTime.of(1970, 1, 1, 0, 0)), D);
@@ -181,9 +176,10 @@ public class EstimatePredicateNormalizerTest {
         // The left side is any expression, which the LIKE conditions keep.
         ScalarOperator left = prefix("left", NAME, 5);
         assertNormalizesTo(Utils.compoundOr(like(left, "ab%"), like(left, "cd%")), regexp(left, "^ab|^cd"));
-        // On a column of dates the LIKE of one prefix is its period.
-        assertNormalizesTo(interval("2026-08-15", "2026-08-16"), regexp(TEXT, "^2026-08-15"));
-        assertNormalizesTo(Utils.compoundOr(interval("2026-08-15", "2026-08-16"), interval("2026-09", "2026-0:")),
+        // On a column of dates the LIKE conditions of the prefixes stay LIKE conditions: the estimate of the LIKE chooses
+        // the interval of the times for the statistics of the column.
+        assertNormalizesTo(like(TEXT, "2026-08-15%"), regexp(TEXT, "^2026-08-15"));
+        assertNormalizesTo(Utils.compoundOr(like(TEXT, "2026-08-15%"), like(TEXT, "2026-09%")),
                 regexp(TEXT, "^2026-08-15|^2026-09"));
     }
 
@@ -248,17 +244,17 @@ public class EstimatePredicateNormalizerTest {
     }
 
     @Test
-    public void testPrefixEqualityOnAColumnOfDatesIsItsPeriod() {
+    public void testPrefixEqualityOnAColumnOfDatesIsItsLike() {
         for (String name : List.of("left", "strleft", "substr", "substring")) {
-            assertNormalizesTo(interval("2026-08-15", "2026-08-16"), eq(prefix(name, TEXT, 10), text("2026-08-15")));
-            assertNormalizesTo(interval("2026-08", "2026-09"), eq(prefix(name, TEXT, 7), text("2026-08")));
+            assertNormalizesTo(like(TEXT, "2026-08-15%"), eq(prefix(name, TEXT, 10), text("2026-08-15")));
+            assertNormalizesTo(like(TEXT, "2026-08%"), eq(prefix(name, TEXT, 7), text("2026-08")));
         }
-        // The prefix of the constant is escaped as a LIKE pattern, and read back whole.
-        assertNormalizesTo(interval("2026_%", "2026_&"), eq(prefix("left", TEXT, 6), text("2026_%")));
+        // The prefix of the constant is escaped as a LIKE pattern.
+        assertNormalizesTo(like(TEXT, "2026\\_\\%%"), eq(prefix("left", TEXT, 6), text("2026_%")));
     }
 
     @Test
-    public void testPrefixEqualityThatIsNotAPeriodStays() {
+    public void testPrefixEqualityThatIsNotAPrefixOfDatesStays() {
         // The constant is not as long as the prefix, the call is not a prefix from the first character, the column has
         // no format of dates, or the comparison is not an equality or has no constant.
         assertUnchanged(eq(prefix("left", TEXT, 10), text("2026-08")));
@@ -274,19 +270,13 @@ public class EstimatePredicateNormalizerTest {
     }
 
     @Test
-    public void testLikeOfAPrefixOnAColumnOfDatesIsItsPeriod() {
-        assertNormalizesTo(interval("2026-08-15", "2026-08-16"), like(TEXT, "2026-08-15%"));
-        assertNormalizesTo(interval("2026-08-1", "2026-08-2"), like(TEXT, "2026-08-1%"));
-        assertNormalizesTo(interval("2026-0", "2026-1"), like(TEXT, "2026-0%"));
-        // A pattern of escaped characters is read by its text.
-        assertNormalizesTo(interval("a%b", "a%c"), like(TEXT, "a\\%b%"));
-        // No string is above every string that starts with the last code point, so there is no upper bound.
-        String last = new String(Character.toChars(Character.MAX_CODE_POINT));
-        assertNormalizesTo(compare(BinaryType.GE, TEXT, text(last)), like(TEXT, last + "%"));
-        // More than a prefix, another column, no format, an expression: the LIKE stays.
-        assertUnchanged(like(TEXT, "2026-08-1_%"));
-        assertUnchanged(like(TEXT, "%2026"));
-        assertUnchanged(like(TEXT, "2026-08-15"));
+    public void testLikeOnAColumnOfDatesStays() {
+        // The interval of the times is chosen by the estimate of the LIKE for the statistics of the column, after the
+        // statistics on expressions have read the prefix.
+        for (String pattern : List.of("2026-08-15%", "2026-08-1%", "2026-0%", "a\\%b%", "2026-08-1_%", "%2026",
+                "2026-08-15")) {
+            assertUnchanged(like(TEXT, pattern));
+        }
         assertUnchanged(like(NAME, "2026-08-15%"));
         assertUnchanged(like(prefix("left", TEXT, 10), "2026-08-15%"));
         ScalarOperator like = like(TEXT, "2026-08-15%");
@@ -299,10 +289,10 @@ public class EstimatePredicateNormalizerTest {
         String second = "2026-08-16T00:00:00.000000Z";
         assertNormalizesTo(Utils.compoundOr(eq(TEXT, text(first)), eq(TEXT, text(second))),
                 in(false, TEXT, text(first), text(second)));
-        assertNormalizesTo(Utils.compoundOr(interval("2026-08-15", "2026-08-16"), interval("2026-08-16", "2026-08-17")),
+        assertNormalizesTo(Utils.compoundOr(like(TEXT, "2026-08-15%"), like(TEXT, "2026-08-16%")),
                 in(false, prefix("left", TEXT, 10), text("2026-08-15"), text("2026-08-16")));
         // A constant of another length stays an equality of the prefix.
-        assertNormalizesTo(Utils.compoundOr(interval("2026-08-15", "2026-08-16"),
+        assertNormalizesTo(Utils.compoundOr(like(TEXT, "2026-08-15%"),
                 eq(prefix("left", TEXT, 10), text("2026-08"))), in(false, prefix("left", TEXT, 10), text("2026-08-15"),
                 text("2026-08")));
         // A NULL and a repeated value are not values.
@@ -455,15 +445,14 @@ public class EstimatePredicateNormalizerTest {
             Assertions.assertTrue(operator.isPushdown(), operator.toString());
             Assertions.assertFalse(operator.isFromPredicateRangeDerive(), operator.toString());
         }
-        // The period of a prefix takes them through the two rules.
+        // The LIKE of a prefix equality takes them.
         ScalarOperator equality = eq(prefix("left", TEXT, 10), text("2026-08-15"));
         equality.setFromPredicateRangeDerive(true);
         equality.setCorrelated(true);
-        ScalarOperator period = normalize(equality);
-        for (ScalarOperator operator : List.of(period, period.getChild(0), period.getChild(1))) {
-            Assertions.assertTrue(operator.isFromPredicateRangeDerive(), operator.toString());
-            Assertions.assertTrue(operator.isCorrelated(), operator.toString());
-        }
+        ScalarOperator prefixLike = normalize(equality);
+        Assertions.assertEquals(like(TEXT, "2026-08-15%"), prefixLike);
+        Assertions.assertTrue(prefixLike.isFromPredicateRangeDerive());
+        Assertions.assertTrue(prefixLike.isCorrelated());
         // The equality of a point stands at the place of the first side and has its flags.
         ScalarOperator first = compare(BinaryType.GE, D, number(5));
         first.setFromPredicateRangeDerive(true);

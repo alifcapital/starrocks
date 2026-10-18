@@ -143,7 +143,13 @@ public class ExpressionStatisticsMatcherTest {
         Assertions.assertTrue(rewritten instanceof LikePredicateOperator);
         Assertions.assertEquals(X, rewritten.getChild(0));
         Assertions.assertNull(rewrite(like(C, "123456789%")));
-        Assertions.assertNull(rewrite(like(C, "1_3%")));
+        // Characters of fixed width and one % are written over x as they stand; a % among them, or no % at the end, is not.
+        rewritten = rewrite(like(C, "1_3%"));
+        Assertions.assertTrue(rewritten instanceof LikePredicateOperator);
+        Assertions.assertEquals(X, rewritten.getChild(0));
+        Assertions.assertEquals("1_3%", ((ConstantOperator) rewritten.getChild(1)).getVarchar());
+        Assertions.assertNull(rewrite(like(C, "1%3%")));
+        Assertions.assertNull(rewrite(like(C, "1_3")));
 
         rewritten = rewrite(eq(left(3), text("103")));
         Assertions.assertTrue(rewritten instanceof LikePredicateOperator);

@@ -135,20 +135,62 @@ public class InOverFunctionEstimateTest {
         double one = rows(eq(day(), date(1, 15)));
         Assertions.assertEquals(ROWS / 805, one, 1e-6);
         Assertions.assertEquals(one, rows(eq(D, ConstantOperator.createInt(20468))), 1e-6);
-        // The OR of two equalities takes the rows of the first and of the second. The first narrows the column to its
-        // day, so the second is outside of it, and the estimate of its rows among those of the first is the floor of
-        // one row.
+        // The OR of two equalities of one expression takes the rows of the first and of the second: no row of a day is
+        // among those of another.
         double or = rows(Utils.compoundOr(eq(day(), date(1, 15)), eq(day(), date(1, 16))));
-        Assertions.assertEquals(2 * one - 1, or, 1e-6);
+        Assertions.assertEquals(2 * one, or, 1e-6);
         Assertions.assertEquals(or, rows(in(false, day(), date(1, 15), date(1, 16))), 1e-6);
         // Three values, a repeated one, and a NULL that matches nothing.
         Assertions.assertEquals(or, rows(in(false, day(), date(1, 15), date(1, 16), date(1, 15))), 1e-6);
         Assertions.assertEquals(or, rows(in(false, day(), date(1, 15), date(1, 16),
                 ConstantOperator.createNull(DateType.DATETIME))), 1e-6);
         Assertions.assertEquals(one, rows(in(false, day(), date(1, 15))), 1e-6);
-        // The IN on the column itself is of the same size, within the one row that the OR takes off.
+        // The IN on the column itself is of the same size.
         Assertions.assertEquals(or, rows(in(false, D, ConstantOperator.createInt(20468), ConstantOperator.createInt(20469))),
-                1 + 1e-6);
+                1e-6);
+    }
+
+    @Test
+    public void testInOfDaysIsTheSumOfTheEstimatesOfEachDay() {
+        // The days of a column of whole numbers: each has the share of one value, and k days have k shares.
+        double one = rows(eq(D, ConstantOperator.createInt(20468)));
+        List<ScalarOperator> values = new ArrayList<>();
+        double previous = 0;
+        for (int k = 1; k <= 20; k++) {
+            values.add(ConstantOperator.createInt(20467 + k));
+            double rows = rows(in(false, D, values.toArray(new ScalarOperator[0])));
+            Assertions.assertEquals(k * one, rows, 1e-6, "k = " + k);
+            Assertions.assertTrue(rows > previous);
+            previous = rows;
+        }
+        // The days of a function of the column.
+        List<ScalarOperator> dates = new ArrayList<>();
+        previous = 0;
+        for (int k = 1; k <= 20; k++) {
+            dates.add(ConstantOperator.createDatetime(LocalDateTime.of(2026, 1, 14, 0, 0).plusDays(k)));
+            double rows = rows(in(false, day(), dates.toArray(new ScalarOperator[0])));
+            Assertions.assertEquals(k * one, rows, 1e-6, "k = " + k);
+            Assertions.assertTrue(rows > previous);
+            previous = rows;
+        }
+        // The days of the first ten characters of a column of strings: the sum of the estimates of the days, of the
+        // days of the table and of the days it does not hold.
+        ScalarOperator prefix = prefixOf("left", 10);
+        List<ScalarOperator> days = new ArrayList<>();
+        double sum = 0;
+        previous = 0;
+        for (int day = 1; day <= 25; day++) {
+            String text = String.format("2026-08-%02d", day);
+            sum += stringRows(eq(prefix, text(text)));
+            days.add(text(text));
+            double rows = stringRows(in(false, prefix, days.toArray(new ScalarOperator[0])));
+            Assertions.assertEquals(Math.min(sum, strings().getOutputRowCount()), rows, 1e-6, "day " + day);
+            Assertions.assertTrue(rows >= previous);
+            previous = rows;
+        }
+        // The days of the table are 2400 rows each and the hot one has 5000 more: 26600 rows, all of the table.
+        Assertions.assertEquals(strings().getOutputRowCount(), previous, 1e-6);
+        Assertions.assertEquals(2400 + 7400, stringRows(in(false, prefix, text("2026-08-14"), text("2026-08-15"))), 1e-6);
     }
 
     @Test
@@ -265,9 +307,10 @@ public class InOverFunctionEstimateTest {
         }
         values[50] = text("2026-09-30");
         for (int i = 0; i < 50; i++) {
-            values[i] = text(String.format("2026-%02d-%02d", 1 + i / 28 + 6, 1 + i % 28));
+            values[i] = text(String.format("2026-%02d-%02d", 1 + i / 28 + 5, 1 + i % 28));
         }
-        Assertions.assertTrue(stringRows(in(false, prefix, Arrays.copyOf(values, 50))) < strings().getOutputRowCount());
+        // 50 days of June and July, which the table does not hold: the one row an estimate takes for each.
+        Assertions.assertEquals(50, stringRows(in(false, prefix, Arrays.copyOf(values, 50))), 1e-6);
         Assertions.assertEquals(strings().getOutputRowCount() / 2, stringRows(in(false, prefix, values)), 1e-6);
     }
 

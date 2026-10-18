@@ -35,8 +35,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TimeZone;
 import java.util.function.Supplier;
 
@@ -137,6 +139,105 @@ public class StringDatePrefixEstimateTest {
     private static List<ScalarOperator> formsOf(String prefix) {
         return List.of(like(prefix + "%"), equalsPrefix("left", prefix), equalsPrefix("strleft", prefix),
                 equalsPrefix("substr", prefix), equalsPrefix("substring", prefix));
+    }
+
+    private static final ColumnRefOperator X = new ColumnRefOperator(-1, VarcharType.VARCHAR, "expr#1", true);
+
+    // The statistic on x = substr(created_at, 1, k) with a head that holds every row of the table.
+    private static ScanExpressionStatistics prefixStatistics(int k, Map<String, Long> head) {
+        List<MultiColumnCombinedStats.McvEntry> entries = new ArrayList<>();
+        head.forEach((value, count) -> entries.add(new MultiColumnCombinedStats.McvEntry(List.of(value), count,
+                List.of(count))));
+        ExternalMcvStatistics.Group group = new ExternalMcvStatistics.Group(List.of("x"), (long) ROWS, head.size(),
+                entries, List.of(), List.of(0L));
+        group.prepare(VarcharType.VARCHAR);
+        ColumnStatistic statistic = group.columnStatistic(VarcharType.VARCHAR, ColumnStatistic.unknown()).orElseThrow();
+        ScalarOperator canonical = ExpressionStatisticsCanonicalizer.canonicalize(
+                call("left", TEXT, ConstantOperator.createInt(k)));
+        return new ScanExpressionStatistics("t", List.of(new ScanExpressionStatistics.Entry(canonical,
+                ExpressionStatisticsCanonicalizer.keyOf(canonical), X, statistic)),
+                Map.of(Set.of(X), new MultiColumnCombinedStats(head.size(), (long) ROWS, List.of(X), entries,
+                        List.of(0L))));
+    }
+
+    private static double rowsWithX(ScalarOperator predicate, ScanExpressionStatistics expressions) {
+        return inScope(ISO, () -> PredicateStatisticsCalculator.statisticsCalculate(predicate, mobi(), true, expressions)
+                .getOutputRowCount());
+    }
+
+    @Test
+    public void testPrefixOfDatesIsReadByTheStatisticOnXAndByTheInterval() {
+        double rest = ROWS - 8_000_000;
+        // K = 10 and K = 12 hold the day: the LIKE and the equality of the prefix are the rows of the head that start
+        // with it, 5,000,000.
+        ScanExpressionStatistics ten = prefixStatistics(10, new LinkedHashMap<>(Map.of("2026-08-14", 3_000_000L,
+                "2026-08-15", 5_000_000L, "2026-09-20", (long) rest)));
+        ScanExpressionStatistics twelve = prefixStatistics(12, new LinkedHashMap<>(Map.of("2026-08-14T10", 3_000_000L,
+                "2026-08-15T06", 2_000_000L, "2026-08-15T18", 3_000_000L, "2026-09-20T09", (long) rest)));
+        for (ScanExpressionStatistics expressions : List.of(ten, twelve)) {
+            for (ScalarOperator form : formsOf("2026-08-15")) {
+                Assertions.assertEquals(5_000_000, rowsWithX(form, expressions), 1e-6, form.toString());
+            }
+        }
+        // K = 8 holds the month: the prefix of the day is longer than x, which cannot tell the day from the month, so the
+        // LIKE is estimated by the interval of the times, as without x, and not as the month of 8,000,000 rows.
+        ScanExpressionStatistics eight = prefixStatistics(8, new LinkedHashMap<>(Map.of("2026-08-", 8_000_000L,
+                "2026-09-", (long) rest)));
+        double day = rows(interval("2026-08-15T00:00:00.000000Z", "2026-08-16T00:00:00.000000Z"), mobi());
+        Assertions.assertNotEquals(8_000_000, day, 1.0);
+        for (ScalarOperator form : formsOf("2026-08-15")) {
+            Assertions.assertEquals(day, rowsWithX(form, eight), 1e-6, form.toString());
+            Assertions.assertEquals(day, rows(form, mobi()), 1e-6, form.toString());
+        }
+        // The month, which x holds, is the head that starts with it.
+        for (ScalarOperator form : formsOf("2026-08")) {
+            Assertions.assertEquals(8_000_000, rowsWithX(form, eight), 1e-6, form.toString());
+        }
+    }
+
+    @Test
+    public void testPatternOfAPrefixAndMoreIsNotAboveTheInterval() {
+        // 2026-08-1_% is the strings of 2026-08-1 with one character more, and the default of a pattern is a quarter of
+        // the rows: the estimate is the rows of 2026-08-1%.
+        double prefix = rows(like("2026-08-1%"), mobi());
+        Assertions.assertEquals(rows(interval("2026-08-1", "2026-08-2"), mobi()), prefix, 1e-6);
+        Assertions.assertTrue(prefix < ROWS / 100);
+        for (String pattern : List.of("2026-08-1_%", "2026-08-1%5", "2026-08-1_5%", "2026-08-1_T%", "2026-08-1")) {
+            Assertions.assertEquals(prefix, rows(like(pattern), mobi()), 1e-6, pattern);
+        }
+        // With a histogram of the days the pattern takes the rows of the head that match and a quarter of the tail,
+        // which is below the interval, and is kept.
+        Assertions.assertEquals(26_600, rows(like("2026-08-1%"), hourly()), 1e-6);
+        Assertions.assertEquals(5000 + 21_600 / 4.0, rows(like("2026-08-1_%"), hourly()), 1e-6);
+        // A pattern that starts with a wildcard has no literal, and a prefix is estimated by itself.
+        Assertions.assertEquals(ROWS / 4, rows(like("%2026-08-1%"), mobi()), 1e-6);
+        // The same on a column without the format of dates.
+        Assertions.assertEquals(ROWS / 4, rows(like("2026-08-1_%"), mobi(), null), 1e-6);
+    }
+
+    @Test
+    public void testOrOfIntervalsWithNoCommonPointIsTheSumOfTheirRows() {
+        ScalarOperator january = interval("2026-01", "2026-02");
+        ScalarOperator march = interval("2026-03", "2026-04");
+        double sum = rows(january, mobi()) + rows(march, mobi());
+        Assertions.assertEquals(sum, rows(Utils.compoundOr(january, march), mobi()), 1e-6);
+        Assertions.assertEquals(sum, rows(Utils.compoundOr(march, january), mobi()), 1e-6);
+        // The months of the LIKE and of the prefix of the column are the same intervals.
+        Assertions.assertEquals(sum, rows(Utils.compoundOr(like("2026-01%"), like("2026-03%")), mobi()), 1e-6);
+        Assertions.assertEquals(sum, rows(Utils.compoundOr(equalsPrefix("left", "2026-01"),
+                equalsPrefix("substr", "2026-03")), mobi()), 1e-6);
+        // Touching intervals have no common point either: [2026-01, 2026-02) and [2026-02, 2026-03).
+        double touching = rows(january, mobi()) + rows(interval("2026-02", "2026-03"), mobi());
+        Assertions.assertEquals(touching, rows(Utils.compoundOr(january, interval("2026-02", "2026-03")), mobi()), 1e-6);
+        // Intervals with a common month have the estimate of an OR: the rows of the first, and of the second less its
+        // rows among those of the first.
+        ScalarOperator first = interval("2026-01", "2026-03");
+        ScalarOperator second = interval("2026-02", "2026-04");
+        Statistics afterFirst = inScope(ISO, () -> PredicateStatisticsCalculator.statisticsCalculate(first, mobi()));
+        double inBoth = rows(second, afterFirst);
+        Assertions.assertEquals(rows(first, mobi()) + rows(second, mobi()) - inBoth,
+                rows(Utils.compoundOr(first, second), mobi()), 1e-6);
+        Assertions.assertTrue(inBoth > 0);
     }
 
     @Test

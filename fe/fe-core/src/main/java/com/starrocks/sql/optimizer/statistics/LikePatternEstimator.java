@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalDouble;
+import java.util.OptionalInt;
 
 /**
  * Estimates column LIKE 'pattern' with the MCV list of the column's histogram: the most common
@@ -119,6 +120,38 @@ public class LikePatternEstimator {
                 prefix.appendCodePoint(tokens[i]);
             }
             return Optional.of(prefix.toString());
+        }
+
+        /**
+         * The number of characters a string that matches starts with before the one % that ends the pattern, when the
+         * pattern is literal characters and _ and then that %: 'ab_%' is 3 and 'abc%' is 3. Empty for any other pattern.
+         * A string has these characters exactly when it is at least that long and its first characters match.
+         */
+        OptionalInt widthBeforeTrailingPercent() {
+            if (tokens.length == 0 || tokens[tokens.length - 1] != ANY_TEXT) {
+                return OptionalInt.empty();
+            }
+            for (int i = 0; i < tokens.length - 1; i++) {
+                if (tokens[i] == ANY_TEXT) {
+                    return OptionalInt.empty();
+                }
+            }
+            return OptionalInt.of(tokens.length - 1);
+        }
+
+        /**
+         * The text every string that matches starts with: the literal characters before the first wildcard, empty when
+         * the pattern starts with one.
+         */
+        String leadingLiteral() {
+            StringBuilder literal = new StringBuilder();
+            for (int token : tokens) {
+                if (token < 0) {
+                    break;
+                }
+                literal.appendCodePoint(token);
+            }
+            return literal.toString();
         }
 
         public boolean matches(String text) {

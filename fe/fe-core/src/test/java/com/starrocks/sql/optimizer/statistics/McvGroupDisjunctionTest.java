@@ -209,7 +209,12 @@ public class McvGroupDisjunctionTest {
      * estimated with the head that the conditions before it keep, and each of them can add the tail once.
      */
     private static void assertHeadRows(long head, double estimated, String form) {
-        Assertions.assertTrue(Math.abs(estimated - head) <= 2 * TAIL,
+        assertHeadRows(head, estimated, form, 2);
+    }
+
+    // The equalities of one column in an OR have no rows in common, so each of them adds the tail of its own.
+    private static void assertHeadRows(long head, double estimated, String form, int tails) {
+        Assertions.assertTrue(Math.abs(estimated - head) <= tails * TAIL + 1e-6,
                 form + ": estimated " + estimated + ", head rows " + head + ", tail " + TAIL);
     }
 
@@ -279,7 +284,7 @@ public class McvGroupDisjunctionTest {
         ScalarOperator in = new InPredicateOperator(false, SOURCE_TYPE, ConstantOperator.createInt(0),
                 ConstantOperator.createInt(2));
         long head = headRows(values -> isApproved(values) && (values.get(5).equals("0") || values.get(5).equals("2")));
-        assertHeadRows(head, rows(Utils.compoundAnd(approved(), or), statistics), "approved AND (s = 0 OR s = 2)");
+        assertHeadRows(head, rows(Utils.compoundAnd(approved(), or), statistics), "approved AND (s = 0 OR s = 2)", 3);
         assertHeadRows(head, rows(Utils.compoundAnd(approved(), in), statistics), "approved AND s IN (0, 2)");
     }
 

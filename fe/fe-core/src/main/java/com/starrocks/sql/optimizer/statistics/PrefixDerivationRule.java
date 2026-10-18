@@ -35,7 +35,7 @@ import com.starrocks.type.VarcharType;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
-import java.util.Optional;
+import java.util.OptionalInt;
 
 /**
  * Conditions on a prefix of a string column, written over the virtual column x of the statistic
@@ -146,23 +146,25 @@ final class PrefixDerivationRule {
     }
 
     /**
-     * c LIKE 'p%' and substr(c, 1, n) LIKE 'p%' with n <= K. The first characters of c start with p exactly when c
-     * does, if p has at most n characters; a prefix longer than n cannot be in a string of n characters, so the
-     * condition is false on every value. We do not write a pattern with more than a prefix, or a start after the
-     * first character: x holds only K characters of c, so it cannot tell what follows them.
+     * c LIKE 'p%' and substr(c, 1, n) LIKE 'p%' with n <= K, and the same with _ among the characters of p, as '10_%':
+     * literal characters and _ and then one %. We expect the first characters of c to decide such a pattern: c matches
+     * when it has at least as many characters as the pattern has before the %, and they match. So the pattern is
+     * written over x as it stands when those characters are at most n, and it is false for substr(c, 1, n) when they
+     * are more than n, as a string of n characters cannot have more. We fear a pattern with a % among its characters,
+     * or a start after the first character: x holds only K characters of c, so it cannot tell what follows them.
      */
     private ScalarOperator rewriteLike(LikePredicateOperator like, ScalarOperator canonicalLeft) {
-        Optional<String> prefix = LikePatternEstimator.pattern(like).flatMap(LikePatternEstimator.LikePattern::fixedPrefix);
-        if (prefix.isEmpty()) {
+        OptionalInt width = LikePatternEstimator.pattern(like)
+                .map(LikePatternEstimator.LikePattern::widthBeforeTrailingPercent).orElse(OptionalInt.empty());
+        if (width.isEmpty()) {
             return null;
         }
-        return rewritePrefixLike(prefix.get(),
+        return rewritePrefixLike(width.getAsInt(),
                 new LikePredicateOperator(LikePredicateOperator.LikeType.LIKE, x, like.getChild(1)), canonicalLeft);
     }
 
-    // The condition that the strings start with the prefix, onX, for c or for the first characters of c.
-    private ScalarOperator rewritePrefixLike(String prefix, ScalarOperator onX, ScalarOperator canonicalLeft) {
-        int characters = prefix.codePointCount(0, prefix.length());
+    // The condition that the strings start with the characters before the %, onX, for c or for the first characters of c.
+    private ScalarOperator rewritePrefixLike(int characters, ScalarOperator onX, ScalarOperator canonicalLeft) {
         if (column.equals(canonicalLeft)) {
             return characters <= length ? onX : null;
         }

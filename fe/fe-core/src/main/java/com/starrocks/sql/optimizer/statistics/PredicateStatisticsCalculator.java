@@ -820,6 +820,12 @@ public class PredicateStatisticsCalculator {
         return input.withOutputRowCount(rowCount);
     }
 
+    // A cast the analyzer adds and the same cast written in the query cast the same values
+    static ScalarOperator intervalKey(ScalarOperator expression) {
+        return expression instanceof CastOperator cast && cast.isImplicit()
+                ? new CastOperator(cast.getType(), cast.getChild(0)) : expression;
+    }
+
     // A placeholder column that holds the statistics of the expression of an interval while it is estimated
     private static final int INTERVAL_COLUMN_ID = Integer.MAX_VALUE - 1;
 
@@ -1263,12 +1269,6 @@ public class PredicateStatisticsCalculator {
             return Optional.of(rest.isEmpty() ? current : statisticsCalculate(Utils.compoundAnd(rest), current, useMcv));
         }
 
-        // A cast the analyzer adds and the same cast written in the query cast the same values
-        private static ScalarOperator intervalKey(ScalarOperator expression) {
-            return expression instanceof CastOperator cast && cast.isImplicit()
-                    ? new CastOperator(cast.getType(), cast.getChild(0)) : expression;
-        }
-
         /**
          * The estimate by the cast of the comparisons of a column with a format of dates, see asDatetimeComparison,
          * with the statistics of the column narrowed as the comparisons of strings narrow them. A constant of the
@@ -1435,10 +1435,75 @@ public class PredicateStatisticsCalculator {
             if (!checkNeedEvalEstimate(predicate)) {
                 return statistics;
             }
+            return withinLeadingLiteral(predicate, estimateLike(predicate, context));
+        }
+
+        /**
+         * We want the rows of any prefix p of the strings of a column whose table declares the format of its dates, see
+         * StringDateFormatProperty, such as 2026-08-15, 2026-08-1 or 2026-0, and not only of a prefix that is a period: a
+         * prefix inside a period must not be estimated above the period that holds it. column LIKE 'p%' keeps the
+         * strings from p up to the first string after every string that starts with p, so it is column >= p AND
+         * column < successor(p), without the upper bound when no string is above all those with the prefix. The two
+         * bounds are estimated as any comparisons of the column: a constant that is not of the format is the ray of the
+         * times whose strings are on that side of it, see asDatetimeComparison. The statistics on expressions read the
+         * LIKE before this, as the prefix of x, so this is the source for the statistics of the column. Empty for a
+         * column without such a format.
+         */
+        private Optional<Statistics> estimatePeriodOfPrefix(ColumnRefOperator column, String prefix) {
+            if (!column.getType().isStringType() || ExpressionStatisticsEstimator.isVirtualColumn(column)) {
+                return Optional.empty();
+            }
+            StringDateFormat format = stringDateFormat(column);
+            if (format == null || !format.hasDay()) {
+                return Optional.empty();
+            }
+            List<ScalarOperator> bounds = new ArrayList<>(2);
+            bounds.add(new BinaryPredicateOperator(BinaryType.GE, column, ConstantOperator.createVarchar(prefix)));
+            String end = ExpressionStatisticsEstimator.successor(prefix);
+            if (end != null) {
+                bounds.add(new BinaryPredicateOperator(BinaryType.LT, column, ConstantOperator.createVarchar(end)));
+            }
+            return Optional.of(statisticsCalculate(Utils.compoundAnd(bounds), statistics, useMcv));
+        }
+
+        /**
+         * A pattern that starts with a literal p and goes on, as 'p_%' or 'p%x', matches only strings that start with p,
+         * so it keeps no more rows than 'p%'. We fear that the estimate of the longer pattern, which comes from the
+         * statistics of its own or from a default, passes the estimate of the prefix, which the histogram or the
+         * interval of a column of dates gives. So the rows of the estimate are those of 'p%' when they are fewer. The
+         * pattern of a prefix alone is not capped by itself.
+         */
+        private Statistics withinLeadingLiteral(LikePredicateOperator predicate, Statistics estimated) {
+            if (!(predicate.getChild(0) instanceof ColumnRefOperator column)) {
+                return estimated;
+            }
+            Optional<LikePatternEstimator.LikePattern> pattern = LikePatternEstimator.pattern(predicate);
+            if (pattern.isEmpty() || pattern.get().fixedPrefix().isPresent()) {
+                return estimated;
+            }
+            String literal = pattern.get().leadingLiteral();
+            if (literal.isEmpty()) {
+                return estimated;
+            }
+            double bound = statisticsCalculate(EstimatePredicateNormalizer.likeOfPrefix(column, literal), statistics,
+                    useMcv).getOutputRowCount();
+            if (!(bound < estimated.getOutputRowCount())) {
+                return estimated;
+            }
+            return StatisticsEstimateUtils.adjustStatisticsByRowCount(estimated.withOutputRowCount(bound), bound);
+        }
+
+        private Statistics estimateLike(LikePredicateOperator predicate, Void context) {
             if (predicate.getChild(0) instanceof ColumnRefOperator column) {
                 ColumnStatistic statistic = statistics.getColumnStatistic(column);
                 Optional<String> prefix = LikePatternEstimator.pattern(predicate)
                         .flatMap(LikePatternEstimator.LikePattern::fixedPrefix);
+                if (prefix.isPresent()) {
+                    Optional<Statistics> period = estimatePeriodOfPrefix(column, prefix.get());
+                    if (period.isPresent()) {
+                        return period.get();
+                    }
+                }
                 if (statistic.getHistogram() != null && statistic.getHistogram().hasStringValues() && prefix.isPresent()) {
                     if (ExpressionStatisticsEstimator.isVirtualColumn(column)) {
                         return ExpressionStatisticsEstimator.prefix(predicate, column, statistic, prefix.get(),
@@ -1623,12 +1688,17 @@ public class PredicateStatisticsCalculator {
                 McvStatisticsPropagation.DisjunctionFilter mcvFilter =
                         new McvStatisticsPropagation.DisjunctionFilter(statistics);
                 mcvFilter.add(disjunctive.get(0));
+                DisjointOrParts disjointParts = new DisjointOrParts();
+                disjointParts.add(disjunctive.get(0));
 
                 for (int i = 1; i < disjunctive.size(); ++i) {
                     Statistics orItemStatistics = statisticsCalculate(disjunctive.get(i), statistics, useMcv);
-                    Statistics andStatistics = statisticsCalculate(disjunctive.get(i), cumulativeStatistics, useMcv);
+                    // A part with no row in common with the earlier ones, by its form, has no rows among theirs: its
+                    // rows are added whole, as the OR of the other estimator adds them.
+                    Statistics andStatistics = disjointParts.add(disjunctive.get(i)) ? null
+                            : statisticsCalculate(disjunctive.get(i), cumulativeStatistics, useMcv);
                     rowCount = cumulativeStatistics.getOutputRowCount() + orItemStatistics.getOutputRowCount() -
-                            andStatistics.getOutputRowCount();
+                            (andStatistics == null ? 0 : andStatistics.getOutputRowCount());
                     rowCount = Math.min(rowCount, statistics.getOutputRowCount());
                     cumulativeStatistics =
                             computeOrPredicateStatistics(cumulativeStatistics, orItemStatistics, andStatistics, rowCount);

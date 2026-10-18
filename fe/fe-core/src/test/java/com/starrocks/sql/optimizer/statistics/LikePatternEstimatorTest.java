@@ -283,6 +283,60 @@ public class LikePatternEstimatorTest {
     }
 
     @Test
+    void leadingLiteralIsTheTextBeforeTheFirstWildcard() {
+        Assertions.assertEquals("ab", LikePatternEstimator.compile("ab_c%").leadingLiteral());
+        Assertions.assertEquals("abc", LikePatternEstimator.compile("abc%").leadingLiteral());
+        Assertions.assertEquals("abc", LikePatternEstimator.compile("abc").leadingLiteral());
+        Assertions.assertEquals("ab", LikePatternEstimator.compile("ab%%_").leadingLiteral());
+        Assertions.assertEquals("", LikePatternEstimator.compile("%ab").leadingLiteral());
+        Assertions.assertEquals("", LikePatternEstimator.compile("_ab%").leadingLiteral());
+        Assertions.assertEquals("", LikePatternEstimator.compile("").leadingLiteral());
+        // An escaped wildcard is a literal character, and a code point is whole.
+        Assertions.assertEquals("a%b_", LikePatternEstimator.compile("a\\%b\\_%").leadingLiteral());
+        Assertions.assertEquals("😀x", LikePatternEstimator.compile("😀x%y").leadingLiteral());
+    }
+
+    // 1000 rows: 200 in the MCV list, and 800 in two buckets of strings from aa to az.
+    private static Statistics stringStatistics() {
+        Histogram histogram = Histogram.forStrings(List.of(new StringBucket("aa", "am", 400L, 10, 40),
+                new StringBucket("an", "az", 800L, 10, 40)), Map.of("approved", 100L, "declined", 100L));
+        return Statistics.builder().setOutputRowCount(1000)
+                .addColumnStatistic(STATUS, ColumnStatistic.builder().setNullsFraction(0).setAverageRowSize(8)
+                        .setDistinctValuesCount(82).setHistogram(histogram).build()).build();
+    }
+
+    private static double rows(String pattern) {
+        return PredicateStatisticsCalculator.statisticsCalculate(new LikePredicateOperator(
+                LikePredicateOperator.LikeType.LIKE, STATUS, ConstantOperator.createVarchar(pattern)), stringStatistics())
+                .getOutputRowCount();
+    }
+
+    @Test
+    void patternOfALiteralAndMoreIsNotAboveTheLiteralWithAPercent() {
+        // The tail of 800 rows would give a quarter of it to a pattern that no bucket holds, 200 rows, but the strings
+        // that start with zz are none, and one row is what an estimate keeps.
+        Assertions.assertEquals(1, rows("zz%"), 1e-6);
+        for (String pattern : List.of("zz_%", "zz%x", "zz", "x_%", "zz__%")) {
+            Assertions.assertEquals(1, rows(pattern), 1e-6, pattern);
+        }
+        // The 195 rows of ap: the 100 of approved and 95 of the buckets. The longer patterns are 100 + 200 from the
+        // statistics of the pattern, and are capped by the 195.
+        Assertions.assertEquals(195, rows("ap%"), 1e-6);
+        for (String pattern : List.of("ap_r%", "ap_roved", "ap%d")) {
+            Assertions.assertEquals(195, rows(pattern), 1e-6, pattern);
+        }
+        Assertions.assertEquals(95, rows("ab_%"), 1e-6);
+        Assertions.assertEquals(rows("ab%"), rows("ab_%"), 1e-6);
+        // The estimate of the pattern is kept when it is below the prefix, and the prefix alone is not capped.
+        Assertions.assertEquals(300, rows("a_%"), 1e-6);
+        Assertions.assertEquals(900, rows("a%"), 1e-6);
+        Assertions.assertEquals(193, rows("approved"), 1e-6);
+        // A pattern that starts with a wildcard has no literal.
+        Assertions.assertEquals(200, rows("_a%"), 1e-6);
+        Assertions.assertEquals(300, rows("%a%"), 1e-6);
+    }
+
+    @Test
     void regexpOfAnchoredPrefixesIsEstimatedAsTheLikeConditionsOfItsPrefixes() {
         LikePredicateOperator app = new LikePredicateOperator(LikePredicateOperator.LikeType.LIKE, STATUS,
                 ConstantOperator.createVarchar("app%"));
