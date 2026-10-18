@@ -31,7 +31,9 @@
 #include "formats/parquet/complex_column_reader.h"
 #include "formats/parquet/file_reader.h"
 #include "formats/parquet/group_reader.h"
+#include "formats/parquet/metadata.h"
 #include "formats/parquet/offset_index_skip_advisor.h"
+#include "formats/parquet/page_reader.h"
 #include "formats/parquet/parquet_block_split_bloom_filter.h"
 #include "formats/parquet/parquet_test_util/recording_input_stream.h"
 #include "formats/parquet/parquet_test_util/util.h"
@@ -814,6 +816,12 @@ public:
     // The feedback of the scan on the offset indexes, which must outlive the reader.
     void set_skip_advisor(OffsetIndexSkipAdvisor* advisor) { _opts.offset_index_skip_advisor = advisor; }
 
+    // The reader decodes the pages of the file. Call it before prepare(), which sizes the dictionary decoder.
+    void enable_page_decoding() {
+        _opts.file_meta_data = &_file_meta;
+        _opts.chunk_size = 4096;
+    }
+
     HdfsScannerStats& stats() { return _stats; }
 
     // The column has null_count NULL values.
@@ -842,6 +850,7 @@ private:
     tparquet::ColumnMetaData _meta_data;
     tparquet::ColumnChunk _chunk;
     tparquet::RowGroup _row_group;
+    FileMetaData _file_meta;
     std::unique_ptr<ScalarColumnReader> _reader;
 };
 
@@ -1057,6 +1066,254 @@ TEST_F(PageIndexTest, SelectOffsetIndexTwiceKeepsTheFirstSelection) {
     ASSERT_TRUE(env.reader()->_offset_index_ctx->page_selected[0]);
     ASSERT_FALSE(env.reader()->_offset_index_ctx->page_selected[1]);
     ASSERT_EQ(2U, wrapper->_page_num);
+}
+
+namespace {
+
+constexpr int kRecordedPages = 4;
+constexpr int kRecordedRowsPerPage = 10;
+
+// The file of a required INT32 column: an optional dictionary page of three values, four data pages of ten rows
+// where the row r has the value 100 + r, and the offset index of the data pages after the chunk.
+struct RecordedChunk {
+    std::string bytes;
+    // [begin, end) of the dictionary page, empty without one
+    std::pair<int64_t, int64_t> dictionary{0, 0};
+    // [begin, end) of the data pages
+    std::vector<std::pair<int64_t, int64_t>> pages;
+    int64_t chunk_size = 0;
+    int32_t offset_index_length = 0;
+};
+
+RecordedChunk make_recorded_chunk(bool with_dict) {
+    RecordedChunk chunk;
+    if (with_dict) {
+        tparquet::DictionaryPageHeader dictionary_header;
+        dictionary_header.num_values = 3;
+        dictionary_header.encoding = tparquet::Encoding::PLAIN;
+        tparquet::PageHeader header;
+        header.type = tparquet::PageType::DICTIONARY_PAGE;
+        header.uncompressed_page_size = 12;
+        header.compressed_page_size = 12;
+        header.__set_dictionary_page_header(dictionary_header);
+        chunk.bytes = thrift_bytes(header) + std::string(12, '\0');
+        chunk.dictionary = {0, static_cast<int64_t>(chunk.bytes.size())};
+    }
+
+    std::vector<tparquet::PageLocation> locations;
+    for (int page = 0; page < kRecordedPages; ++page) {
+        std::string body;
+        for (int row = page * kRecordedRowsPerPage; row < (page + 1) * kRecordedRowsPerPage; ++row) {
+            body += int_bytes(100 + row);
+        }
+        tparquet::DataPageHeader data_page_header;
+        data_page_header.num_values = kRecordedRowsPerPage;
+        data_page_header.encoding = tparquet::Encoding::PLAIN;
+        data_page_header.definition_level_encoding = tparquet::Encoding::RLE;
+        data_page_header.repetition_level_encoding = tparquet::Encoding::RLE;
+        tparquet::PageHeader header;
+        header.type = tparquet::PageType::DATA_PAGE;
+        header.uncompressed_page_size = static_cast<int32_t>(body.size());
+        header.compressed_page_size = static_cast<int32_t>(body.size());
+        header.__set_data_page_header(data_page_header);
+        const std::string data_page = thrift_bytes(header) + body;
+
+        const int64_t begin = chunk.bytes.size();
+        locations.push_back(
+                make_page_location(begin, static_cast<int32_t>(data_page.size()), page * kRecordedRowsPerPage));
+        chunk.pages.emplace_back(begin, begin + data_page.size());
+        chunk.bytes += data_page;
+    }
+    chunk.chunk_size = chunk.bytes.size();
+
+    const std::string offset_index = thrift_bytes(make_offset_index(locations));
+    chunk.offset_index_length = offset_index.size();
+    chunk.bytes += offset_index;
+    return chunk;
+}
+
+// A column over the file of a RecordedChunk, which records the bytes that the readers take from the file.
+class RecordedChunkEnv {
+public:
+    explicit RecordedChunkEnv(bool with_dict)
+            : _chunk(make_recorded_chunk(with_dict)),
+              _stream(std::make_shared<RecordingInputStream>(_chunk.bytes)),
+              _env(_stream, _chunk.bytes.size()) {
+        _env.set_page_index(0, 0, _chunk.chunk_size, _chunk.offset_index_length);
+        _env.set_row_group_rows(kRecordedPages * kRecordedRowsPerPage);
+        auto& meta_data = _env.chunk()->meta_data;
+        meta_data.num_values = kRecordedPages * kRecordedRowsPerPage;
+        meta_data.total_compressed_size = _chunk.chunk_size;
+        meta_data.data_page_offset = _chunk.dictionary.second;
+        if (with_dict) {
+            meta_data.__set_dictionary_page_offset(_chunk.dictionary.first);
+        }
+        _env.enable_page_decoding();
+    }
+
+    ScalarColumnReader* reader() { return _env.reader(); }
+
+    // Reads the rows [begin, end) and checks their values.
+    void read(uint64_t begin, uint64_t end) {
+        MutableColumnPtr column =
+                ColumnHelper::create_column(TypeDescriptor::from_logical_type(LogicalType::TYPE_INT), false);
+        Status st = _env.reader()->_read_stored_range(Range<uint64_t>(begin, end), nullptr, ColumnContentType::VALUE,
+                                                      column.get());
+        ASSERT_TRUE(st.ok()) << st.to_string();
+        ASSERT_EQ(end - begin, column->size());
+        for (size_t i = 0; i < column->size(); ++i) {
+            ASSERT_EQ(100 + static_cast<int32_t>(begin + i), column->get(i).get_int32()) << "row " << begin + i;
+        }
+    }
+
+    // The data pages from which the readers took a byte.
+    std::vector<int> touched_pages() const {
+        std::vector<int> pages;
+        for (size_t i = 0; i < _chunk.pages.size(); ++i) {
+            if (_stream->touched(_chunk.pages[i].first, _chunk.pages[i].second)) {
+                pages.push_back(i);
+            }
+        }
+        return pages;
+    }
+    bool touched_dictionary() const { return _stream->touched(_chunk.dictionary.first, _chunk.dictionary.second); }
+
+private:
+    RecordedChunk _chunk;
+    std::shared_ptr<RecordingInputStream> _stream;
+    IndexEnv _env;
+};
+
+// The page locations that the page reader under the stored reader holds.
+const std::vector<tparquet::PageLocation>* page_locations_of(StoredColumnReader* stored) {
+    if (auto* wrapper = dynamic_cast<StoredColumnReaderWithIndex*>(stored)) {
+        stored = wrapper->_inner_reader.get();
+    }
+    return dynamic_cast<StoredColumnReaderImpl*>(stored)->_reader->_page_reader->_page_locations;
+}
+
+} // namespace
+
+// We expect a page header to lie inside its page, and we fear that a header read of the default size from a small page
+// takes the bytes of the pages after it: in a scan the stream may have cut them out of its buffers, and then the read
+// loads them for nothing or goes direct. So a column that holds its offset index gives the sizes of the pages to its
+// page reader, and the pages that no read needs stay unread. The column holds the index at different times: the page
+// index filter reads it before prepare(), and the page selection reads it when nobody has yet.
+TEST_F(PageIndexTest, HeaderReadStaysInsideItsPageWhenTheColumnHoldsTheOffsetIndex) {
+    for (bool with_dict : {false, true}) {
+        // the page index filter reads the index, the selection leaves every page, and the reader walks the pages
+        {
+            SCOPED_TRACE(with_dict ? "filter, no selection, with dictionary" : "filter, no selection");
+            RecordedChunkEnv env(with_dict);
+            ASSERT_TRUE(env.reader()->get_offset_index(0).ok());
+            ASSERT_TRUE(env.reader()->prepare().ok());
+            ASSERT_NO_FATAL_FAILURE(env.read(0, 10));
+            ASSERT_EQ(std::vector<int>{0}, env.touched_pages());
+            ASSERT_EQ(with_dict, env.touched_dictionary());
+        }
+        // the selection reads the index, and the reader jumps to the only selected page
+        {
+            SCOPED_TRACE(with_dict ? "selection, with dictionary" : "selection");
+            RecordedChunkEnv env(with_dict);
+            ASSERT_TRUE(env.reader()->prepare().ok());
+            env.reader()->select_offset_index(make_range(10, 20), 0);
+            ASSERT_TRUE(dynamic_cast<StoredColumnReaderWithIndex*>(env.reader()->_reader.get()) != nullptr);
+            ASSERT_NO_FATAL_FAILURE(env.read(10, 20));
+            ASSERT_EQ(std::vector<int>{1}, env.touched_pages());
+            ASSERT_EQ(with_dict, env.touched_dictionary());
+        }
+        // the page index filter reads the index first, then the selection uses it
+        {
+            SCOPED_TRACE(with_dict ? "filter and selection, with dictionary" : "filter and selection");
+            RecordedChunkEnv env(with_dict);
+            ASSERT_TRUE(env.reader()->get_offset_index(0).ok());
+            ASSERT_TRUE(env.reader()->prepare().ok());
+            env.reader()->select_offset_index(make_range(20, 30), 0);
+            ASSERT_NO_FATAL_FAILURE(env.read(20, 30));
+            ASSERT_EQ(std::vector<int>{2}, env.touched_pages());
+            ASSERT_EQ(with_dict, env.touched_dictionary());
+        }
+    }
+}
+
+// Whoever creates the offset index and the stored reader first, the page reader gets the pages of the index when the
+// column holds both, and a column without an index keeps the default read.
+TEST_F(PageIndexTest, StoredReaderGetsThePageLocationsWheneverTheColumnHoldsTheOffsetIndex) {
+    PageIndexFile file = make_page_index_file(make_column_index(2, 2, 2), make_offset_index(two_pages()));
+    auto make_env = [&]() {
+        auto env = std::make_unique<IndexEnv>(file.bytes);
+        env->set_page_index(0, file.column_index_length, file.column_index_length, file.offset_index_length);
+        env->set_row_group_rows(10);
+        env->chunk()->meta_data.data_page_offset = 100;
+        env->chunk()->meta_data.total_compressed_size = 150;
+        return env;
+    };
+    auto locations_of_index = [](IndexEnv* env) {
+        return &env->reader()->_offset_index_ctx->offset_index.page_locations;
+    };
+
+    // no index, no locations
+    {
+        auto env = make_env();
+        ASSERT_TRUE(env->reader()->prepare().ok());
+        ASSERT_TRUE(page_locations_of(env->reader()->_reader.get()) == nullptr);
+    }
+    // the index is read before the stored reader exists
+    {
+        auto env = make_env();
+        ASSERT_TRUE(env->reader()->get_offset_index(0).ok());
+        ASSERT_TRUE(env->reader()->prepare().ok());
+        ASSERT_EQ(locations_of_index(env.get()), page_locations_of(env->reader()->_reader.get()));
+    }
+    // the index is read after it
+    {
+        auto env = make_env();
+        ASSERT_TRUE(env->reader()->prepare().ok());
+        ASSERT_TRUE(env->reader()->get_offset_index(0).ok());
+        ASSERT_EQ(locations_of_index(env.get()), page_locations_of(env->reader()->_reader.get()));
+    }
+    // the selection reads the index and wraps the stored reader
+    {
+        auto env = make_env();
+        ASSERT_TRUE(env->reader()->prepare().ok());
+        env->reader()->select_offset_index(make_range(0, 5), 0);
+        ASSERT_TRUE(dynamic_cast<StoredColumnReaderWithIndex*>(env->reader()->_reader.get()) != nullptr);
+        ASSERT_EQ(locations_of_index(env.get()), page_locations_of(env->reader()->_reader.get()));
+    }
+    // an index that is not valid is not kept, and the page reader has nothing
+    {
+        PageIndexFile bad = make_page_index_file(
+                make_column_index(2, 2, 2),
+                make_offset_index({make_page_location(100, 50, 0), make_page_location(150, 50, 0)}));
+        IndexEnv env(bad.bytes);
+        env.set_page_index(0, bad.column_index_length, bad.column_index_length, bad.offset_index_length);
+        env.set_row_group_rows(10);
+        ASSERT_TRUE(env.reader()->prepare().ok());
+        ASSERT_FALSE(env.reader()->get_offset_index(0).ok());
+        ASSERT_TRUE(page_locations_of(env.reader()->_reader.get()) == nullptr);
+    }
+}
+
+// The cache warm-up selects the pages of a column to learn the ranges to download, and reads no data, so it never
+// prepares the column and the column has no stored reader. The selection must still be kept for the ranges.
+TEST_F(PageIndexTest, SelectOffsetIndexOfAColumnWithoutStoredReaderKeepsTheSelection) {
+    PageIndexFile file = make_page_index_file(make_column_index(2, 2, 2), make_offset_index(two_pages()));
+    IndexEnv env(file.bytes);
+    env.set_page_index(0, file.column_index_length, file.column_index_length, file.offset_index_length);
+    env.set_row_group_rows(10);
+    env.chunk()->meta_data.data_page_offset = 100;
+    env.chunk()->meta_data.total_compressed_size = 150;
+
+    env.reader()->select_offset_index(make_range(0, 5), 0);
+    ASSERT_TRUE(env.reader()->_reader == nullptr);
+    ASSERT_EQ(std::vector<bool>({true, false}), env.reader()->_offset_index_ctx->page_selected);
+
+    std::vector<io::SharedBufferedInputStream::IORange> ranges;
+    int64_t end_offset = 0;
+    env.reader()->collect_column_io_range(&ranges, &end_offset, ColumnIOType::PAGES, true);
+    ASSERT_EQ(1U, ranges.size());
+    ASSERT_EQ(100, ranges[0].offset);
+    ASSERT_EQ(50, ranges[0].size);
 }
 
 // The offset index must agree with the chunk: the pages cannot be more than the values of the chunk, and the last

@@ -257,8 +257,15 @@ StatusOr<tparquet::OffsetIndex*> RawColumnReader::get_offset_index(const uint64_
                 deserialize_thrift_msg(offset_index_data.data(), &length, TProtocolType::COMPACT, &ctx->offset_index));
         RETURN_IF_ERROR(_validate_offset_index(ctx->offset_index));
         _offset_index_ctx = std::move(ctx);
+        _share_page_locations();
     }
     return &_offset_index_ctx->offset_index;
+}
+
+void RawColumnReader::_share_page_locations() {
+    if (_reader != nullptr && _offset_index_ctx != nullptr) {
+        _reader->set_page_locations(&_offset_index_ctx->offset_index.page_locations);
+    }
 }
 
 void RawColumnReader::select_offset_index(const SparseRange<uint64_t>& range, const uint64_t rg_first_row) {
@@ -308,6 +315,12 @@ void RawColumnReader::select_offset_index(const SparseRange<uint64_t>& range, co
             r = range[range_idx++];
         }
         _offset_index_ctx->page_selected.emplace_back(first_row < r.end() && end_row > r.begin());
+    }
+    // The cache warm-up selects the pages to learn their IO ranges and reads no data, so it does not prepare the column
+    // and the column has no stored reader. We fear that wrapping a missing reader crashes the warm-up, so we keep the
+    // selection for the IO ranges and wrap nothing.
+    if (_reader == nullptr) {
+        return;
     }
     const tparquet::ColumnMetaData& column_metadata = get_chunk_metadata()->meta_data;
     bool has_dict_page = column_metadata.__isset.dictionary_page_offset;
@@ -523,12 +536,6 @@ const std::vector<PageSpan>* RawColumnReader::_page_cache_io_spans(bool allow_lo
         _page_spans.push_back(PageSpan{page.offset, page.compressed_page_size});
     }
     _page_spans_state = PageSpansState::KNOWN;
-    // We fear that a page header read of the default size from a small page takes bytes of the next page, which the
-    // stream may have cut out because the page cache holds it, and then the read goes direct. So the page reader gets
-    // the sizes of the pages, and a header read stays inside its page.
-    if (_reader != nullptr) {
-        _reader->set_page_locations(&pages);
-    }
     return &_page_spans;
 }
 

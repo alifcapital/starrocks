@@ -73,7 +73,10 @@ public:
     ~RawColumnReader() override;
 
     Status prepare() override {
-        return StoredColumnReader::create(_opts, get_column_parquet_field(), get_chunk_metadata(), &_reader);
+        RETURN_IF_ERROR(StoredColumnReader::create(_opts, get_column_parquet_field(), get_chunk_metadata(), &_reader));
+        // The page index filter runs before prepare() and may have read the offset index already.
+        _share_page_locations();
+        return Status::OK();
     }
 
     void get_levels(level_t** def_levels, level_t** rep_levels, size_t* num_levels) override {
@@ -98,6 +101,14 @@ public:
     bool column_all_pages_dict_encoded() const;
 
 private:
+    // We expect a page header to lie inside its page. A page reader that knows the sizes of the pages asks the stream for
+    // the bytes of one page for each header, and we fear that a read of the default size from a small page takes bytes of
+    // the next pages: the stream may have cut them out because no range needs them or the page cache holds them, and then
+    // the read loads them for nothing or goes direct. So the stored reader gets the pages of the offset index as soon as
+    // the column has both of them. The column gets them in either order (the page index filter reads the index before
+    // prepare() creates the stored reader), so get_offset_index() and prepare() both call this.
+    void _share_page_locations();
+
     // Hands the offset index of the chunk to the stored reader. The index is optional: a column without it, or with an
     // index that is not valid or does not fit the chunk, is read page by page, and we do not ask for the index again.
     // The same holds for a chunk of one data page and for a column that the scan has given up on.
