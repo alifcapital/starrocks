@@ -18,9 +18,14 @@
 #include <gtest/gtest-param-test.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <future>
+#include <map>
+#include <optional>
 
 #include "column/array_column.h"
+#include "column/column_helper.h"
+#include "column/fixed_length_column.h"
 #include "column/map_column.h"
 #include "column/struct_column.h"
 #include "connector/connector_chunk_sink.h"
@@ -56,6 +61,16 @@ protected:
 
     // Defined below, once the mock writer/helper types it needs are declared
     void test_sorted_spill_with_null(bool is_asc, bool is_null_first, const std::vector<std::string>& expected);
+
+    // Creates a spill writer that writes to the mock file writer. The caller creates and removes |fs_base_path|.
+    std::shared_ptr<SpillPartitionChunkWriter> create_spill_writer(
+            const std::string& fs_base_path, TupleDescriptor* tuple_desc,
+            std::shared_ptr<std::vector<std::unique_ptr<ColumnEvaluator>>> column_evaluators,
+            std::shared_ptr<SortOrdering> sort_ordering);
+
+    std::shared_ptr<AsyncFlushStreamPoller> _writer_poller;
+    bool _writer_commited = false;
+    Status _writer_status;
 
     ObjectPool _pool;
     std::shared_ptr<pipeline::FragmentContext> _fragment_context;
@@ -1365,6 +1380,719 @@ TEST_F(PartitionChunkWriterTest, sorted_spill_desc_null_first) {
 
 TEST_F(PartitionChunkWriterTest, sorted_spill_asc_null_first) {
     test_sorted_spill_with_null(true, true, {"NULL", "NULL", "NULL", "aaa1", "aaa2", "aaa3", "ccc1", "ccc2", "ccc3"});
+}
+
+// Sorted spill of rows with several column types. We expect every column of a row to stay with its sort key after
+// the rows go through the spill blocks and the merge.
+TEST_F(PartitionChunkWriterTest, sorted_spill_with_multiple_column_types) {
+    std::string fs_base_path = "base_path";
+    std::filesystem::create_directories(fs_base_path + "/c1");
+    DeferOp cleanup([&]() { std::filesystem::remove_all(fs_base_path); });
+
+    parquet::Utils::SlotDesc slot_descs[] = {
+            {"k", TYPE_BIGINT_DESC, 1},
+            {"name", TYPE_VARCHAR_DESC, 2},
+            {"score", TYPE_DOUBLE_DESC, 3},
+            {"amount", TypeDescriptor::create_decimalv3_type(TYPE_DECIMAL64, 18, 4), 4},
+            {""}};
+    TupleDescriptor* tuple_desc = parquet::Utils::create_tuple_descriptor(_runtime_state, &_pool, slot_descs);
+
+    auto writer_helper = WriterHelper::instance();
+    writer_helper->reset();
+    bool commited = false;
+    Status status;
+
+    auto mock_writer_factory = std::make_shared<MockFileWriterFactory>();
+    auto location_provider = std::make_shared<LocationProvider>(fs_base_path, "ffffff", 0, 0, "parquet");
+    EXPECT_CALL(*mock_writer_factory, create(::testing::_)).WillRepeatedly([](const std::string&) {
+        WriterAndStream ws;
+        ws.writer = std::make_unique<MockWriter>();
+        ws.stream = std::make_unique<Stream>(std::make_unique<MockFile>(), nullptr, nullptr);
+        return ws;
+    });
+
+    auto sort_ordering = std::make_shared<SortOrdering>();
+    sort_ordering->sort_key_idxes = {0};
+    sort_ordering->sort_descs.descs.emplace_back(true, false);
+    const size_t max_file_size = 1073741824; // 1GB
+    auto partition_chunk_writer_ctx = std::make_shared<SpillPartitionChunkWriterContext>(
+            SpillPartitionChunkWriterContext{{mock_writer_factory, location_provider, max_file_size, false},
+                                             nullptr,
+                                             _fragment_context.get(),
+                                             tuple_desc,
+                                             nullptr,
+                                             sort_ordering});
+    auto partition_chunk_writer_factory =
+            std::make_unique<SpillPartitionChunkWriterFactory>(partition_chunk_writer_ctx);
+    std::vector<int8_t> partition_field_null_list;
+    auto partition_writer = std::dynamic_pointer_cast<SpillPartitionChunkWriter>(
+            partition_chunk_writer_factory->create("c1", partition_field_null_list));
+    auto commit_callback = [&commited](const CommitResult& r) { commited = true; };
+    auto error_handler = [&status](const Status& s) { status = s; };
+    auto poller = MockPoller();
+    partition_writer->set_io_poller(&poller);
+    partition_writer->set_commit_callback(commit_callback);
+    partition_writer->set_error_handler(error_handler);
+    EXPECT_OK(partition_writer->init());
+
+    // One spilled block per chunk, and the keys of the chunks interleave
+    const std::vector<std::vector<int64_t>> keys_of_chunks = {{9, 3, 6}, {8, 2, 5}, {7, 1, 4}};
+    for (const auto& keys : keys_of_chunks) {
+        ChunkPtr chunk = ChunkHelper::new_chunk(*tuple_desc, keys.size());
+        for (int64_t key : keys) {
+            std::string name = "name" + std::to_string(key);
+            chunk->get_column_raw_ptr_by_index(0)->append_datum(Datum(key));
+            chunk->get_column_raw_ptr_by_index(1)->append_datum(Datum(Slice(name)));
+            chunk->get_column_raw_ptr_by_index(2)->append_datum(Datum(static_cast<double>(key) * 1.5));
+            chunk->get_column_raw_ptr_by_index(3)->append_datum(Datum(key * 10000));
+        }
+
+        EXPECT_OK(partition_writer->write(chunk));
+        EXPECT_OK(partition_writer->flush());
+        EXPECT_OK(partition_writer->wait_flush());
+        Awaitility().timeout(3 * 1000 * 1000).interval(300 * 1000).until([partition_writer]() {
+            return partition_writer->_spilling_bytes_usage.load(std::memory_order_relaxed) == 0;
+        });
+        EXPECT_OK(status);
+    }
+
+    // Merge the spilled blocks
+    EXPECT_OK(partition_writer->finish());
+    Awaitility().timeout(3 * 1000 * 1000).interval(300 * 1000).until([&]() { return partition_writer->is_finished(); });
+    EXPECT_EQ(commited, true);
+    EXPECT_OK(status);
+    ASSERT_EQ(writer_helper->result_chunks().size(), 1);
+
+    auto result_chunk = writer_helper->result_chunks()[0];
+    ASSERT_EQ(result_chunk->num_rows(), 9);
+    for (size_t i = 0; i < result_chunk->num_rows(); ++i) {
+        int64_t key = result_chunk->get_column_by_index(0)->get(i).get_int64();
+        EXPECT_EQ(key, static_cast<int64_t>(i + 1));
+        EXPECT_EQ(result_chunk->get_column_by_index(1)->get(i).get_slice().to_string(), "name" + std::to_string(key));
+        EXPECT_DOUBLE_EQ(result_chunk->get_column_by_index(2)->get(i).get_double(), static_cast<double>(key) * 1.5);
+        EXPECT_EQ(result_chunk->get_column_by_index(3)->get(i).get_int64(), key * 10000);
+    }
+}
+
+std::shared_ptr<SpillPartitionChunkWriter> PartitionChunkWriterTest::create_spill_writer(
+        const std::string& fs_base_path, TupleDescriptor* tuple_desc,
+        std::shared_ptr<std::vector<std::unique_ptr<ColumnEvaluator>>> column_evaluators,
+        std::shared_ptr<SortOrdering> sort_ordering) {
+    auto mock_writer_factory = std::make_shared<MockFileWriterFactory>();
+    auto location_provider = std::make_shared<LocationProvider>(fs_base_path, "ffffff", 0, 0, "parquet");
+    EXPECT_CALL(*mock_writer_factory, create(::testing::_)).WillRepeatedly([](const std::string&) {
+        WriterAndStream ws;
+        ws.writer = std::make_unique<MockWriter>();
+        ws.stream = std::make_unique<Stream>(std::make_unique<MockFile>(), nullptr, nullptr);
+        return ws;
+    });
+
+    const size_t max_file_size = 1073741824; // 1GB
+    auto partition_chunk_writer_ctx = std::make_shared<SpillPartitionChunkWriterContext>(
+            SpillPartitionChunkWriterContext{{mock_writer_factory, location_provider, max_file_size, false},
+                                             nullptr,
+                                             _fragment_context.get(),
+                                             tuple_desc,
+                                             std::move(column_evaluators),
+                                             std::move(sort_ordering)});
+    auto partition_chunk_writer_factory =
+            std::make_unique<SpillPartitionChunkWriterFactory>(partition_chunk_writer_ctx);
+    std::vector<int8_t> partition_field_null_list;
+    auto partition_writer = std::dynamic_pointer_cast<SpillPartitionChunkWriter>(
+            partition_chunk_writer_factory->create("c1", partition_field_null_list));
+    _writer_poller = std::make_shared<MockPoller>();
+    _writer_commited = false;
+    _writer_status = Status::OK();
+    partition_writer->set_io_poller(_writer_poller.get());
+    partition_writer->set_commit_callback([this](const CommitResult&) { _writer_commited = true; });
+    partition_writer->set_error_handler([this](const Status& s) { _writer_status = s; });
+    return partition_writer;
+}
+
+// The spill writer builds a storage Schema from the slots, so a column type without a storage field type (VARIANT and
+// the nested types that contain it) must be rejected before the sink creates the writer, and must not abort the
+// process. TIME has no storage field type either, but the writer describes it as DOUBLE, so it is accepted.
+TEST_F(PartitionChunkWriterTest, spill_writer_check_tuple_supported) {
+    // The types that have a storage field type are accepted, the nested ones included.
+    {
+        parquet::Utils::SlotDesc slot_descs[] = {
+                {"c_boolean", TYPE_BOOLEAN_DESC},
+                {"c_tinyint", TYPE_TINYINT_DESC},
+                {"c_smallint", TYPE_SMALLINT_DESC},
+                {"c_int", TYPE_INT_DESC},
+                {"c_bigint", TYPE_BIGINT_DESC},
+                {"c_largeint", TypeDescriptor(TYPE_LARGEINT)},
+                {"c_float", TYPE_FLOAT_DESC},
+                {"c_double", TYPE_DOUBLE_DESC},
+                {"c_decimalv2", TypeDescriptor::create_decimalv2_type(27, 9)},
+                {"c_decimal32", TypeDescriptor::create_decimalv3_type(TYPE_DECIMAL32, 9, 2)},
+                {"c_decimal64", TypeDescriptor::create_decimalv3_type(TYPE_DECIMAL64, 18, 4)},
+                {"c_decimal128", TypeDescriptor::create_decimalv3_type(TYPE_DECIMAL128, 38, 6)},
+                {"c_char", TYPE_CHAR_DESC},
+                {"c_varchar", TYPE_VARCHAR_DESC},
+                {"c_date", TYPE_DATE_DESC},
+                {"c_datetime", TYPE_DATETIME_DESC},
+                {"c_varbinary", TYPE_VARBINARY_DESC},
+                {"c_json", TYPE_JSON_DESC},
+                {"c_time", TYPE_TIME_DESC},
+                {"c_array", TypeDescriptor::create_array_type(TYPE_INT_DESC)},
+                {"c_map", TypeDescriptor::create_map_type(TYPE_VARCHAR_DESC, TYPE_INT_DESC)},
+                {"c_struct", TypeDescriptor::create_struct_type({"a", "b"}, {TYPE_INT_DESC, TYPE_VARCHAR_DESC})},
+                {"c_array_time", TypeDescriptor::create_array_type(TYPE_TIME_DESC)},
+                {"c_map_time", TypeDescriptor::create_map_type(TYPE_VARCHAR_DESC, TYPE_TIME_DESC)},
+                {"c_struct_time", TypeDescriptor::create_struct_type({"a", "b"}, {TYPE_INT_DESC, TYPE_TIME_DESC})},
+                {""}};
+        TupleDescriptor* tuple_desc = parquet::Utils::create_tuple_descriptor(_runtime_state, &_pool, slot_descs);
+        EXPECT_OK(SpillPartitionChunkWriter::check_tuple_supported(tuple_desc, tuple_desc->slots().size()));
+    }
+
+    // VARIANT has no storage field type, alone or inside a nested type.
+    const TypeDescriptor variant_type = TypeDescriptor::create_variant_type();
+    const std::vector<std::pair<std::string, TypeDescriptor>> unsupported_columns = {
+            {"c_variant", variant_type},
+            {"c_array_variant", TypeDescriptor::create_array_type(variant_type)},
+            {"c_map_variant", TypeDescriptor::create_map_type(TYPE_VARCHAR_DESC, variant_type)},
+            {"c_struct_variant", TypeDescriptor::create_struct_type({"a", "b"}, {TYPE_INT_DESC, variant_type})},
+            {"c_struct_array_variant",
+             TypeDescriptor::create_struct_type({"a"}, {TypeDescriptor::create_array_type(variant_type)})}};
+    for (const auto& [name, type] : unsupported_columns) {
+        parquet::Utils::SlotDesc slot_descs[] = {{"id", TYPE_BIGINT_DESC}, {name, type}, {""}};
+        TupleDescriptor* tuple_desc = parquet::Utils::create_tuple_descriptor(_runtime_state, &_pool, slot_descs);
+        Status st = SpillPartitionChunkWriter::check_tuple_supported(tuple_desc, 2);
+        EXPECT_TRUE(st.is_not_supported()) << name << ": " << st;
+        EXPECT_NE(std::string::npos, st.message().find(name)) << st;
+
+        // Only the first |num_columns| slots carry the sink columns.
+        EXPECT_OK(SpillPartitionChunkWriter::check_tuple_supported(tuple_desc, 1));
+        // The tuple has fewer slots than the sink has columns.
+        EXPECT_TRUE(SpillPartitionChunkWriter::check_tuple_supported(tuple_desc, 3).is_internal_error());
+    }
+
+    EXPECT_TRUE(SpillPartitionChunkWriter::check_tuple_supported(nullptr, 1).is_not_supported());
+}
+
+// A writer that is created for a tuple the sink should have rejected fails with an error when it has to create the
+// merge chunk, in the sorted mode and in the mode that switches to the spill on a flush.
+TEST_F(PartitionChunkWriterTest, spill_writer_returns_error_for_column_without_storage_type) {
+    for (bool sorted : {false, true}) {
+        std::string fs_base_path = "base_path";
+        std::filesystem::create_directories(fs_base_path + "/c1");
+        DeferOp cleanup([&]() { std::filesystem::remove_all(fs_base_path); });
+
+        parquet::Utils::SlotDesc slot_descs[] = {
+                {"id", TYPE_BIGINT_DESC, 1}, {"payload", TypeDescriptor::create_variant_type(), 2}, {""}};
+        TupleDescriptor* tuple_desc = parquet::Utils::create_tuple_descriptor(_runtime_state, &_pool, slot_descs);
+
+        WriterHelper::instance()->reset();
+        std::shared_ptr<SortOrdering> sort_ordering;
+        if (sorted) {
+            sort_ordering = std::make_shared<SortOrdering>();
+            sort_ordering->sort_key_idxes = {0};
+            sort_ordering->sort_descs.descs.emplace_back(true, false);
+        }
+        auto partition_writer = create_spill_writer(fs_base_path, tuple_desc, nullptr, sort_ordering);
+        EXPECT_OK(partition_writer->init());
+
+        // The error comes before the rows are read, so the chunk has no rows.
+        ChunkPtr chunk = ChunkHelper::new_chunk(*tuple_desc, 0);
+
+        Status st;
+        if (sorted) {
+            // The sorted mode keeps the rows in memory from the first write.
+            EXPECT_OK(partition_writer->write(chunk));
+            st = partition_writer->flush();
+            EXPECT_TRUE(st.is_not_supported()) << "sorted: " << sorted << ", " << st;
+            st = partition_writer->finish();
+            EXPECT_TRUE(st.is_not_supported()) << "sorted: " << sorted << ", " << st;
+        } else {
+            // The first flush leaves the mode that writes to the file directly, the second one spills.
+            EXPECT_OK(partition_writer->write(chunk));
+            EXPECT_OK(partition_writer->flush());
+            EXPECT_OK(partition_writer->write(chunk));
+            st = partition_writer->flush();
+            EXPECT_TRUE(st.is_not_supported()) << "sorted: " << sorted << ", " << st;
+        }
+        EXPECT_NE(std::string::npos, st.message().find("payload")) << st;
+    }
+}
+
+// TIME has no storage field type, but its column is a DoubleColumn. We expect the writer to spill, sort and merge
+// TIME columns, also inside an array, as DOUBLE columns, and to hand the file writer the same TIME columns again.
+TEST_F(PartitionChunkWriterTest, spill_writer_sorts_and_spills_time_columns) {
+    struct Row {
+        int64_t k;
+        std::optional<double> start;
+        std::optional<double> end;
+        std::optional<std::vector<double>> times;
+    };
+    auto make_row = [](int64_t k, std::optional<double> start) {
+        Row row{k, start, std::nullopt, std::nullopt};
+        if (start.has_value()) {
+            row.end = *start + 1800.0;
+            row.times = std::vector<double>{*start, *start + 1.0};
+        }
+        return row;
+    };
+    // The start time is negative, null or up to the end of the day, and the rows of a chunk are not ordered.
+    const std::vector<std::vector<Row>> rows_of_chunks = {
+            {make_row(1, 64800.0), make_row(2, 3600.0), make_row(3, std::nullopt)},
+            {make_row(4, 32400.0), make_row(5, 86399.0), make_row(6, 7200.0)},
+            {make_row(7, -3600.0), make_row(8, 43200.0), make_row(9, 21600.0)}};
+    // The sorted order of the keys: the start time ascending, the null first.
+    const std::vector<int64_t> sorted_keys = {3, 7, 2, 6, 9, 4, 8, 1, 5};
+
+    for (bool sorted : {true, false}) {
+        std::string fs_base_path = "base_path";
+        std::filesystem::create_directories(fs_base_path + "/c1");
+        DeferOp cleanup([&]() { std::filesystem::remove_all(fs_base_path); });
+
+        parquet::Utils::SlotDesc slot_descs[] = {{"k", TYPE_BIGINT_DESC, 1},
+                                                 {"start_time", TYPE_TIME_DESC, 2},
+                                                 {"end_time", TYPE_TIME_DESC, 3},
+                                                 {"times", TypeDescriptor::create_array_type(TYPE_TIME_DESC), 4},
+                                                 {""}};
+        TupleDescriptor* tuple_desc = parquet::Utils::create_tuple_descriptor(_runtime_state, &_pool, slot_descs);
+        ASSERT_OK(SpillPartitionChunkWriter::check_tuple_supported(tuple_desc, tuple_desc->slots().size()));
+
+        auto writer_helper = WriterHelper::instance();
+        writer_helper->reset();
+        std::shared_ptr<SortOrdering> sort_ordering;
+        if (sorted) {
+            sort_ordering = std::make_shared<SortOrdering>();
+            sort_ordering->sort_key_idxes = {1};
+            sort_ordering->sort_descs.descs.emplace_back(true, true);
+        }
+        auto partition_writer = create_spill_writer(fs_base_path, tuple_desc, nullptr, sort_ordering);
+        EXPECT_OK(partition_writer->init());
+
+        // One spilled block per chunk
+        for (const auto& rows : rows_of_chunks) {
+            ChunkPtr chunk = ChunkHelper::new_chunk(*tuple_desc, rows.size());
+            for (const auto& row : rows) {
+                chunk->get_column_raw_ptr_by_index(0)->append_datum(Datum(row.k));
+                for (size_t i = 1; i <= 2; ++i) {
+                    const auto& value = i == 1 ? row.start : row.end;
+                    if (value.has_value()) {
+                        chunk->get_column_raw_ptr_by_index(i)->append_datum(Datum(*value));
+                    } else {
+                        chunk->get_column_raw_ptr_by_index(i)->append_nulls(1);
+                    }
+                }
+                if (row.times.has_value()) {
+                    DatumArray array;
+                    for (double value : *row.times) {
+                        array.emplace_back(Datum(value));
+                    }
+                    chunk->get_column_raw_ptr_by_index(3)->append_datum(Datum(array));
+                } else {
+                    chunk->get_column_raw_ptr_by_index(3)->append_nulls(1);
+                }
+            }
+
+            EXPECT_OK(partition_writer->write(chunk));
+            EXPECT_OK(partition_writer->flush());
+            EXPECT_OK(partition_writer->wait_flush());
+            Awaitility().timeout(3 * 1000 * 1000).interval(300 * 1000).until([partition_writer]() {
+                return partition_writer->_spilling_bytes_usage.load(std::memory_order_relaxed) == 0;
+            });
+            EXPECT_OK(_writer_status);
+        }
+
+        EXPECT_OK(partition_writer->finish());
+        Awaitility().timeout(3 * 1000 * 1000).interval(300 * 1000).until([&]() {
+            return partition_writer->is_finished();
+        });
+        EXPECT_EQ(_writer_commited, true);
+        EXPECT_OK(_writer_status);
+
+        // Read all the written rows back. The unsorted mode writes the first chunk directly and spills the others,
+        // so it can write more than one chunk and in any order.
+        std::vector<Row> actual;
+        for (const auto& result_chunk : writer_helper->result_chunks()) {
+            ASSERT_EQ(result_chunk->num_columns(), 4);
+            // The file writer reads the TIME values of a DoubleColumn, the column of the TIME type.
+            for (size_t i : {1, 2}) {
+                const Column* data_column = ColumnHelper::get_data_column(result_chunk->get_column_by_index(i).get());
+                EXPECT_NE(nullptr, dynamic_cast<const DoubleColumn*>(data_column));
+            }
+            for (size_t i = 0; i < result_chunk->num_rows(); ++i) {
+                Row row;
+                row.k = result_chunk->get_column_by_index(0)->get(i).get_int64();
+                auto start = result_chunk->get_column_by_index(1)->get(i);
+                auto end = result_chunk->get_column_by_index(2)->get(i);
+                auto times = result_chunk->get_column_by_index(3)->get(i);
+                if (!start.is_null()) {
+                    row.start = start.get_double();
+                }
+                if (!end.is_null()) {
+                    row.end = end.get_double();
+                }
+                if (!times.is_null()) {
+                    row.times = std::vector<double>();
+                    for (const auto& element : times.get_array()) {
+                        row.times->push_back(element.get_double());
+                    }
+                }
+                actual.push_back(std::move(row));
+            }
+        }
+        ASSERT_EQ(actual.size(), 9) << "sorted: " << sorted;
+
+        if (!sorted) {
+            std::sort(actual.begin(), actual.end(), [](const Row& a, const Row& b) { return a.k < b.k; });
+        }
+        std::map<int64_t, Row> expected_by_key;
+        for (const auto& rows : rows_of_chunks) {
+            for (const auto& row : rows) {
+                expected_by_key[row.k] = row;
+            }
+        }
+        for (size_t i = 0; i < actual.size(); ++i) {
+            int64_t expected_key = sorted ? sorted_keys[i] : static_cast<int64_t>(i + 1);
+            const Row& expected = expected_by_key[expected_key];
+            const Row& row = actual[i];
+            EXPECT_EQ(row.k, expected_key) << "sorted: " << sorted << ", row: " << i;
+            EXPECT_EQ(row.start, expected.start) << "key: " << expected_key;
+            EXPECT_EQ(row.end, expected.end) << "key: " << expected_key;
+            EXPECT_EQ(row.times, expected.times) << "key: " << expected_key;
+        }
+    }
+}
+
+// The sink columns are the first slots of the tuple. A tuple that has more slots than the sink has columns is spilled
+// with the sink columns only, and the extra slot is not read, whatever its type is.
+TEST_F(PartitionChunkWriterTest, spill_writer_uses_only_the_sink_columns_of_a_wider_tuple) {
+    std::string fs_base_path = "base_path";
+    std::filesystem::create_directories(fs_base_path + "/c1");
+    DeferOp cleanup([&]() { std::filesystem::remove_all(fs_base_path); });
+
+    parquet::Utils::SlotDesc slot_descs[] = {{"k", TYPE_BIGINT_DESC, 0},
+                                             {"name", TYPE_VARCHAR_DESC, 1},
+                                             {"hidden", TypeDescriptor::create_variant_type(), 2},
+                                             {""}};
+    TupleDescriptor* tuple_desc = parquet::Utils::create_tuple_descriptor(_runtime_state, &_pool, slot_descs);
+    auto make_evaluators = [](const std::vector<TypeDescriptor>& types) {
+        return std::make_shared<std::vector<std::unique_ptr<ColumnEvaluator>>>(
+                ColumnSlotIdEvaluator::from_types(types));
+    };
+    auto make_sort_ordering = [](uint32_t key_idx) {
+        auto sort_ordering = std::make_shared<SortOrdering>();
+        sort_ordering->sort_key_idxes = {key_idx};
+        sort_ordering->sort_descs.descs.emplace_back(true, false);
+        return sort_ordering;
+    };
+
+    {
+        auto writer_helper = WriterHelper::instance();
+        writer_helper->reset();
+        auto partition_writer =
+                create_spill_writer(fs_base_path, tuple_desc, make_evaluators({TYPE_BIGINT_DESC, TYPE_VARCHAR_DESC}),
+                                    make_sort_ordering(0));
+        EXPECT_OK(partition_writer->init());
+
+        const std::vector<std::vector<int64_t>> keys_of_chunks = {{9, 3, 6}, {8, 2, 5}, {7, 1, 4}};
+        for (const auto& keys : keys_of_chunks) {
+            ChunkPtr chunk = ChunkHelper::new_chunk(*tuple_desc, keys.size());
+            for (int64_t key : keys) {
+                std::string name = "name" + std::to_string(key);
+                chunk->get_column_raw_ptr_by_index(0)->append_datum(Datum(key));
+                chunk->get_column_raw_ptr_by_index(1)->append_datum(Datum(Slice(name)));
+            }
+            chunk->get_column_raw_ptr_by_index(2)->append_nulls(keys.size());
+
+            EXPECT_OK(partition_writer->write(chunk));
+            EXPECT_OK(partition_writer->flush());
+            EXPECT_OK(partition_writer->wait_flush());
+            Awaitility().timeout(3 * 1000 * 1000).interval(300 * 1000).until([partition_writer]() {
+                return partition_writer->_spilling_bytes_usage.load(std::memory_order_relaxed) == 0;
+            });
+            EXPECT_OK(_writer_status);
+        }
+
+        EXPECT_OK(partition_writer->finish());
+        Awaitility().timeout(3 * 1000 * 1000).interval(300 * 1000).until([&]() {
+            return partition_writer->is_finished();
+        });
+        EXPECT_EQ(_writer_commited, true);
+        EXPECT_OK(_writer_status);
+
+        ASSERT_EQ(writer_helper->result_chunks().size(), 1);
+        auto result_chunk = writer_helper->result_chunks()[0];
+        ASSERT_EQ(result_chunk->num_columns(), 2);
+        ASSERT_EQ(result_chunk->num_rows(), 9);
+        for (size_t i = 0; i < result_chunk->num_rows(); ++i) {
+            int64_t key = result_chunk->get_column_by_index(0)->get(i).get_int64();
+            EXPECT_EQ(key, static_cast<int64_t>(i + 1));
+            EXPECT_EQ(result_chunk->get_column_by_index(1)->get(i).get_slice().to_string(),
+                      "name" + std::to_string(key));
+        }
+    }
+
+    // The tuple has fewer slots than the sink has columns: an error, and no read of a column that does not exist.
+    {
+        auto partition_writer = create_spill_writer(
+                fs_base_path, tuple_desc,
+                make_evaluators({TYPE_BIGINT_DESC, TYPE_VARCHAR_DESC, TYPE_INT_DESC, TYPE_INT_DESC}),
+                make_sort_ordering(0));
+        EXPECT_OK(partition_writer->init());
+        ChunkPtr chunk = ChunkHelper::new_chunk(*tuple_desc, 0);
+        EXPECT_OK(partition_writer->write(chunk));
+        Status st = partition_writer->flush();
+        EXPECT_TRUE(st.is_internal_error()) << st;
+    }
+
+    // The sort key is not a sink column.
+    {
+        auto partition_writer =
+                create_spill_writer(fs_base_path, tuple_desc, make_evaluators({TYPE_BIGINT_DESC, TYPE_VARCHAR_DESC}),
+                                    make_sort_ordering(2));
+        EXPECT_OK(partition_writer->init());
+        ChunkPtr chunk = ChunkHelper::new_chunk(*tuple_desc, 0);
+        EXPECT_OK(partition_writer->write(chunk));
+        Status st = partition_writer->flush();
+        EXPECT_TRUE(st.is_internal_error()) << st;
+    }
+
+    // Without evaluators, the sink columns are all the slots, and a chunk has fewer columns than the schema.
+    {
+        parquet::Utils::SlotDesc two_column_descs[] = {
+                {"k", TYPE_BIGINT_DESC, 0}, {"name", TYPE_VARCHAR_DESC, 1}, {""}};
+        TupleDescriptor* two_column_tuple =
+                parquet::Utils::create_tuple_descriptor(_runtime_state, &_pool, two_column_descs);
+        parquet::Utils::SlotDesc one_column_descs[] = {{"k", TYPE_BIGINT_DESC, 0}, {""}};
+        TupleDescriptor* one_column_tuple =
+                parquet::Utils::create_tuple_descriptor(_runtime_state, &_pool, one_column_descs);
+        auto partition_writer = create_spill_writer(fs_base_path, two_column_tuple, nullptr, make_sort_ordering(0));
+        EXPECT_OK(partition_writer->init());
+        ChunkPtr chunk = ChunkHelper::new_chunk(*one_column_tuple, 0);
+        EXPECT_OK(partition_writer->write(chunk));
+        Status st = partition_writer->flush();
+        EXPECT_TRUE(st.is_internal_error()) << st;
+    }
+}
+
+// Reads the column of a slot as the chunk has it. When |fail| is set, it fails on a chunk with |failing_rows| rows, to
+// fail the merge after the evaluation of the other chunks. When |copy| is set, it returns a copy of the column, which
+// the writer can not map back to a column of the chunk.
+class TestSlotEvaluator final : public ColumnEvaluator {
+public:
+    TestSlotEvaluator(SlotId slot_id, TypeDescriptor type, std::shared_ptr<std::atomic<bool>> fail, size_t failing_rows,
+                      bool copy)
+            : _slot_id(slot_id),
+              _type(std::move(type)),
+              _fail(std::move(fail)),
+              _failing_rows(failing_rows),
+              _copy(copy) {}
+
+    Status init() override { return Status::OK(); }
+
+    std::unique_ptr<ColumnEvaluator> clone() const override {
+        return std::make_unique<TestSlotEvaluator>(_slot_id, _type, _fail, _failing_rows, _copy);
+    }
+
+    TypeDescriptor type() const override { return _type; }
+
+    StatusOr<ColumnPtr> evaluate(Chunk* chunk) override {
+        if (_fail != nullptr && _fail->load() && chunk->num_rows() == _failing_rows) {
+            return Status::InternalError("simulated evaluator failure");
+        }
+        ColumnPtr column = chunk->get_column_by_slot_id(_slot_id);
+        if (_copy) {
+            ColumnPtr copied = column->clone();
+            return copied;
+        }
+        return column;
+    }
+
+private:
+    SlotId _slot_id;
+    TypeDescriptor _type;
+    std::shared_ptr<std::atomic<bool>> _fail;
+    size_t _failing_rows;
+    bool _copy;
+};
+
+// The merge of the buffered chunks into one chunk can fail after it has read some of them. We expect the writer to keep
+// every buffered chunk then, and to answer the calls that follow (a flush again, wait, finish, the destructor) with
+// the same error or with a success, and never with a null chunk. Nothing may be lost either: after the cause of a
+// failure is gone, the same rows are written.
+TEST_F(PartitionChunkWriterTest, spill_writer_keeps_buffered_chunks_when_the_merge_fails) {
+    std::string fs_base_path = "base_path";
+    std::filesystem::create_directories(fs_base_path + "/c1");
+    DeferOp cleanup([&]() { std::filesystem::remove_all(fs_base_path); });
+
+    parquet::Utils::SlotDesc slot_descs[] = {{"k", TYPE_BIGINT_DESC, 0}, {"name", TYPE_VARCHAR_DESC, 1}, {""}};
+    TupleDescriptor* tuple_desc = parquet::Utils::create_tuple_descriptor(_runtime_state, &_pool, slot_descs);
+
+    auto fail = std::make_shared<std::atomic<bool>>(false);
+    auto make_evaluators = [&](bool copy_name_column) {
+        auto evaluators = std::make_shared<std::vector<std::unique_ptr<ColumnEvaluator>>>();
+        evaluators->push_back(std::make_unique<TestSlotEvaluator>(0, TYPE_BIGINT_DESC, nullptr, 0, false));
+        evaluators->push_back(
+                std::make_unique<TestSlotEvaluator>(1, TYPE_VARCHAR_DESC, fail, 2 /* rows */, copy_name_column));
+        return evaluators;
+    };
+    auto make_sort_ordering = []() {
+        auto sort_ordering = std::make_shared<SortOrdering>();
+        sort_ordering->sort_key_idxes = {0};
+        sort_ordering->sort_descs.descs.emplace_back(true, false);
+        return sort_ordering;
+    };
+    // The first chunk has one row and the second one has two rows, which the evaluator can tell apart.
+    auto make_chunk = [&](const std::vector<std::pair<int64_t, std::string>>& rows) {
+        ChunkPtr chunk = ChunkHelper::new_chunk(*tuple_desc, rows.size());
+        for (const auto& [k, name] : rows) {
+            chunk->get_column_raw_ptr_by_index(0)->append_datum(Datum(k));
+            chunk->get_column_raw_ptr_by_index(1)->append_datum(Datum(Slice(name)));
+        }
+        return chunk;
+    };
+    // The calls that the sink makes after a failed flush: finish, which flushes, waits and finishes the writers, and
+    // then the destructor.
+    auto call_like_the_sink = [](SpillPartitionChunkWriter* writer) {
+        Status st = writer->flush();
+        EXPECT_FALSE(st.ok());
+        EXPECT_OK(writer->wait_flush());
+        EXPECT_TRUE(writer->is_finished());
+        st = writer->finish();
+        EXPECT_FALSE(st.ok());
+    };
+
+    // The merge fails on the second chunk, after it has read the first one.
+    {
+        WriterHelper::instance()->reset();
+        auto partition_writer =
+                create_spill_writer(fs_base_path, tuple_desc, make_evaluators(false), make_sort_ordering());
+        EXPECT_OK(partition_writer->init());
+        EXPECT_OK(partition_writer->write(make_chunk({{2, "b"}})));
+        EXPECT_OK(partition_writer->write(make_chunk({{1, "a"}, {3, "c"}})));
+
+        fail->store(true);
+        Status st = partition_writer->flush();
+        EXPECT_TRUE(st.is_internal_error()) << st;
+        EXPECT_TRUE(_writer_status.is_internal_error())
+                << "the flush reports its error to the sink: " << _writer_status;
+        call_like_the_sink(partition_writer.get());
+        EXPECT_GT(partition_writer->get_flushable_bytes(), 0) << "the rows are still buffered";
+
+        // The cause is gone: the same rows are spilled and written, in order.
+        fail->store(false);
+        _writer_status = Status::OK();
+        EXPECT_OK(partition_writer->flush());
+        EXPECT_OK(partition_writer->wait_flush());
+        Awaitility().timeout(3 * 1000 * 1000).interval(300 * 1000).until([&]() {
+            return partition_writer->_spilling_bytes_usage.load(std::memory_order_relaxed) == 0;
+        });
+        EXPECT_OK(partition_writer->finish());
+        Awaitility().timeout(3 * 1000 * 1000).interval(300 * 1000).until([&]() {
+            return partition_writer->is_finished();
+        });
+        EXPECT_EQ(_writer_commited, true);
+        EXPECT_OK(_writer_status);
+
+        auto writer_helper = WriterHelper::instance();
+        ASSERT_EQ(writer_helper->result_chunks().size(), 1);
+        auto result_chunk = writer_helper->result_chunks()[0];
+        ASSERT_EQ(result_chunk->num_rows(), 3);
+        const std::vector<std::string> expected_names = {"a", "b", "c"};
+        for (size_t i = 0; i < 3; ++i) {
+            EXPECT_EQ(result_chunk->get_column_by_index(0)->get(i).get_int64(), static_cast<int64_t>(i + 1));
+            EXPECT_EQ(result_chunk->get_column_by_index(1)->get(i).get_slice().to_string(), expected_names[i]);
+        }
+    }
+
+    // The evaluator gives a column that is not a column of the chunk. The writer finds it before it reads any chunk.
+    {
+        WriterHelper::instance()->reset();
+        auto partition_writer =
+                create_spill_writer(fs_base_path, tuple_desc, make_evaluators(true), make_sort_ordering());
+        EXPECT_OK(partition_writer->init());
+        EXPECT_OK(partition_writer->write(make_chunk({{2, "b"}})));
+        EXPECT_OK(partition_writer->write(make_chunk({{1, "a"}, {3, "c"}})));
+
+        Status st = partition_writer->flush();
+        EXPECT_TRUE(st.is_internal_error()) << st;
+        EXPECT_NE(std::string::npos, st.message().find("unknown column index")) << st;
+        call_like_the_sink(partition_writer.get());
+        // The writer still takes chunks, and fails again the same way.
+        EXPECT_OK(partition_writer->write(make_chunk({{4, "d"}})));
+        EXPECT_FALSE(partition_writer->flush().ok());
+    }
+
+    // The same without the sort: the chunks are written to the file directly when the sink finishes.
+    {
+        WriterHelper::instance()->reset();
+        auto partition_writer = create_spill_writer(fs_base_path, tuple_desc, make_evaluators(true), nullptr);
+        EXPECT_OK(partition_writer->init());
+        EXPECT_OK(partition_writer->write(make_chunk({{2, "b"}})));
+        // The first flush leaves the mode that writes to the file directly.
+        EXPECT_OK(partition_writer->flush());
+        EXPECT_OK(partition_writer->write(make_chunk({{1, "a"}, {3, "c"}})));
+        EXPECT_FALSE(partition_writer->flush().ok());
+        EXPECT_OK(partition_writer->wait_flush());
+        // The rows are still in the writer, so finish() writes them to the file directly.
+        EXPECT_OK(partition_writer->finish());
+        EXPECT_EQ(WriterHelper::instance()->result_rows(), 3);
+    }
+}
+
+// The same failure seen from the sink: the operator finishes the sink, which flushes every writer, and the fragment
+// is cancelled. The sink is finished and rolled back again while it closes. None of it may reach a released chunk.
+TEST_F(PartitionChunkWriterTest, sink_calls_after_a_failed_merge_do_not_crash) {
+    std::string fs_base_path = "base_path";
+    std::filesystem::create_directories(fs_base_path + "/c1");
+    DeferOp cleanup([&]() { std::filesystem::remove_all(fs_base_path); });
+
+    parquet::Utils::SlotDesc slot_descs[] = {{"k", TYPE_BIGINT_DESC, 0}, {"name", TYPE_VARCHAR_DESC, 1}, {""}};
+    TupleDescriptor* tuple_desc = parquet::Utils::create_tuple_descriptor(_runtime_state, &_pool, slot_descs);
+
+    auto mock_writer_factory = std::make_shared<MockFileWriterFactory>();
+    EXPECT_CALL(*mock_writer_factory, create(::testing::_)).WillRepeatedly([](const std::string&) {
+        WriterAndStream ws;
+        ws.writer = std::make_unique<MockWriter>();
+        ws.stream = std::make_unique<Stream>(std::make_unique<MockFile>(), nullptr, nullptr);
+        return ws;
+    });
+    auto location_provider = std::make_shared<LocationProvider>(fs_base_path, "ffffff", 0, 0, "parquet");
+
+    // The second column is a copy of the column of the chunk, which the writer can not map back to the chunk.
+    auto evaluators = std::make_shared<std::vector<std::unique_ptr<ColumnEvaluator>>>();
+    evaluators->push_back(std::make_unique<TestSlotEvaluator>(0, TYPE_BIGINT_DESC, nullptr, 0, false));
+    evaluators->push_back(std::make_unique<TestSlotEvaluator>(1, TYPE_VARCHAR_DESC, nullptr, 0, true));
+    auto sort_ordering = std::make_shared<SortOrdering>();
+    sort_ordering->sort_key_idxes = {0};
+    sort_ordering->sort_descs.descs.emplace_back(true, false);
+    auto partition_chunk_writer_ctx = std::make_shared<SpillPartitionChunkWriterContext>(
+            SpillPartitionChunkWriterContext{{mock_writer_factory, location_provider, 1073741824, false},
+                                             nullptr,
+                                             _fragment_context.get(),
+                                             tuple_desc,
+                                             evaluators,
+                                             sort_ordering});
+    auto partition_chunk_writer_factory =
+            std::make_unique<SpillPartitionChunkWriterFactory>(partition_chunk_writer_ctx);
+
+    std::vector<std::unique_ptr<ColumnEvaluator>> partition_column_evaluators;
+    auto sink = std::make_unique<IcebergChunkSink>(std::vector<std::string>{}, std::vector<std::string>{},
+                                                   std::move(partition_column_evaluators),
+                                                   std::move(partition_chunk_writer_factory), _runtime_state);
+    auto poller = MockPoller();
+    sink->set_io_poller(&poller);
+    sink->init_profile();
+
+    for (int64_t k = 0; k < 3; ++k) {
+        ChunkPtr chunk = ChunkHelper::new_chunk(*tuple_desc, 1);
+        std::string name = "name" + std::to_string(k);
+        chunk->get_column_raw_ptr_by_index(0)->append_datum(Datum(k));
+        chunk->get_column_raw_ptr_by_index(1)->append_datum(Datum(Slice(name)));
+        EXPECT_OK(sink->add(chunk));
+    }
+
+    EXPECT_FALSE(sink->finish().ok());
+    EXPECT_FALSE(sink->status().ok()) << "the writer reports its error to the sink";
+    EXPECT_FALSE(sink->finish().ok());
+    sink->rollback();
+    EXPECT_TRUE(sink->is_finished());
 }
 
 } // namespace

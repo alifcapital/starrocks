@@ -67,6 +67,10 @@ public:
 
     void set_profile(RuntimeProfile* profile);
 
+    const PartitionChunkWriterFactory* TEST_partition_chunk_writer_factory() const {
+        return _partition_chunk_writer_factory.get();
+    }
+
 protected:
     void push_rollback_action(const std::function<void()>& action);
     void init_profile();

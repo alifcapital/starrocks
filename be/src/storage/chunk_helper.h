@@ -91,6 +91,11 @@ public:
     // Create a vectorized column from field.
     static MutableColumnPtr column_from_field(const Field& field);
 
+    // Returns true if column_from_field() can create a column for |field| and all of its sub fields.
+    // column_from_field() aborts the process on a type that has no storage field type (for example
+    // TYPE_TIME), so a caller that builds a Field from a slot type checks it first and rejects the type.
+    static bool is_column_creatable(const Field& field);
+
     // Get char column indexes
     static std::vector<size_t> get_char_field_indexes(const Schema& schema);
 

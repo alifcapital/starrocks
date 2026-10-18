@@ -14,12 +14,17 @@
 
 #include "connector/partition_chunk_writer.h"
 
+#include <fmt/format.h>
+
 #include "column/chunk.h"
+#include "column/field.h"
+#include "column/schema.h"
 #include "connector/async_flush_stream_poller.h"
 #include "connector/connector_sink_executor.h"
 #include "connector/sink_memory_manager.h"
 #include "exec/pipeline/fragment_context.h"
 #include "formats/file_writer.h"
+#include "runtime/descriptors.h"
 #include "runtime/runtime_state.h"
 #include "storage/chunk_helper.h"
 #include "storage/convert_helper.h"
@@ -32,6 +37,47 @@
 namespace starrocks::connector {
 
 DEFINE_FAIL_POINT(parquet_chunk_writer_init_failed);
+
+namespace {
+
+// TIME has no storage field type, but a TIME value is a double in memory and its column is a DoubleColumn. So the
+// storage field of a TIME slot says DOUBLE: we expect the sort, the spill and the merge to treat the column as any
+// DOUBLE column. The file writer reads the type from the slot expression, so the values keep their TIME meaning.
+void map_time_to_double(const TypeDescriptor& type, Field* field) {
+    if (type.type == TYPE_TIME) {
+        *field = *field->convert_to(TYPE_DOUBLE);
+        return;
+    }
+    // The sub fields follow the children of the type: the element, the key and the value, or the struct fields.
+    if (!field->has_sub_fields()) {
+        return;
+    }
+    auto& sub_fields = field->sub_fields();
+    for (size_t i = 0; i < sub_fields.size() && i < type.children.size(); ++i) {
+        map_time_to_double(type.children[i], &sub_fields[i]);
+    }
+}
+
+FieldPtr make_storage_field(const SlotDescriptor& slot) {
+    FieldPtr field = Field::convert_from_slot_desc(slot);
+    map_time_to_double(slot.type(), field.get());
+    return field;
+}
+
+// A schema that comes with the chunk does not know the slot type, so the message names the storage type of the field.
+Status check_schema_supported(const Schema& schema) {
+    for (size_t i = 0; i < schema.num_fields(); ++i) {
+        const FieldPtr& field = schema.field(i);
+        if (!ChunkHelper::is_column_creatable(*field)) {
+            std::string type_name = field->type() != nullptr ? logical_type_to_string(field->type()->type()) : "null";
+            return Status::NotSupported(fmt::format("the spill writer does not support column {} of storage type {}",
+                                                    field->name(), type_name));
+        }
+    }
+    return Status::OK();
+}
+
+} // namespace
 
 PartitionChunkWriter::PartitionChunkWriter(std::string partition, std::vector<int8_t> partition_field_null_list,
                                            const std::shared_ptr<PartitionChunkWriterContext>& ctx)
@@ -112,8 +158,32 @@ SpillPartitionChunkWriter::SpillPartitionChunkWriter(std::string partition,
     _chunk_spill_token = ExecEnv::GetInstance()->connector_sink_spill_executor()->create_token();
     _block_merge_token = StorageEngine::instance()->load_spill_block_merge_executor()->create_token();
     _tuple_desc = ctx->tuple_desc;
+    // The sink columns are the first slots of the tuple, one for each evaluator.
+    if (_column_evaluators != nullptr) {
+        _num_columns = _column_evaluators->size();
+    } else if (_tuple_desc != nullptr) {
+        _num_columns = _tuple_desc->slots().size();
+    }
     _writer_id = generate_uuid();
     _spill_mode = _sort_ordering != nullptr;
+}
+
+Status SpillPartitionChunkWriter::check_tuple_supported(const TupleDescriptor* tuple_desc, size_t num_columns) {
+    if (tuple_desc == nullptr) {
+        return Status::NotSupported("the tuple descriptor of the sink is missing");
+    }
+    if (tuple_desc->slots().size() < num_columns) {
+        return Status::InternalError(fmt::format("the sink tuple has {} slots, fewer than the {} sink columns",
+                                                 tuple_desc->slots().size(), num_columns));
+    }
+    for (size_t i = 0; i < num_columns; ++i) {
+        const SlotDescriptor* slot = tuple_desc->slots()[i];
+        if (!ChunkHelper::is_column_creatable(*make_storage_field(*slot))) {
+            return Status::NotSupported(fmt::format("the spill writer does not support column {} of type {}",
+                                                    slot->col_name(), slot->type().debug_string()));
+        }
+    }
+    return Status::OK();
 }
 
 SpillPartitionChunkWriter::~SpillPartitionChunkWriter() {
@@ -165,12 +235,19 @@ Status SpillPartitionChunkWriter::write(const ChunkPtr& chunk) {
 
 Status SpillPartitionChunkWriter::flush() {
     RETURN_IF(!_file_writer, Status::OK());
+    // The sink memory manager calls flush() to release memory and only logs the result. A failed flush keeps the rows
+    // in memory, so we fear that the manager chooses this writer again and again and nobody sees the error. So we
+    // report the error to the sink too, which fails the fragment.
+    Status st;
     // Change to spill mode if memory is insufficent.
     if (!_spill_mode) {
         _spill_mode = true;
-        return commit_file();
+        st = commit_file();
+    } else {
+        st = _spill();
     }
-    return _spill();
+    _handle_err(st);
+    return st;
 }
 
 Status SpillPartitionChunkWriter::wait_flush() {
@@ -351,36 +428,73 @@ Status SpillPartitionChunkWriter::_merge_chunks() {
     // module functions of native table directly.
     size_t num_rows = std::accumulate(_chunks.begin(), _chunks.end(), 0,
                                       [](int sum, const ChunkPtr& chunk) { return sum + chunk->num_rows(); });
-    _result_chunk = _create_schema_chunk(_chunks.front(), num_rows);
+    ASSIGN_OR_RETURN(ChunkPtr result_chunk, _create_schema_chunk(_chunks.front(), num_rows));
 
-    std::unordered_map<const Column*, size_t> col_ptr_index_map;
-    auto& columns = _chunks.front()->columns();
-    for (size_t i = 0; i < columns.size(); ++i) {
-        col_ptr_index_map[columns[i]->get_ptr()] = i;
-    }
-    for (auto& chunk : _chunks) {
-        for (size_t i = 0; i < _result_chunk->num_columns(); ++i) {
-            auto* dst_col = _result_chunk->get_column_raw_ptr_by_index(i);
-            ColumnPtr src_col;
-            if (_column_evaluators) {
-                ASSIGN_OR_RETURN(src_col, (*_column_evaluators)[i]->evaluate(chunk.get()));
-            } else {
-                src_col = chunk->get_column_by_index(i);
-            }
-            dst_col->append(*src_col);
-            if (chunk == _chunks.front()) {
-                auto it = col_ptr_index_map.find(src_col.get());
-                if (it != col_ptr_index_map.end()) {
-                    _col_index_map[it->second] = i;
-                } else {
-                    return Status::InternalError("unknown column index: " + std::to_string(i));
-                }
+    // We fear an error after the first input chunk is released: the released rows are lost, and a later call (a flush
+    // again, finish, the memory manager) would find them missing in _chunks. So we read and check the sink columns of
+    // all the chunks first. The loop that appends and releases them has no error path, so on an error _chunks,
+    // _result_chunk and _col_index_map stay as they were.
+    const size_t num_columns = result_chunk->num_columns();
+    if (_column_evaluators != nullptr) {
+        if (_column_evaluators->size() < num_columns) {
+            return Status::InternalError(fmt::format("the spill schema has {} columns, more than the {} evaluators",
+                                                     num_columns, _column_evaluators->size()));
+        }
+    } else {
+        for (const auto& chunk : _chunks) {
+            if (chunk->num_columns() < num_columns) {
+                return Status::InternalError(fmt::format("the spill schema has {} columns, more than the {} of a chunk",
+                                                         num_columns, chunk->num_columns()));
             }
         }
-        chunk.reset();
     }
 
-    _chunks.clear();
+    std::vector<Columns> src_columns;
+    src_columns.reserve(_chunks.size());
+    for (const auto& chunk : _chunks) {
+        Columns& columns = src_columns.emplace_back();
+        columns.reserve(num_columns);
+        for (size_t i = 0; i < num_columns; ++i) {
+            if (_column_evaluators) {
+                ASSIGN_OR_RETURN(auto src_col, (*_column_evaluators)[i]->evaluate(chunk.get()));
+                columns.push_back(std::move(src_col));
+            } else {
+                columns.push_back(chunk->get_column_by_index(i));
+            }
+        }
+    }
+
+    // The writer of the file reads the columns of the result chunk through the slot ids of the first chunk, so every
+    // sink column must be a column of the first chunk.
+    std::unordered_map<const Column*, size_t> col_ptr_index_map;
+    auto& first_columns = _chunks.front()->columns();
+    for (size_t i = 0; i < first_columns.size(); ++i) {
+        col_ptr_index_map[first_columns[i]->get_ptr()] = i;
+    }
+    std::vector<std::pair<int, int>> col_index_pairs;
+    col_index_pairs.reserve(num_columns);
+    for (size_t i = 0; i < num_columns; ++i) {
+        auto it = col_ptr_index_map.find(src_columns.front()[i].get());
+        if (it == col_ptr_index_map.end()) {
+            return Status::InternalError("unknown column index: " + std::to_string(i));
+        }
+        col_index_pairs.emplace_back(it->second, i);
+    }
+    for (const auto& [chunk_idx, result_idx] : col_index_pairs) {
+        _col_index_map[chunk_idx] = result_idx;
+    }
+
+    // We release each input chunk as soon as it is appended, to keep the memory of the merge low. A chunk leaves
+    // _chunks together with its release, so _chunks never holds a released chunk.
+    for (auto& columns : src_columns) {
+        for (size_t i = 0; i < num_columns; ++i) {
+            result_chunk->get_column_raw_ptr_by_index(i)->append(*columns[i]);
+        }
+        columns.clear();
+        _chunks.pop_front();
+    }
+
+    _result_chunk = std::move(result_chunk);
     return Status::OK();
 }
 
@@ -390,17 +504,16 @@ bool SpillPartitionChunkWriter::_mem_insufficent() {
 }
 
 void SpillPartitionChunkWriter::_handle_err(const Status& st) {
-    if (!st.ok()) {
+    if (!st.ok() && _error_handler) {
         _error_handler(st);
     }
 }
 
 SchemaPtr SpillPartitionChunkWriter::_make_schema() {
     Fields fields;
-    fields.reserve(_tuple_desc->slots().size());
-    for (auto& slot : _tuple_desc->slots()) {
-        auto field = Field::convert_from_slot_desc(*slot);
-        fields.push_back(field);
+    fields.reserve(_num_columns);
+    for (size_t i = 0; i < _num_columns; ++i) {
+        fields.push_back(make_storage_field(*_tuple_desc->slots()[i]));
     }
 
     SchemaPtr schema;
@@ -413,20 +526,39 @@ SchemaPtr SpillPartitionChunkWriter::_make_schema() {
     return schema;
 }
 
-ChunkPtr SpillPartitionChunkWriter::_create_schema_chunk(const ChunkPtr& base_chunk, size_t num_rows) {
-    if (!_schema) {
-        const SchemaPtr& schema = base_chunk->schema();
-        if (schema) {
-            _schema = schema;
-            if (_sort_ordering) {
-                _schema->set_sort_key_idxes(_sort_ordering->sort_key_idxes);
-                _schema->set_sort_descs(std::make_shared<SortDescs>(_sort_ordering->sort_descs));
-            }
-        } else {
-            _schema = _make_schema();
+Status SpillPartitionChunkWriter::_check_sort_key_idxes(size_t num_columns) const {
+    if (_sort_ordering == nullptr) {
+        return Status::OK();
+    }
+    for (uint32_t idx : _sort_ordering->sort_key_idxes) {
+        if (idx >= num_columns) {
+            return Status::InternalError(
+                    fmt::format("the sort key index {} is out of the {} sink columns", idx, num_columns));
         }
     }
-    auto chunk = ChunkHelper::new_chunk(*_schema, num_rows);
+    return Status::OK();
+}
+
+StatusOr<ChunkPtr> SpillPartitionChunkWriter::_create_schema_chunk(const ChunkPtr& base_chunk, size_t num_rows) {
+    if (!_schema) {
+        SchemaPtr schema = base_chunk->schema();
+        if (schema) {
+            RETURN_IF_ERROR(check_schema_supported(*schema));
+            RETURN_IF_ERROR(_check_sort_key_idxes(schema->num_fields()));
+            if (_sort_ordering) {
+                schema->set_sort_key_idxes(_sort_ordering->sort_key_idxes);
+                schema->set_sort_descs(std::make_shared<SortDescs>(_sort_ordering->sort_descs));
+            }
+        } else {
+            // The sink checks the tuple before it chooses this writer. We check it again here because creating a
+            // chunk for a field without a storage field type aborts the process, and an error only fails the query.
+            RETURN_IF_ERROR(check_tuple_supported(_tuple_desc, _num_columns));
+            RETURN_IF_ERROR(_check_sort_key_idxes(_num_columns));
+            schema = _make_schema();
+        }
+        _schema = std::move(schema);
+    }
+    ChunkPtr chunk = ChunkHelper::new_chunk(*_schema, num_rows);
     return chunk;
 }
 

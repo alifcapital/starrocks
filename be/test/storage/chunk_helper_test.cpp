@@ -32,7 +32,9 @@
 #include "runtime/descriptors.h"
 #include "runtime/mem_tracker.h"
 #include "runtime/runtime_state.h"
+#include "storage/types.h"
 #include "testutil/assert.h"
+#include "types/array_type_info.h"
 #include "types/logical_type.h"
 
 namespace starrocks {
@@ -161,6 +163,49 @@ TEST_F(ChunkHelperTest, new_chunk_with_tuple) {
     ASSERT_EQ(chunk->get_column_by_slot_id(6)->get_name(), "float-8");
     ASSERT_EQ(chunk->get_column_by_slot_id(7)->get_name(), "binary");
     ASSERT_EQ(chunk->get_column_by_slot_id(8)->get_name(), "binary");
+}
+
+TEST_F(ChunkHelperTest, is_column_creatable) {
+    // The check must accept a type only if column_from_field() can create a column for it, because
+    // column_from_field() aborts the process on a type without a storage field type.
+    for (int i = 0; i < TYPE_MAX_VALUE; ++i) {
+        auto type = static_cast<LogicalType>(i);
+        if (type == TYPE_ARRAY || type == TYPE_MAP || type == TYPE_STRUCT) {
+            continue;
+        }
+        Field field(0, "c", get_type_info(type, 9, 2), true);
+        if (ChunkHelper::is_column_creatable(field)) {
+            auto column = ChunkHelper::column_from_field(field);
+            ASSERT_NE(nullptr, column.get()) << logical_type_to_string(type);
+        }
+    }
+
+    for (auto type : {TYPE_BOOLEAN, TYPE_TINYINT, TYPE_SMALLINT, TYPE_INT, TYPE_BIGINT, TYPE_LARGEINT, TYPE_FLOAT,
+                      TYPE_DOUBLE, TYPE_DECIMALV2, TYPE_CHAR, TYPE_VARCHAR, TYPE_DATE, TYPE_DATETIME, TYPE_JSON,
+                      TYPE_VARBINARY, TYPE_HLL, TYPE_OBJECT, TYPE_PERCENTILE}) {
+        Field field(0, "c", type, true);
+        ASSERT_TRUE(ChunkHelper::is_column_creatable(field)) << logical_type_to_string(type);
+    }
+    for (auto type : {TYPE_DECIMAL32, TYPE_DECIMAL64, TYPE_DECIMAL128, TYPE_DECIMAL256}) {
+        Field field(0, "c", type, 9, 2, true);
+        ASSERT_TRUE(ChunkHelper::is_column_creatable(field)) << logical_type_to_string(type);
+    }
+
+    // Types that have no storage field type.
+    for (auto type : {TYPE_UNKNOWN, TYPE_NONE, TYPE_NULL, TYPE_FUNCTION, TYPE_TIME, TYPE_BINARY, TYPE_VARIANT}) {
+        Field field(0, "c", type, true);
+        ASSERT_FALSE(ChunkHelper::is_column_creatable(field)) << logical_type_to_string(type);
+    }
+
+    // A nested field is creatable only when its sub fields are.
+    Field array_field(0, "c", get_array_type_info(get_type_info(TYPE_INT)), true);
+    ASSERT_FALSE(ChunkHelper::is_column_creatable(array_field)) << "an array without the element field";
+    array_field.add_sub_field(Field(1, "c.item", TYPE_INT, true));
+    ASSERT_TRUE(ChunkHelper::is_column_creatable(array_field));
+
+    Field time_array_field(0, "c", get_array_type_info(get_type_info(TYPE_TIME)), true);
+    time_array_field.add_sub_field(Field(1, "c.item", TYPE_TIME, true));
+    ASSERT_FALSE(ChunkHelper::is_column_creatable(time_array_field));
 }
 
 TEST_F(ChunkHelperTest, ReorderChunk) {

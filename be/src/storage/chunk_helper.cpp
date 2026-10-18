@@ -14,6 +14,7 @@
 
 #include "storage/chunk_helper.h"
 
+#include <algorithm>
 #include <numeric>
 #include <utility>
 
@@ -477,6 +478,51 @@ MutableColumnPtr ChunkHelper::column_from_field(const Field& field) {
     }
     default:
         return NullableIfNeed(column_from_field_type(type, false));
+    }
+}
+
+// It must accept exactly the scalar types of field_type_dispatch_column(), which column_from_field_type() calls:
+// we fear a type that is accepted here but reaches the CHECK in the dispatch, so the two lists are kept the same.
+static bool is_scalar_column_creatable(LogicalType type) {
+    switch (type) {
+#define M(ftype) case ftype:
+        APPLY_FOR_BASIC_LOGICAL_TYPE(M)
+        APPLY_FOR_METRIC_FIELD_TYPE(M)
+#undef M
+    case TYPE_UNSIGNED_SMALLINT:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool ChunkHelper::is_column_creatable(const Field& field) {
+    if (field.type() == nullptr) {
+        return false;
+    }
+    auto type = field.type()->type();
+    switch (type) {
+    case TYPE_DECIMAL32:
+    case TYPE_DECIMAL64:
+    case TYPE_DECIMAL128:
+    case TYPE_DECIMAL256:
+        return true;
+    case TYPE_ARRAY:
+    case TYPE_MAP:
+    case TYPE_STRUCT: {
+        // column_from_field() reads the sub fields without a check, so a nested field without them is rejected.
+        if (!field.has_sub_fields()) {
+            return false;
+        }
+        const auto& sub_fields = field.sub_fields();
+        if ((type == TYPE_ARRAY && sub_fields.size() != 1) || (type == TYPE_MAP && sub_fields.size() != 2)) {
+            return false;
+        }
+        return std::all_of(sub_fields.begin(), sub_fields.end(),
+                           [](const Field& sub_field) { return is_column_creatable(sub_field); });
+    }
+    default:
+        return is_scalar_column_creatable(type);
     }
 }
 

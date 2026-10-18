@@ -149,6 +149,12 @@ public:
 
     ~SpillPartitionChunkWriter() override;
 
+    // The writer keeps rows in a storage Schema built from the first |num_columns| slots, and creates its merge
+    // chunks from it. We fear a column type that has no storage field type (for example VARIANT): creating a chunk
+    // for it aborts the process. A sink calls this before it creates the writer factory, and uses the buffer writer
+    // when the result is an error.
+    static Status check_tuple_supported(const TupleDescriptor* tuple_desc, size_t num_columns);
+
     Status init() override;
 
     Status write(const ChunkPtr& chunk) override;
@@ -193,7 +199,9 @@ private:
 
     SchemaPtr _make_schema();
 
-    ChunkPtr _create_schema_chunk(const ChunkPtr& base_chunk, size_t row_nums);
+    Status _check_sort_key_idxes(size_t num_columns) const;
+
+    StatusOr<ChunkPtr> _create_schema_chunk(const ChunkPtr& base_chunk, size_t row_nums);
 
     bool _mem_insufficent();
 
@@ -203,6 +211,8 @@ private:
     std::shared_ptr<FileSystem> _fs = nullptr;
     pipeline::FragmentContext* _fragment_context = nullptr;
     TupleDescriptor* _tuple_desc = nullptr;
+    // The number of sink columns, which are the first slots of _tuple_desc.
+    size_t _num_columns = 0;
     std::shared_ptr<std::vector<std::unique_ptr<ColumnEvaluator>>> _column_evaluators;
     std::shared_ptr<SortOrdering> _sort_ordering;
     std::unique_ptr<ThreadPoolToken> _chunk_spill_token;

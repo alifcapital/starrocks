@@ -55,7 +55,8 @@ bool SinkOperatorMemoryManager::kill_victim() {
     size_t flush_bytes = victim->get_flushable_bytes();
     const auto result = victim->flush();
     LOG(INFO) << "kill victim: " << filename << ", result: " << result << ", flushable_bytes: " << flush_bytes;
-    return true;
+    // A failed flush releases no memory. We fear the caller chooses the same victim again and again, so it stops here.
+    return result.ok();
 }
 
 int64_t SinkOperatorMemoryManager::update_releasable_memory() {

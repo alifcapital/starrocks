@@ -105,14 +105,32 @@ StatusOr<std::unique_ptr<ConnectorChunkSink>> IcebergChunkSinkProvider::create_c
         file_writer_factory = std::make_shared<formats::UnknownFileWriterFactory>(ctx->format);
     }
 
+    // We fear a column type that has no storage field type (for example VARIANT): the spill writer creates its merge
+    // chunks from a storage schema and aborts the process on such a type. So we use the buffer writer when the tuple
+    // has one. The sink then neither spills nor sorts by the table sort order, the same as with
+    // enable_connector_sink_spill = false.
+    TupleDescriptor* tuple_desc = nullptr;
+    bool use_spill_writer = config::enable_connector_sink_spill;
+    if (use_spill_writer) {
+        tuple_desc = runtime_state->desc_tbl().get_tuple_descriptor(ctx->tuple_desc_id);
+        Status spill_check = SpillPartitionChunkWriter::check_tuple_supported(tuple_desc, column_evaluators->size());
+        if (!spill_check.ok()) {
+            use_spill_writer = false;
+            // Every driver of the sink makes the same decision, so only the first one logs it.
+            LOG_IF(WARNING, driver_id == 0)
+                    << "iceberg sink writes without spill, query_id: " << print_id(ctx->fragment_context->query_id())
+                    << ", reason: " << spill_check.message();
+        }
+    }
+
     std::unique_ptr<PartitionChunkWriterFactory> partition_chunk_writer_factory;
-    if (config::enable_connector_sink_spill) {
+    if (use_spill_writer) {
         auto partition_chunk_writer_ctx =
                 std::make_shared<SpillPartitionChunkWriterContext>(SpillPartitionChunkWriterContext{
                         {file_writer_factory, location_provider, ctx->max_file_size, partition_columns.empty()},
                         fs,
                         ctx->fragment_context,
-                        runtime_state->desc_tbl().get_tuple_descriptor(ctx->tuple_desc_id),
+                        tuple_desc,
                         column_evaluators,
                         ctx->sort_ordering});
         partition_chunk_writer_factory = std::make_unique<SpillPartitionChunkWriterFactory>(partition_chunk_writer_ctx);

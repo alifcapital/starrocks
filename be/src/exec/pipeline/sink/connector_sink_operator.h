@@ -33,7 +33,7 @@ public:
                           std::unique_ptr<connector::AsyncFlushStreamPoller> _io_poller,
                           std::shared_ptr<connector::SinkMemoryManager> sink_mem_mgr,
                           connector::SinkOperatorMemoryManager* op_mem_mgr, FragmentContext* fragment_context,
-                          std::atomic<int32_t>& num_sinkers);
+                          std::atomic<int32_t>& num_sinkers, Status create_status = Status::OK());
 
     ~ConnectorSinkOperator() override = default;
 
@@ -67,6 +67,8 @@ private:
     bool _is_cancelled = false;
     FragmentContext* _fragment_context;
     std::atomic<int32_t>& _num_sinkers;
+    // The error of the chunk sink creation. The operator has no chunk sink then, and prepare() returns the error.
+    Status _create_status;
 };
 
 class ConnectorSinkOperatorFactory final : public OperatorFactory {

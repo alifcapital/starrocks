@@ -67,16 +67,19 @@ public:
 
     Status flush() override {
         _flushed = true;
-        return Status::OK();
+        return _flush_status;
     }
 
     bool is_flushed() { return _flushed; }
 
     void set_flushable_bytes(int64_t bytes) { _flushable_bytes = bytes; }
 
+    void set_flush_status(Status status) { _flush_status = std::move(status); }
+
 private:
     bool _flushed = false;
     int64_t _flushable_bytes = 0;
+    Status _flush_status = Status::OK();
 };
 
 class MockFile : public WritableFile {
@@ -140,6 +143,32 @@ TEST_F(SinkMemoryManagerTest, kill_victim) {
             EXPECT_FALSE(mock_writer->is_flushed());
         }
     }
+}
+
+// A failed flush keeps the bytes of the writer, so the writer would be the victim again. The caller loops while it
+// finds a victim, so kill_victim() must say that it found none.
+TEST_F(SinkMemoryManagerTest, kill_victim_stops_after_a_failed_flush) {
+    parquet::Utils::SlotDesc slot_descs[] = {{"c1", TYPE_VARCHAR_DESC}, {"c2", TYPE_VARCHAR_DESC}, {""}};
+    TupleDescriptor* tuple_desc =
+            parquet::Utils::create_tuple_descriptor(_fragment_context->runtime_state(), &_pool, slot_descs);
+
+    auto partition_chunk_writer_ctx =
+            std::make_shared<SpillPartitionChunkWriterContext>(SpillPartitionChunkWriterContext{
+                    nullptr, nullptr, 1024, false, nullptr, _fragment_context.get(), tuple_desc, nullptr});
+
+    auto sink_mem_mgr = std::make_shared<SinkOperatorMemoryManager>();
+    std::vector<PartitionChunkWriterPtr> writers;
+    auto writer = std::make_shared<MockPartitionChunkWriter>("0", std::vector<int8_t>(), partition_chunk_writer_ctx);
+    writer->set_flushable_bytes(100);
+    writer->set_flush_status(Status::InternalError("simulated flush failure"));
+    writer->_out_stream = std::make_unique<Stream>(std::make_unique<MockFile>(), nullptr, nullptr);
+    writers.push_back(writer);
+
+    auto commit_callback = [this](const CommitResult& r) {};
+    EXPECT_OK(sink_mem_mgr->init(&writers, nullptr, commit_callback));
+
+    EXPECT_FALSE(sink_mem_mgr->kill_victim());
+    EXPECT_TRUE(writer->is_flushed());
 }
 
 TEST_F(SinkMemoryManagerTest, init_with_vector) {

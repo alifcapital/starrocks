@@ -33,16 +33,21 @@ ConnectorSinkOperator::ConnectorSinkOperator(OperatorFactory* factory, int32_t i
                                              std::unique_ptr<connector::AsyncFlushStreamPoller> io_poller,
                                              std::shared_ptr<connector::SinkMemoryManager> sink_mem_mgr,
                                              connector::SinkOperatorMemoryManager* op_mem_mgr,
-                                             FragmentContext* fragment_context, std::atomic<int32_t>& num_sinkers)
+                                             FragmentContext* fragment_context, std::atomic<int32_t>& num_sinkers,
+                                             Status create_status)
         : Operator(factory, id, "connector_sink", plan_node_id, false, driver_sequence),
           _connector_chunk_sink(std::move(connector_chunk_sink)),
           _io_poller(std::move(io_poller)),
           _sink_mem_mgr(std::move(sink_mem_mgr)),
           _op_mem_mgr(op_mem_mgr),
           _fragment_context(fragment_context),
-          _num_sinkers(num_sinkers) {}
+          _num_sinkers(num_sinkers),
+          _create_status(std::move(create_status)) {}
 
 Status ConnectorSinkOperator::prepare(RuntimeState* state) {
+    // We fear a chunk sink that can not be created, for example from a bad path or a bad cloud configuration. The
+    // operator factory can not return an error, so we return it from here, and the fragment fails with it.
+    RETURN_IF_ERROR(_create_status);
 #ifndef BE_TEST
     RETURN_IF_ERROR(Operator::prepare(state));
 #endif
@@ -52,7 +57,7 @@ Status ConnectorSinkOperator::prepare(RuntimeState* state) {
 }
 
 void ConnectorSinkOperator::close(RuntimeState* state) {
-    if (_is_cancelled) {
+    if (_is_cancelled && _connector_chunk_sink != nullptr) {
         _connector_chunk_sink->rollback();
     }
 #ifndef BE_TEST
@@ -61,7 +66,7 @@ void ConnectorSinkOperator::close(RuntimeState* state) {
 }
 
 bool ConnectorSinkOperator::need_input() const {
-    if (_no_more_input) {
+    if (_no_more_input || _connector_chunk_sink == nullptr) {
         return false;
     }
 
@@ -85,6 +90,9 @@ bool ConnectorSinkOperator::need_input() const {
 }
 
 bool ConnectorSinkOperator::is_finished() const {
+    if (_connector_chunk_sink == nullptr) {
+        return true;
+    }
     if (!_no_more_input) {
         return false;
     }
@@ -111,7 +119,8 @@ bool ConnectorSinkOperator::is_finished() const {
 Status ConnectorSinkOperator::set_finishing(RuntimeState* state) {
     _no_more_input = true;
 
-    Status st = _connector_chunk_sink->finish();
+    // Without a chunk sink, the fragment is already failing with the creation error, which we return again.
+    Status st = _connector_chunk_sink != nullptr ? _connector_chunk_sink->finish() : _create_status;
 
     // Decrement the counter unconditionally so the parallelism bookkeeping stays correct even when finish() fails.
     const bool is_last_sinker = _num_sinkers.fetch_sub(1, std::memory_order_acq_rel) == 1;
@@ -157,14 +166,23 @@ ConnectorSinkOperatorFactory::ConnectorSinkOperatorFactory(
 
 OperatorPtr ConnectorSinkOperatorFactory::create(int32_t degree_of_parallelism, int32_t driver_sequence) {
     _increment_num_sinkers_no_barrier();
-    auto chunk_sink = _data_sink_provider->create_chunk_sink(_sink_context, driver_sequence).value();
+    auto chunk_sink_or = _data_sink_provider->create_chunk_sink(_sink_context, driver_sequence);
     auto io_poller = std::make_unique<connector::AsyncFlushStreamPoller>();
-    chunk_sink->set_io_poller(io_poller.get());
     auto op_mem_mgr = _sink_mem_mgr->create_child_manager();
-    chunk_sink->set_operator_mem_mgr(op_mem_mgr);
-    return std::make_shared<ConnectorSinkOperator>(this, _id, Operator::s_pseudo_plan_node_id_for_final_sink,
-                                                   driver_sequence, std::move(chunk_sink), std::move(io_poller),
-                                                   _sink_mem_mgr, op_mem_mgr, _fragment_context, _num_sinkers);
+    std::unique_ptr<connector::ConnectorChunkSink> chunk_sink;
+    Status create_status;
+    if (chunk_sink_or.ok()) {
+        chunk_sink = std::move(chunk_sink_or).value();
+        chunk_sink->set_io_poller(io_poller.get());
+        chunk_sink->set_operator_mem_mgr(op_mem_mgr);
+    } else {
+        create_status = chunk_sink_or.status();
+        LOG(WARNING) << "fail to create the connector chunk sink, query_id: " << print_id(_fragment_context->query_id())
+                     << ", driver_sequence: " << driver_sequence << ", status: " << create_status;
+    }
+    return std::make_shared<ConnectorSinkOperator>(
+            this, _id, Operator::s_pseudo_plan_node_id_for_final_sink, driver_sequence, std::move(chunk_sink),
+            std::move(io_poller), _sink_mem_mgr, op_mem_mgr, _fragment_context, _num_sinkers, std::move(create_status));
 }
 
 } // namespace starrocks::pipeline

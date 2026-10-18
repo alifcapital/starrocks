@@ -26,6 +26,8 @@
 #include "exec/pipeline/fragment_context.h"
 #include "formats/file_writer.h"
 #include "formats/utils.h"
+#include "runtime/descriptor_helper.h"
+#include "runtime/descriptors.h"
 #include "testutil/assert.h"
 #include "testutil/scoped_updater.h"
 #include "util/defer_op.h"
@@ -50,6 +52,26 @@ protected:
     }
 
     void TearDown() override {}
+
+    // Makes a descriptor table with one tuple of the columns the sink writes, and returns the id of the tuple.
+    int create_tuple(const std::vector<TypeDescriptor>& column_types) {
+        TDescriptorTableBuilder table_builder;
+        TTupleDescriptorBuilder tuple_builder;
+        for (size_t i = 0; i < column_types.size(); ++i) {
+            TSlotDescriptorBuilder slot_builder;
+            tuple_builder.add_slot(slot_builder.id(static_cast<int>(i))
+                                           .type(column_types[i])
+                                           .column_name("c" + std::to_string(i))
+                                           .nullable(true)
+                                           .build());
+        }
+        tuple_builder.build(&table_builder);
+        DescriptorTbl* tbl = nullptr;
+        CHECK(DescriptorTbl::create(_runtime_state, &_pool, table_builder.desc_tbl(), &tbl, config::vector_chunk_size)
+                      .ok());
+        _runtime_state->set_desc_tbl(tbl);
+        return 0;
+    }
 
     ObjectPool _pool;
     std::shared_ptr<pipeline::FragmentContext> _fragment_context;
@@ -189,6 +211,115 @@ TEST_F(IcebergChunkSinkTest, test_factory) {
         SinkOperatorMemoryManager mm;
         sink->set_operator_mem_mgr(&mm);
         EXPECT_ERROR(sink->init()); // format is not supported
+    }
+}
+
+// The spill writer aborts the process on a column type that has no storage field type (VARIANT), so the provider has
+// to create the buffer writer factory for such a tuple, and the spill writer factory for the other tuples. TIME is
+// described as DOUBLE by the writer, so a tuple with it uses the spill writer.
+TEST_F(IcebergChunkSinkTest, test_factory_selects_writer_by_column_types) {
+    IcebergChunkSinkProvider provider;
+
+    // The tuple has |tuple_types| and the sink has the first |num_columns| columns of it.
+    auto create_sink = [&](const std::vector<TypeDescriptor>& tuple_types, size_t num_columns, bool enable_spill,
+                           int32_t driver_id) {
+        SCOPED_UPDATE(bool, config::enable_connector_sink_spill, enable_spill);
+        int tuple_desc_id = create_tuple(tuple_types);
+
+        auto sink_ctx = std::make_shared<connector::IcebergChunkSinkContext>();
+        sink_ctx->path = "/path/to/directory/";
+        for (size_t i = 0; i < num_columns; ++i) {
+            sink_ctx->column_names.push_back("c" + std::to_string(i));
+        }
+        sink_ctx->executor = nullptr;
+        sink_ctx->format = formats::PARQUET;
+        sink_ctx->compression_type = TCompressionType::NO_COMPRESSION;
+        sink_ctx->options = {};
+        sink_ctx->parquet_field_ids = {};
+        sink_ctx->max_file_size = 1 << 30;
+        sink_ctx->column_evaluators = ColumnSlotIdEvaluator::from_types(
+                std::vector<TypeDescriptor>(tuple_types.begin(), tuple_types.begin() + num_columns));
+        sink_ctx->fragment_context = _fragment_context.get();
+        sink_ctx->tuple_desc_id = tuple_desc_id;
+        return provider.create_chunk_sink(sink_ctx, driver_id).value();
+    };
+    auto uses_spill_writer = [](const ConnectorChunkSink& sink) {
+        return dynamic_cast<const SpillPartitionChunkWriterFactory*>(sink.TEST_partition_chunk_writer_factory()) !=
+               nullptr;
+    };
+    auto uses_buffer_writer = [](const ConnectorChunkSink& sink) {
+        return dynamic_cast<const BufferPartitionChunkWriterFactory*>(sink.TEST_partition_chunk_writer_factory()) !=
+               nullptr;
+    };
+
+    // A tuple with a nested struct and TIME columns, like the one of the table that crashed the CN.
+    const TypeDescriptor struct_type = TypeDescriptor::create_struct_type(
+            {"a", "b"}, {TYPE_INT_DESC, TypeDescriptor::create_struct_type({"c"}, {TYPE_VARCHAR_DESC})});
+    const TypeDescriptor variant_type = TypeDescriptor::create_variant_type();
+    std::vector<TypeDescriptor> supported_types = {TYPE_BIGINT_DESC, TYPE_INT_DESC,     TYPE_TIME_DESC,
+                                                   TYPE_TIME_DESC,   TYPE_VARCHAR_DESC, TYPE_DATETIME_DESC,
+                                                   struct_type};
+    std::vector<TypeDescriptor> variant_types = supported_types;
+    variant_types.push_back(variant_type);
+
+    for (int32_t driver_id : {0, 1}) {
+        auto sink = create_sink(supported_types, supported_types.size(), true, driver_id);
+        EXPECT_TRUE(uses_spill_writer(*sink));
+        EXPECT_FALSE(uses_buffer_writer(*sink));
+
+        sink = create_sink(variant_types, variant_types.size(), true, driver_id);
+        EXPECT_FALSE(uses_spill_writer(*sink));
+        EXPECT_TRUE(uses_buffer_writer(*sink));
+
+        // VARIANT inside a nested type is a column type without a storage field type as well.
+        sink = create_sink({TYPE_BIGINT_DESC, TypeDescriptor::create_array_type(variant_type)}, 2, true, driver_id);
+        EXPECT_FALSE(uses_spill_writer(*sink));
+        EXPECT_TRUE(uses_buffer_writer(*sink));
+
+        sink = create_sink(supported_types, supported_types.size(), false, driver_id);
+        EXPECT_FALSE(uses_spill_writer(*sink));
+        EXPECT_TRUE(uses_buffer_writer(*sink));
+
+        // The tuple has more slots than the sink has columns: only the sink columns count.
+        sink = create_sink(variant_types, supported_types.size(), true, driver_id);
+        EXPECT_TRUE(uses_spill_writer(*sink));
+        EXPECT_FALSE(uses_buffer_writer(*sink));
+    }
+
+    // The sink does not find its tuple: it uses the buffer writer instead of dereferencing a null tuple later.
+    {
+        SCOPED_UPDATE(bool, config::enable_connector_sink_spill, true);
+        create_tuple(supported_types);
+        auto sink_ctx = std::make_shared<connector::IcebergChunkSinkContext>();
+        sink_ctx->path = "/path/to/directory/";
+        sink_ctx->column_names = {"c0"};
+        sink_ctx->format = formats::PARQUET;
+        sink_ctx->compression_type = TCompressionType::NO_COMPRESSION;
+        sink_ctx->max_file_size = 1 << 30;
+        sink_ctx->column_evaluators = ColumnSlotIdEvaluator::from_types({TYPE_BIGINT_DESC});
+        sink_ctx->fragment_context = _fragment_context.get();
+        sink_ctx->tuple_desc_id = 12345;
+        auto sink = provider.create_chunk_sink(sink_ctx, 0).value();
+        EXPECT_FALSE(uses_spill_writer(*sink));
+        EXPECT_TRUE(uses_buffer_writer(*sink));
+    }
+
+    // The tuple has fewer slots than the sink has columns: the sink is inconsistent, so it uses the buffer writer.
+    {
+        SCOPED_UPDATE(bool, config::enable_connector_sink_spill, true);
+        create_tuple({TYPE_BIGINT_DESC});
+        auto sink_ctx = std::make_shared<connector::IcebergChunkSinkContext>();
+        sink_ctx->path = "/path/to/directory/";
+        sink_ctx->column_names = {"c0", "c1"};
+        sink_ctx->format = formats::PARQUET;
+        sink_ctx->compression_type = TCompressionType::NO_COMPRESSION;
+        sink_ctx->max_file_size = 1 << 30;
+        sink_ctx->column_evaluators = ColumnSlotIdEvaluator::from_types({TYPE_BIGINT_DESC, TYPE_INT_DESC});
+        sink_ctx->fragment_context = _fragment_context.get();
+        sink_ctx->tuple_desc_id = 0;
+        auto sink = provider.create_chunk_sink(sink_ctx, 0).value();
+        EXPECT_FALSE(uses_spill_writer(*sink));
+        EXPECT_TRUE(uses_buffer_writer(*sink));
     }
 }
 

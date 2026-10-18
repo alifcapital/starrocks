@@ -143,6 +143,14 @@ private:
     int64_t _flushable_bytes;
 };
 
+class FailingChunkSinkProvider final : public connector::ConnectorChunkSinkProvider {
+public:
+    StatusOr<std::unique_ptr<connector::ConnectorChunkSink>> create_chunk_sink(
+            std::shared_ptr<connector::ConnectorChunkSinkContext> context, int32_t driver_id) override {
+        return Status::InvalidArgument("simulated bad sink path");
+    }
+};
+
 class ConnectorSinkOperatorTest : public ::testing::Test {
 protected:
     void SetUp() override {
@@ -230,6 +238,29 @@ TEST_F(ConnectorSinkOperatorTest, test_factory) {
         auto op = op_factory->create(1, 0);
         EXPECT_OK(op->prepare(_runtime_state));
     }
+}
+
+// A chunk sink that can not be created, for example from a bad path, must fail the fragment with its status. The
+// operator factory can not return an error, so the operator returns it from prepare(). The driver then finishes and
+// closes the operator, which has no chunk sink.
+TEST_F(ConnectorSinkOperatorTest, factory_returns_chunk_sink_creation_error_from_prepare) {
+    auto op_factory = std::make_unique<ConnectorSinkOperatorFactory>(
+            0, std::make_unique<FailingChunkSinkProvider>(), std::make_shared<connector::ConnectorChunkSinkContext>(),
+            _fragment_context);
+    auto op = op_factory->create(1, 0);
+    ASSERT_NE(nullptr, op);
+
+    Status st = op->prepare(_runtime_state);
+    EXPECT_TRUE(st.is_invalid_argument()) << st;
+    EXPECT_NE(std::string::npos, st.message().find("simulated bad sink path")) << st;
+
+    EXPECT_FALSE(op->need_input());
+    EXPECT_TRUE(op->is_finished());
+    EXPECT_FALSE(op->pending_finish());
+    Status finishing_status = op->set_finishing(_runtime_state);
+    EXPECT_TRUE(finishing_status.is_invalid_argument()) << finishing_status;
+    EXPECT_OK(op->set_cancelled(_runtime_state));
+    op->close(_runtime_state);
 }
 
 TEST_F(ConnectorSinkOperatorTest, need_input_releases_flush_memory_under_instance_tracker) {
