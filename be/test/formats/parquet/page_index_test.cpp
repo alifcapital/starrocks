@@ -21,6 +21,8 @@
 #include <utility>
 #include <vector>
 
+#include "cache/datacache.h"
+#include "cache/disk_cache/test_cache_utils.h"
 #include "column/column_helper.h"
 #include "common/config.h"
 #include "exec/hdfs_scanner/hdfs_scanner.h"
@@ -34,6 +36,7 @@
 #include "formats/parquet/scalar_column_reader.h"
 #include "formats/parquet/stored_column_reader_with_index.h"
 #include "fs/fs.h"
+#include "io/cache_input_stream.h"
 #include "io/shared_buffered_input_stream.h"
 #include "io/string_input_stream.h"
 #include "util/thrift_util.h"
@@ -757,9 +760,19 @@ class IndexEnv {
 public:
     explicit IndexEnv(std::string file_bytes, bool known_file_size = true)
             : _file(std::make_shared<io::StringInputStream>(std::string(file_bytes)), "string-file") {
+        init(known_file_size ? file_bytes.size() : 0);
+    }
+
+    // The file is read through the given stream.
+    IndexEnv(std::shared_ptr<io::SeekableInputStream> stream, size_t file_size)
+            : _file(std::move(stream), "string-file") {
+        init(file_size);
+    }
+
+    void init(size_t file_size) {
         _opts.stats = &_stats;
         _opts.file = &_file;
-        _opts.file_size = known_file_size ? file_bytes.size() : 0;
+        _opts.file_size = file_size;
         _field.name = "c";
         _field.physical_type = tparquet::Type::INT32;
         _field.is_nullable = true;
@@ -1998,6 +2011,181 @@ TEST_F(BloomFilterRegionTest, RegionOutsideTheFile) {
         ParquetBlockSplitBloomFilter far_bloom_filter;
         ASSERT_FALSE(env.reader()->_init_column_bloom_filter(int64_t{1} << 32, size, far_bloom_filter).ok());
     }
+}
+
+namespace {
+
+// A remote file that counts the bytes it serves.
+class CountingRemoteStream : public io::SeekableInputStream {
+public:
+    explicit CountingRemoteStream(std::string contents) : _contents(std::move(contents)) {}
+
+    StatusOr<int64_t> read(void* data, int64_t count) override {
+        count = std::min<int64_t>(count, _contents.size() - _offset);
+        memcpy(data, _contents.data() + _offset, count);
+        _offset += count;
+        bytes += count;
+        return count;
+    }
+
+    Status read_at_fully(int64_t offset, void* out, int64_t count) override {
+        if (offset < 0 || count < 0 || offset + count > static_cast<int64_t>(_contents.size())) {
+            return Status::EndOfFile("read out of the file");
+        }
+        memcpy(out, _contents.data() + offset, count);
+        bytes += count;
+        return Status::OK();
+    }
+
+    Status seek(int64_t position) override {
+        _offset = std::min<int64_t>(position, _contents.size());
+        return Status::OK();
+    }
+
+    StatusOr<int64_t> position() override { return _offset; }
+
+    StatusOr<int64_t> get_size() override { return _contents.size(); }
+
+    int64_t bytes = 0;
+
+private:
+    std::string _contents;
+    int64_t _offset = 0;
+};
+
+} // namespace
+
+// A column whose column index, offset index and bloom filter are in the blocks 0, 1 and 3 of a file of four blocks of
+// the data cache. A scan plans the three regions as one shared buffer of the four blocks, as the parquet reader does,
+// and the stand reads them through the data cache.
+class IndexDataCacheTest : public testing::Test {
+public:
+    static constexpr int64_t kBlock = 256 * 1024;
+    static constexpr int64_t kFileSize = 4 * kBlock;
+    static constexpr int64_t kOffsetIndexOffset = kBlock + 100;
+    static constexpr int64_t kBloomFilterOffset = 3 * kBlock + 64;
+
+    static void TearDownTestCase() {
+        auto* cache = BlockCache::instance();
+        if (cache != nullptr) {
+            cache->shutdown();
+        }
+    }
+
+    void SetUp() override {
+        _saved_enable_auto_adjust = config::enable_datacache_disk_auto_adjust;
+        config::enable_datacache_disk_auto_adjust = false;
+        _saved_index_datacache_enable = config::parquet_index_datacache_enable;
+        DataCache::GetInstance()->set_block_cache(
+                TestCacheUtils::create_cache(TestCacheUtils::create_simple_options(kBlock, 100 * 1024 * 1024)));
+
+        PageIndexFile index = make_page_index_file(make_column_index(2, 2, 2), make_offset_index(two_pages()));
+        _column_index_length = index.column_index_length;
+        _offset_index_length = index.offset_index_length;
+        tparquet::BloomFilterHeader header;
+        header.numBytes = 64;
+        header.algorithm.__set_BLOCK(tparquet::SplitBlockAlgorithm());
+        header.hash.__set_XXHASH(tparquet::XxHash());
+        header.compression.__set_UNCOMPRESSED(tparquet::Uncompressed());
+        std::string bloom_filter = thrift_bytes(header);
+        bloom_filter.append(64, '\0');
+        _bloom_filter_length = bloom_filter.size();
+
+        std::string file(kFileSize, '\0');
+        file.replace(0, _column_index_length, index.bytes.substr(0, _column_index_length));
+        file.replace(kOffsetIndexOffset, _offset_index_length,
+                     index.bytes.substr(_column_index_length, _offset_index_length));
+        file.replace(kBloomFilterOffset, _bloom_filter_length, bloom_filter);
+        _remote = std::make_shared<CountingRemoteStream>(std::move(file));
+    }
+
+    void TearDown() override {
+        config::enable_datacache_disk_auto_adjust = _saved_enable_auto_adjust;
+        config::parquet_index_datacache_enable = _saved_index_datacache_enable;
+    }
+
+protected:
+    // A scan that opens the file: the streams and the column are new, the remote file and the data cache are shared.
+    struct Scan {
+        std::shared_ptr<io::SharedBufferedInputStream> sb_stream;
+        std::shared_ptr<io::CacheInputStream> cache_stream;
+        std::unique_ptr<IndexEnv> env;
+    };
+
+    Scan open_scan() {
+        Scan scan;
+        scan.sb_stream = std::make_shared<io::SharedBufferedInputStream>(_remote, "index-file", kFileSize);
+        scan.cache_stream = std::make_shared<io::CacheInputStream>(scan.sb_stream, "index-file", kFileSize, 1000000);
+        scan.cache_stream->set_enable_populate_cache(true);
+        scan.sb_stream->set_align_size(scan.cache_stream->get_align_size());
+        scan.env = std::make_unique<IndexEnv>(scan.cache_stream, kFileSize);
+        scan.env->set_page_index(0, _column_index_length, kOffsetIndexOffset, _offset_index_length);
+        scan.env->set_row_group_rows(10);
+
+        std::vector<io::SharedBufferedInputStream::IORange> ranges;
+        ranges.emplace_back(0, _column_index_length);
+        ranges.emplace_back(kOffsetIndexOffset, _offset_index_length);
+        ranges.emplace_back(kBloomFilterOffset, _bloom_filter_length);
+        CHECK(scan.sb_stream->set_io_ranges(ranges).ok());
+        return scan;
+    }
+
+    // The first scan loads the offset index only, as the page skip does. The second scan reads the column index, the
+    // offset index and the bloom filter.
+    void check_two_scans(bool index_datacache_enable) {
+        config::parquet_index_datacache_enable = index_datacache_enable;
+        {
+            Scan scan = open_scan();
+            ASSERT_TRUE(scan.env->reader()->get_offset_index(0).ok());
+            const auto& stats = scan.cache_stream->stats();
+            // The read loads the buffer of the four blocks, and the switch decides if the other three are written.
+            ASSERT_EQ(kFileSize, stats.page_index.remote_read_bytes);
+            ASSERT_EQ(index_datacache_enable ? kFileSize : kBlock, stats.page_index.populate_bytes);
+            ASSERT_EQ(0, stats.page_index.cache_read_bytes);
+            ASSERT_EQ(0, stats.bloom_filter.remote_read_bytes);
+        }
+        const int64_t remote_bytes_after_first_scan = _remote->bytes;
+        ASSERT_EQ(kFileSize, remote_bytes_after_first_scan);
+
+        Scan scan = open_scan();
+        auto filtered = scan.env->page_index_filter(10);
+        ASSERT_TRUE(filtered.ok()) << filtered.status().to_string();
+        ParquetBlockSplitBloomFilter bloom_filter;
+        Status st =
+                scan.env->reader()->_init_column_bloom_filter(kBloomFilterOffset, _bloom_filter_length, bloom_filter);
+        ASSERT_TRUE(st.ok()) << st.to_string();
+
+        const auto& stats = scan.cache_stream->stats();
+        if (index_datacache_enable) {
+            // All three regions are in the data cache, and the second scan downloads nothing.
+            ASSERT_EQ(remote_bytes_after_first_scan, _remote->bytes);
+            ASSERT_EQ(0, stats.page_index.remote_read_bytes);
+            ASSERT_EQ(0, stats.bloom_filter.remote_read_bytes);
+            ASSERT_GT(stats.page_index.cache_read_bytes, 0);
+            ASSERT_GT(stats.bloom_filter.cache_read_bytes, 0);
+        } else {
+            // The column index is in a block that the first scan downloaded and did not write.
+            ASSERT_GT(_remote->bytes, remote_bytes_after_first_scan);
+            ASSERT_GT(stats.page_index.remote_read_bytes, 0);
+        }
+    }
+
+    std::shared_ptr<CountingRemoteStream> _remote;
+    int32_t _column_index_length = 0;
+    int32_t _offset_index_length = 0;
+    int32_t _bloom_filter_length = 0;
+
+private:
+    bool _saved_enable_auto_adjust = false;
+    bool _saved_index_datacache_enable = true;
+};
+
+TEST_F(IndexDataCacheTest, SecondScanReadsTheIndexRegionsFromTheDataCache) {
+    ASSERT_NO_FATAL_FAILURE(check_two_scans(true));
+}
+
+TEST_F(IndexDataCacheTest, SecondScanDownloadsTheBlocksThatTheFirstScanDidNotWriteWithoutTheSwitch) {
+    ASSERT_NO_FATAL_FAILURE(check_two_scans(false));
 }
 
 } // namespace starrocks::parquet

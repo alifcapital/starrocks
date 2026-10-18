@@ -23,6 +23,7 @@
 #include "formats/parquet/stored_column_reader_with_index.h"
 #include "formats/parquet/utils.h"
 #include "gutil/casts.h"
+#include "io/cache_input_stream.h"
 #include "io/shared_buffered_input_stream.h"
 #include "runtime/global_dict/dict_column.h"
 #include "runtime/types.h"
@@ -195,7 +196,11 @@ StatusOr<tparquet::OffsetIndex*> RawColumnReader::get_offset_index(const uint64_
                                              describe_column(get_column_parquet_field()), _opts.file->filename()));
         }
         std::vector<uint8_t> offset_index_data(offset_index_length);
-        RETURN_IF_ERROR(_opts.file->read_at_fully(offset_index_offset, offset_index_data.data(), offset_index_length));
+        {
+            io::MetadataReadScope scope(io::MetadataKind::PAGE_INDEX, config::parquet_index_datacache_enable);
+            RETURN_IF_ERROR(
+                    _opts.file->read_at_fully(offset_index_offset, offset_index_data.data(), offset_index_length));
+        }
 
         // We keep the index only after it is read and checked, so that a failure leaves no half-built index
         // for the next caller to find.
@@ -642,7 +647,10 @@ StatusOr<bool> RawColumnReader::_page_index_zone_map_filter(const std::vector<co
     }
 
     std::vector<uint8_t> page_index_data(column_index_length);
-    RETURN_IF_ERROR(_opts.file->read_at_fully(column_index_offset, page_index_data.data(), column_index_length));
+    {
+        io::MetadataReadScope scope(io::MetadataKind::PAGE_INDEX, config::parquet_index_datacache_enable);
+        RETURN_IF_ERROR(_opts.file->read_at_fully(column_index_offset, page_index_data.data(), column_index_length));
+    }
 
     tparquet::ColumnIndex column_index;
     uint32_t length = column_index_length;
@@ -736,6 +744,8 @@ Status RawColumnReader::_init_column_bloom_filter(int64_t offset, int32_t length
         RETURN_IF_ERROR(_check_region(offset, SBBF_HEADER_SIZE_ESTIMATE, kMaxRegionBytes, "bloom filter header"));
     }
 
+    // Both reads below are reads of the bloom filter region.
+    io::MetadataReadScope scope(io::MetadataKind::BLOOM_FILTER, config::parquet_index_datacache_enable);
     std::vector<char> bloom_filter_data;
     tparquet::BloomFilterHeader header;
     uint32_t header_len = SBBF_HEADER_SIZE_ESTIMATE;

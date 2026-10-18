@@ -728,6 +728,18 @@ void HiveDataSource::_init_counter(RuntimeState* state) {
                 ADD_CHILD_COUNTER(_runtime_profile, "DataCacheReadBlockBufferBytes", TUnit::BYTES, prefix);
         _scanner_ctx.profile.datacache_skip_remote_read_bytes =
                 ADD_CHILD_COUNTER(_runtime_profile, "DataCacheSkipRemoteReadBytes", TUnit::BYTES, prefix);
+        _scanner_ctx.profile.datacache_page_index_read_cache_bytes =
+                ADD_CHILD_COUNTER(_runtime_profile, "DataCachePageIndexReadCacheBytes", TUnit::BYTES, prefix);
+        _scanner_ctx.profile.datacache_page_index_read_remote_bytes =
+                ADD_CHILD_COUNTER(_runtime_profile, "DataCachePageIndexReadRemoteBytes", TUnit::BYTES, prefix);
+        _scanner_ctx.profile.datacache_page_index_populate_bytes =
+                ADD_CHILD_COUNTER(_runtime_profile, "DataCachePageIndexPopulateBytes", TUnit::BYTES, prefix);
+        _scanner_ctx.profile.datacache_bloom_filter_read_cache_bytes =
+                ADD_CHILD_COUNTER(_runtime_profile, "DataCacheBloomFilterReadCacheBytes", TUnit::BYTES, prefix);
+        _scanner_ctx.profile.datacache_bloom_filter_read_remote_bytes =
+                ADD_CHILD_COUNTER(_runtime_profile, "DataCacheBloomFilterReadRemoteBytes", TUnit::BYTES, prefix);
+        _scanner_ctx.profile.datacache_bloom_filter_populate_bytes =
+                ADD_CHILD_COUNTER(_runtime_profile, "DataCacheBloomFilterPopulateBytes", TUnit::BYTES, prefix);
     }
 
     {

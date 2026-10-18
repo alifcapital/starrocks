@@ -648,6 +648,12 @@ void HdfsScanner::update_counter() {
         COUNTER_UPDATE(profile->datacache_read_block_buffer_counter, stats.read_block_buffer_count);
         COUNTER_UPDATE(profile->datacache_read_block_buffer_bytes, stats.read_block_buffer_bytes);
         COUNTER_UPDATE(profile->datacache_skip_remote_read_bytes, stats.skip_remote_read_bytes);
+        COUNTER_UPDATE(profile->datacache_page_index_read_cache_bytes, stats.page_index.cache_read_bytes);
+        COUNTER_UPDATE(profile->datacache_page_index_read_remote_bytes, stats.page_index.remote_read_bytes);
+        COUNTER_UPDATE(profile->datacache_page_index_populate_bytes, stats.page_index.populate_bytes);
+        COUNTER_UPDATE(profile->datacache_bloom_filter_read_cache_bytes, stats.bloom_filter.cache_read_bytes);
+        COUNTER_UPDATE(profile->datacache_bloom_filter_read_remote_bytes, stats.bloom_filter.remote_read_bytes);
+        COUNTER_UPDATE(profile->datacache_bloom_filter_populate_bytes, stats.bloom_filter.populate_bytes);
 
         if (_scanner_ctx->datacache_options.enable_cache_select) {
             // For cache select, we will update load datacache metrics

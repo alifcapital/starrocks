@@ -253,6 +253,13 @@ struct HdfsScannerProfile {
     RuntimeProfile::Counter* datacache_read_block_buffer_counter = nullptr;
     RuntimeProfile::Counter* datacache_read_block_buffer_bytes = nullptr;
     RuntimeProfile::Counter* datacache_skip_remote_read_bytes = nullptr;
+    // The column indexes and the offset indexes, and the bloom filters, of parquet files.
+    RuntimeProfile::Counter* datacache_page_index_read_cache_bytes = nullptr;
+    RuntimeProfile::Counter* datacache_page_index_read_remote_bytes = nullptr;
+    RuntimeProfile::Counter* datacache_page_index_populate_bytes = nullptr;
+    RuntimeProfile::Counter* datacache_bloom_filter_read_cache_bytes = nullptr;
+    RuntimeProfile::Counter* datacache_bloom_filter_read_remote_bytes = nullptr;
+    RuntimeProfile::Counter* datacache_bloom_filter_populate_bytes = nullptr;
 
     RuntimeProfile::Counter* shared_buffered_shared_io_count = nullptr;
     RuntimeProfile::Counter* shared_buffered_shared_io_bytes = nullptr;

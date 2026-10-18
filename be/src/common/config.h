@@ -1281,6 +1281,14 @@ CONF_mBool(parquet_offset_index_narrow_io_dict_defer_enable, "true");
 // The read of an offset index is a remote read. A column that read its offset index in this many row groups of a scan,
 // and skipped no page in any of them, does not read it for the rest of the scan. 0 never gives up.
 CONF_mInt32(parquet_offset_index_skip_give_up_row_groups, "4");
+// The column indexes, the offset indexes and the bloom filters are read through the data cache like the data pages,
+// and the scan counts their bytes apart (DataCachePageIndex* and DataCacheBloomFilter* in the profile). A read of such
+// a region loads a whole shared buffer from remote storage, and the region of one column is a small part of it. We
+// fear that the other blocks of the buffer are lost: only the blocks that a reader asks for are written to the data
+// cache, so the next scan downloads the others again. So when this is enabled and the scan populates the data cache,
+// the read of such a region writes every block of the loaded buffer that the cache does not hold. When it is
+// disabled, only the blocks of the read are written.
+CONF_mBool(parquet_index_datacache_enable, "true");
 CONF_mBool(parquet_cache_aware_dict_decoder_enable, "true");
 // Evaluate join runtime filters against decoded rows inside the parquet reader, so
 // non-matching rows are dropped before lazy columns are materialized. When disabled,

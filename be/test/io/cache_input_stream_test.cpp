@@ -1014,7 +1014,10 @@ using Reads = std::vector<std::pair<int64_t, int64_t>>;
 // a wrong place never matches.
 struct SkipCachedBlocksCase {
     SkipCachedBlocksCase(const std::string& file_name, int64_t file_size, bool enable_block_buffer = false,
-                         bool enable_async_populate = false) {
+                         bool enable_async_populate = false)
+            : file_name(file_name),
+              enable_block_buffer(enable_block_buffer),
+              enable_async_populate(enable_async_populate) {
         data.resize(file_size);
         for (int64_t i = 0; i < file_size; ++i) {
             data[i] = static_cast<char>(i % 251);
@@ -1025,14 +1028,7 @@ struct SkipCachedBlocksCase {
         CHECK(block_cache.init(options, engine, nullptr).ok());
 
         remote = std::make_shared<CountingSeekableInputStream>(data.data(), file_size);
-        sb_stream = std::make_shared<io::SharedBufferedInputStream>(remote, file_name, file_size);
-        // The scanner aligns shared buffers to the block size of the cache.
-        sb_stream->set_align_size(CacheInputStreamTest::block_size);
-        cache_stream = std::make_unique<io::CacheInputStream>(sb_stream, file_name, file_size, 1000000);
-        cache_stream->set_enable_populate_cache(true);
-        cache_stream->set_enable_block_buffer(enable_block_buffer);
-        cache_stream->set_enable_async_populate_mode(enable_async_populate);
-        cache_stream->_cache = &block_cache;
+        open_stream();
         saved_coalesce_distance = config::io_coalesce_read_max_distance_size;
         // The tests of the split by the cache state expect a large io range to be one shared buffer. The tests of
         // the pieces of a large range turn the pieces on with enable_pieces().
@@ -1043,6 +1039,18 @@ struct SkipCachedBlocksCase {
     ~SkipCachedBlocksCase() {
         config::io_coalesce_read_max_distance_size = saved_coalesce_distance;
         config::io_coalesce_split_large_range = saved_split_large_range;
+    }
+
+    // A new stream over the same file, the same remote stream and the same cache, like the stream of the next scan.
+    void open_stream() {
+        sb_stream = std::make_shared<io::SharedBufferedInputStream>(remote, file_name, data.size());
+        // The scanner aligns shared buffers to the block size of the cache.
+        sb_stream->set_align_size(CacheInputStreamTest::block_size);
+        cache_stream = std::make_unique<io::CacheInputStream>(sb_stream, file_name, data.size(), 1000000);
+        cache_stream->set_enable_populate_cache(true);
+        cache_stream->set_enable_block_buffer(enable_block_buffer);
+        cache_stream->set_enable_async_populate_mode(enable_async_populate);
+        cache_stream->_cache = &block_cache;
     }
 
     // An io range above `size` is cut into pieces of at most `size`. We use a multiple of the block size, so a piece
@@ -1086,6 +1094,9 @@ struct SkipCachedBlocksCase {
         ASSERT_EQ(0, memcmp(buffer.data(), data.data() + offset, size)) << "offset=" << offset << ", size=" << size;
     }
 
+    std::string file_name;
+    bool enable_block_buffer = false;
+    bool enable_async_populate = false;
     std::string data;
     int32_t saved_coalesce_distance = 0;
     bool saved_split_large_range = true;
@@ -2013,6 +2024,205 @@ TEST_F(CacheInputStreamTest, test_shared_buffer_never_cuts_the_blocks_of_the_rea
     ASSERT_EQ((Reads{{3 * block_size, 2 * block_size}}), c.remote->reads);
     ASSERT_EQ(6 * block_size, c.sb_stream->skip_ranges_bytes());
     ASSERT_EQ(2u, c.engine->blocks.size());
+}
+
+// The tests below read a region of a column index or a bloom filter with a read of 100 bytes, as a parquet reader
+// does, inside a MetadataReadScope.
+
+TEST_F(CacheInputStreamTest, test_metadata_read_populates_the_whole_loaded_buffer) {
+    const int64_t block_count = 8;
+    SkipCachedBlocksCase c("test_metadata_read_populates_the_whole_loaded_buffer", block_size * block_count);
+    c.set_io_range(0, block_size * block_count);
+    {
+        const auto& stats = c.cache_stream->stats();
+        MetadataReadScope scope(MetadataKind::PAGE_INDEX, true);
+        ASSERT_NO_FATAL_FAILURE(c.read_and_check(3 * block_size + 10, 100));
+        // The read loads the whole buffer with one request, and every block of it is in the cache.
+        ASSERT_EQ((Reads{{0, block_size * block_count}}), c.remote->reads);
+        ASSERT_EQ(static_cast<size_t>(block_count), c.engine->blocks.size());
+        ASSERT_EQ(block_count, stats.write_block_cache_count);
+        ASSERT_EQ(0, stats.write_cache_already_exist_count);
+        ASSERT_EQ(block_count * block_size, stats.page_index.remote_read_bytes);
+        ASSERT_EQ(block_count * block_size, stats.page_index.populate_bytes);
+        ASSERT_EQ(0, stats.page_index.cache_read_bytes);
+        ASSERT_EQ(0, stats.bloom_filter.remote_read_bytes);
+        ASSERT_EQ(0, stats.bloom_filter.populate_bytes);
+        for (int64_t i = 0; i < block_count; ++i) {
+            ASSERT_EQ(c.data.substr(i * block_size, block_size), c.engine->blocks[c.block_key(i)]) << i;
+        }
+    }
+
+    // The next scan reads the regions of other columns from other blocks, and downloads nothing.
+    c.open_stream();
+    c.set_io_range(0, block_size * block_count);
+    const auto& stats = c.cache_stream->stats();
+    {
+        MetadataReadScope scope(MetadataKind::PAGE_INDEX, true);
+        for (int64_t block_id : {0, 5, 7}) {
+            ASSERT_NO_FATAL_FAILURE(c.read_and_check(block_id * block_size + 10, 100));
+        }
+    }
+    ASSERT_EQ(1u, c.remote->reads.size());
+    ASSERT_EQ(3, stats.read_block_cache_count);
+    ASSERT_EQ(300, stats.page_index.cache_read_bytes);
+    ASSERT_EQ(0, stats.page_index.remote_read_bytes);
+    ASSERT_EQ(0, stats.page_index.populate_bytes);
+}
+
+TEST_F(CacheInputStreamTest, test_metadata_read_without_the_switch_populates_the_read_blocks_only) {
+    const int64_t block_count = 8;
+    SkipCachedBlocksCase c("test_metadata_read_without_the_switch_populates_the_read_blocks_only",
+                           block_size * block_count);
+    c.set_io_range(0, block_size * block_count);
+    const auto& stats = c.cache_stream->stats();
+    {
+        MetadataReadScope scope(MetadataKind::PAGE_INDEX, false);
+        ASSERT_NO_FATAL_FAILURE(c.read_and_check(3 * block_size + 10, 100));
+    }
+    // The bytes are counted, and only the block of the read is written.
+    ASSERT_EQ((Reads{{0, block_size * block_count}}), c.remote->reads);
+    ASSERT_EQ(1u, c.engine->blocks.size());
+    ASSERT_EQ(block_count * block_size, stats.page_index.remote_read_bytes);
+    ASSERT_EQ(block_size, stats.page_index.populate_bytes);
+
+    // The next scan asks for a block that was downloaded and not written, and downloads it again.
+    c.open_stream();
+    c.set_io_range(0, block_size * block_count);
+    {
+        MetadataReadScope scope(MetadataKind::PAGE_INDEX, false);
+        ASSERT_NO_FATAL_FAILURE(c.read_and_check(5 * block_size + 10, 100));
+    }
+    ASSERT_EQ(2u, c.remote->reads.size());
+}
+
+TEST_F(CacheInputStreamTest, test_metadata_read_does_not_write_the_blocks_that_the_cache_holds) {
+    const int64_t block_count = 8;
+    SkipCachedBlocksCase c("test_metadata_read_does_not_write_the_blocks_that_the_cache_holds",
+                           block_size * block_count);
+    c.set_io_range(0, block_size * block_count);
+    c.cache_blocks({1});
+    const auto& stats = c.cache_stream->stats();
+    {
+        MetadataReadScope scope(MetadataKind::BLOOM_FILTER, true);
+        ASSERT_NO_FATAL_FAILURE(c.read_and_check(3 * block_size + 10, 100));
+    }
+    // The cached block 1 is a small gap, so the buffer is loaded whole. We write the other 7 blocks.
+    ASSERT_EQ((Reads{{0, block_size * block_count}}), c.remote->reads);
+    ASSERT_EQ(7, c.engine->write_calls);
+    ASSERT_EQ(static_cast<size_t>(block_count), c.engine->blocks.size());
+    ASSERT_EQ(0, stats.write_cache_already_exist_count);
+    ASSERT_EQ(7 * block_size, stats.bloom_filter.populate_bytes);
+    ASSERT_EQ(block_count * block_size, stats.bloom_filter.remote_read_bytes);
+    ASSERT_EQ(0, stats.page_index.populate_bytes);
+    ASSERT_EQ(0, stats.page_index.remote_read_bytes);
+}
+
+TEST_F(CacheInputStreamTest, test_metadata_read_writes_the_blocks_of_a_split_buffer_and_the_short_tail_block) {
+    // The file ends in the middle of the block 7.
+    const int64_t file_size = block_size * 7 + block_size / 2;
+    SkipCachedBlocksCase c("test_metadata_read_writes_the_blocks_of_a_split_buffer_and_the_short_tail_block",
+                           file_size);
+    // The cached block 6 is a gap above the distance 0, so the buffer is split and the missing tail block stays apart.
+    c.set_coalesce_distance(0);
+    c.set_io_range(0, file_size);
+    // The blocks 2..5 are not cached, and the cached ends are cut from the buffer.
+    c.cache_blocks({0, 1, 6});
+    const auto& stats = c.cache_stream->stats();
+    {
+        MetadataReadScope scope(MetadataKind::PAGE_INDEX, true);
+        ASSERT_NO_FATAL_FAILURE(c.read_and_check(3 * block_size + 10, 100));
+    }
+    ASSERT_EQ((Reads{{2 * block_size, 4 * block_size}}), c.remote->reads);
+    ASSERT_EQ(4, c.engine->write_calls);
+    ASSERT_EQ(7u, c.engine->blocks.size());
+    for (int64_t i = 2; i <= 5; ++i) {
+        ASSERT_EQ(c.data.substr(i * block_size, block_size), c.engine->blocks[c.block_key(i)]) << i;
+    }
+    ASSERT_EQ(4 * block_size, stats.page_index.populate_bytes);
+
+    // The buffer that ends at the short tail block writes the tail block with its own size.
+    SkipCachedBlocksCase tail("test_metadata_read_writes_the_short_tail_block", file_size);
+    tail.set_io_range(5 * block_size, file_size - 5 * block_size);
+    {
+        MetadataReadScope scope(MetadataKind::PAGE_INDEX, true);
+        ASSERT_NO_FATAL_FAILURE(tail.read_and_check(5 * block_size + 10, 100));
+    }
+    ASSERT_EQ(3u, tail.engine->blocks.size());
+    ASSERT_EQ(tail.data.substr(7 * block_size), tail.engine->blocks[tail.block_key(7)]);
+}
+
+TEST_F(CacheInputStreamTest, test_metadata_read_with_async_populate_and_without_populate) {
+    const int64_t block_count = 8;
+    {
+        SkipCachedBlocksCase c("test_metadata_read_with_async_populate", block_size * block_count, false, true);
+        c.set_io_range(0, block_size * block_count);
+        MetadataReadScope scope(MetadataKind::PAGE_INDEX, true);
+        ASSERT_NO_FATAL_FAILURE(c.read_and_check(3 * block_size + 10, 100));
+        ASSERT_EQ(static_cast<size_t>(block_count), c.engine->blocks.size());
+    }
+    // A scan that does not populate the data cache writes nothing, whatever the switch says.
+    {
+        SkipCachedBlocksCase c("test_metadata_read_without_populate", block_size * block_count);
+        c.cache_stream->set_enable_populate_cache(false);
+        c.set_io_range(0, block_size * block_count);
+        MetadataReadScope scope(MetadataKind::PAGE_INDEX, true);
+        ASSERT_NO_FATAL_FAILURE(c.read_and_check(3 * block_size + 10, 100));
+        ASSERT_EQ(0, c.engine->write_calls);
+        ASSERT_EQ(0, c.cache_stream->stats().page_index.populate_bytes);
+        ASSERT_EQ(block_count * block_size, c.cache_stream->stats().page_index.remote_read_bytes);
+    }
+}
+
+TEST_F(CacheInputStreamTest, test_metadata_read_is_counted_apart_from_the_data_pages) {
+    const int64_t block_count = 4;
+    SkipCachedBlocksCase c("test_metadata_read_is_counted_apart_from_the_data_pages", block_size * block_count);
+    c.set_io_range(0, block_size * block_count);
+    const auto& stats = c.cache_stream->stats();
+
+    // A read of data pages is not counted as a metadata read.
+    ASSERT_NO_FATAL_FAILURE(c.read_and_check(10, 100));
+    ASSERT_EQ(0, stats.page_index.remote_read_bytes);
+    ASSERT_EQ(0, stats.page_index.populate_bytes);
+    ASSERT_EQ(0, stats.bloom_filter.populate_bytes);
+    ASSERT_EQ(block_size, stats.write_block_cache_bytes);
+
+    // The scope ends with the object, and the scopes nest.
+    {
+        MetadataReadScope bloom(MetadataKind::BLOOM_FILTER, false);
+        {
+            MetadataReadScope page_index(MetadataKind::PAGE_INDEX, false);
+            ASSERT_EQ(MetadataKind::PAGE_INDEX, MetadataReadScope::current_kind());
+            ASSERT_NO_FATAL_FAILURE(c.read_and_check(2 * block_size + 10, 100));
+        }
+        ASSERT_EQ(MetadataKind::BLOOM_FILTER, MetadataReadScope::current_kind());
+        ASSERT_NO_FATAL_FAILURE(c.read_and_check(3 * block_size + 10, 100));
+    }
+    ASSERT_EQ(MetadataKind::NONE, MetadataReadScope::current_kind());
+    ASSERT_FALSE(MetadataReadScope::populate_loaded_buffer());
+    ASSERT_EQ(block_size, stats.page_index.populate_bytes);
+    ASSERT_EQ(block_size, stats.bloom_filter.populate_bytes);
+    ASSERT_EQ(3 * block_size, stats.write_block_cache_bytes);
+}
+
+TEST_F(CacheInputStreamTest, test_stats_merge_metadata_read_bytes) {
+    CacheInputStream::Stats a;
+    a.page_index.cache_read_bytes = 1;
+    a.page_index.remote_read_bytes = 2;
+    a.page_index.populate_bytes = 3;
+    a.bloom_filter.cache_read_bytes = 4;
+    CacheInputStream::Stats b;
+    b.page_index.cache_read_bytes = 10;
+    b.page_index.remote_read_bytes = 20;
+    b.page_index.populate_bytes = 30;
+    b.bloom_filter.remote_read_bytes = 40;
+    b.bloom_filter.populate_bytes = 50;
+    a += b;
+    ASSERT_EQ(11, a.page_index.cache_read_bytes);
+    ASSERT_EQ(22, a.page_index.remote_read_bytes);
+    ASSERT_EQ(33, a.page_index.populate_bytes);
+    ASSERT_EQ(4, a.bloom_filter.cache_read_bytes);
+    ASSERT_EQ(40, a.bloom_filter.remote_read_bytes);
+    ASSERT_EQ(50, a.bloom_filter.populate_bytes);
 }
 
 } // namespace starrocks::io

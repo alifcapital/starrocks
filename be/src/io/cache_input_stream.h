@@ -16,6 +16,7 @@
 
 #include <atomic>
 #include <cerrno>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <unordered_set>
@@ -26,8 +27,50 @@
 
 namespace starrocks::io {
 
+// The kind of file region that the current thread reads. The parquet reader sets it around the reads of the
+// column indexes, the offset indexes and the bloom filters, so that CacheInputStream counts the bytes of these
+// regions apart from the data pages.
+enum class MetadataKind : int8_t { NONE = 0, PAGE_INDEX = 1, BLOOM_FILTER = 2 };
+
+// The reads that the current thread makes while the object lives are reads of a region of `kind`. We expect the
+// regions of one column to be small in a shared buffer that covers the regions of many columns. We fear that the
+// blocks of the buffer that no reader asks for are lost, so with `populate_loaded_buffer` a read that loads such a
+// buffer from remote storage writes all its blocks that the cache does not hold, and not only the blocks of the read.
+class MetadataReadScope {
+public:
+    MetadataReadScope(MetadataKind kind, bool populate_loaded_buffer);
+    ~MetadataReadScope();
+    MetadataReadScope(const MetadataReadScope&) = delete;
+    MetadataReadScope& operator=(const MetadataReadScope&) = delete;
+
+    static MetadataKind current_kind();
+    static bool populate_loaded_buffer();
+
+private:
+    MetadataKind _previous_kind;
+    bool _previous_populate_loaded_buffer;
+};
+
 class CacheInputStream : public SeekableInputStreamWrapper {
 public:
+    // The reads of the regions of one MetadataKind.
+    struct MetadataIoStats {
+        // Bytes that the data cache gave to the reads.
+        int64_t cache_read_bytes = 0;
+        // Bytes that the reads loaded from remote storage. A read loads the whole shared buffer that covers it, so
+        // this includes the bytes of the buffer that the read did not ask for.
+        int64_t remote_read_bytes = 0;
+        // Bytes that were written to the data cache while the reads ran.
+        int64_t populate_bytes = 0;
+
+        MetadataIoStats& operator+=(const MetadataIoStats& o) {
+            cache_read_bytes += o.cache_read_bytes;
+            remote_read_bytes += o.remote_read_bytes;
+            populate_bytes += o.populate_bytes;
+            return *this;
+        }
+    };
+
     struct Stats {
         int64_t read_block_cache_ns = 0;
         int64_t write_block_cache_ns = 0;
@@ -72,6 +115,8 @@ public:
         // Bytes of blocks that the cache holds and that we did not load from remote storage together with
         // the shared buffer they belong to.
         int64_t skip_remote_read_bytes = 0;
+        MetadataIoStats page_index;
+        MetadataIoStats bloom_filter;
 
         // Fold another stream's counters in. Used when a scan reads through more than one
         // CacheInputStream (e.g. CACHE SELECT routes reader-owned reads through a second
@@ -114,6 +159,8 @@ public:
             read_block_buffer_bytes += o.read_block_buffer_bytes;
             read_block_buffer_count += o.read_block_buffer_count;
             skip_remote_read_bytes += o.skip_remote_read_bytes;
+            page_index += o.page_index;
+            bloom_filter += o.bloom_filter;
             return *this;
         }
     };
@@ -196,7 +243,11 @@ protected:
                             const int64_t block_size, char* out);
     Status _read_peer_cache(off_t offset, size_t size, IOBuffer* iobuf, DiskCacheReadOptions* options);
     void _populate_to_cache(const char* src, int64_t offset, int64_t count, const SharedBufferPtr& sb);
+    // Write every block of the loaded buffer `sb` that this stream has not written and the cache does not hold.
+    void _populate_loaded_buffer(const SharedBufferPtr& sb);
     void _write_cache(int64_t offset, const IOBuffer& iobuf, DiskCacheWriteOptions* options);
+    // The counters of the region kind that the current thread reads, or nullptr if it reads data pages.
+    MetadataIoStats* _metadata_stats();
 
     void _deduplicate_shared_buffer(const SharedBufferPtr& sb);
     // Split a shared buffer that is not loaded yet into the runs of blocks that we have to load from remote storage.

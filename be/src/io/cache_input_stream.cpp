@@ -31,6 +31,32 @@
 
 namespace starrocks::io {
 
+namespace {
+// A thread reads one file region at a time and the stream is used by one thread at a time, so the kind of the
+// region is thread state and the readers do not pass it through every stream between them and the cache.
+thread_local MetadataKind g_metadata_kind = MetadataKind::NONE;
+thread_local bool g_populate_loaded_buffer = false;
+} // namespace
+
+MetadataReadScope::MetadataReadScope(MetadataKind kind, bool populate_loaded_buffer)
+        : _previous_kind(g_metadata_kind), _previous_populate_loaded_buffer(g_populate_loaded_buffer) {
+    g_metadata_kind = kind;
+    g_populate_loaded_buffer = populate_loaded_buffer;
+}
+
+MetadataReadScope::~MetadataReadScope() {
+    g_metadata_kind = _previous_kind;
+    g_populate_loaded_buffer = _previous_populate_loaded_buffer;
+}
+
+MetadataKind MetadataReadScope::current_kind() {
+    return g_metadata_kind;
+}
+
+bool MetadataReadScope::populate_loaded_buffer() {
+    return g_populate_loaded_buffer;
+}
+
 // We use the `SharedBufferedInputStream` in `CacheInputStream` directly, because the we depend some functions of
 // `SharedBufferedInputStream`.
 // In fact, although the parameter is `SeekableInputStream` before, we only use `CacheInputStream` when using
@@ -79,6 +105,18 @@ const CacheInputStream::Stats& CacheInputStream::stats() {
     _stats.async_write_fail_count = _async_write_stats->fail_count.load(std::memory_order_relaxed);
     _stats.async_write_exist_count = _async_write_stats->exist_count.load(std::memory_order_relaxed);
     return _stats;
+}
+
+CacheInputStream::MetadataIoStats* CacheInputStream::_metadata_stats() {
+    switch (MetadataReadScope::current_kind()) {
+    case MetadataKind::PAGE_INDEX:
+        return &_stats.page_index;
+    case MetadataKind::BLOOM_FILTER:
+        return &_stats.bloom_filter;
+    case MetadataKind::NONE:
+        break;
+    }
+    return nullptr;
 }
 
 Status CacheInputStream::_read_block_from_local(const int64_t offset, const int64_t size, char* out) {
@@ -208,6 +246,9 @@ Status CacheInputStream::_read_from_cache(const int64_t offset, const int64_t si
             _stats.read_mem_cache_bytes += options.stats.read_mem_bytes;
             _stats.read_disk_cache_bytes += options.stats.read_disk_bytes;
             _stats.read_block_cache_ns += read_local_cache_ns;
+            if (MetadataIoStats* metadata = _metadata_stats()) {
+                metadata->cache_read_bytes += read_size;
+            }
             if (_enable_cache_io_adaptor) {
                 _cache->record_read_local_cache(read_size, read_local_cache_ns / 1000);
             }
@@ -305,14 +346,15 @@ Status CacheInputStream::_read_blocks_from_remote(const int64_t offset, const in
             _deduplicate_shared_buffer(sb);
         }
 
-        if (_enable_cache_io_adaptor) {
-            int64_t delta_remote_bytes =
-                    _sb_stream->shared_io_bytes() + _sb_stream->direct_io_bytes() - previous_remote_bytes;
-            if (delta_remote_bytes > 0) {
-                _cache->record_read_remote_storage(
-                        _block_size, _calculate_remote_latency_per_block(delta_remote_bytes, read_remote_ns),
-                        !_can_try_peer_cache());
-            }
+        const int64_t delta_remote_bytes =
+                _sb_stream->shared_io_bytes() + _sb_stream->direct_io_bytes() - previous_remote_bytes;
+        if (MetadataIoStats* metadata = _metadata_stats()) {
+            metadata->remote_read_bytes += delta_remote_bytes;
+        }
+        if (_enable_cache_io_adaptor && delta_remote_bytes > 0) {
+            _cache->record_read_remote_storage(_block_size,
+                                               _calculate_remote_latency_per_block(delta_remote_bytes, read_remote_ns),
+                                               !_can_try_peer_cache());
         }
 
         // write _buffer's data into `out`
@@ -329,6 +371,10 @@ Status CacheInputStream::_read_blocks_from_remote(const int64_t offset, const in
 
         if (_enable_populate_cache) {
             _populate_to_cache(src, read_offset_cursor, read_size, sb);
+            // Only the read that loads the buffer writes its blocks, so a buffer is written once.
+            if (sb && delta_remote_bytes > 0 && MetadataReadScope::populate_loaded_buffer()) {
+                _populate_loaded_buffer(sb);
+            }
         }
 
         read_offset_cursor += read_size;
@@ -643,6 +689,33 @@ void CacheInputStream::_populate_to_cache(const char* p, int64_t offset, int64_t
     return;
 }
 
+// A read of a column index, an offset index or a bloom filter loads the whole shared buffer that covers it, and the
+// buffer covers the regions of many columns. We fear that a block that no reader asks for now is lost, because the
+// next scan would download it again, so we write the blocks that the cache does not hold now. We write only the blocks
+// that the buffer holds whole, because the cache stores a block as one piece. A block that the cache holds is
+// not written again, so the cache has no AlreadyExist to answer.
+void CacheInputStream::_populate_loaded_buffer(const SharedBufferPtr& sb) {
+    const int64_t sb_begin = sb->offset;
+    const int64_t sb_end = sb->offset + sb->size;
+    for (int64_t block_offset = (sb_begin + _block_size - 1) / _block_size * _block_size; block_offset < sb_end;
+         block_offset += _block_size) {
+        const int64_t size = std::min(_block_size, _size - block_offset);
+        if (size <= 0 || block_offset + size > sb_end) {
+            break;
+        }
+        const int64_t block_id = block_offset / _block_size;
+        if (_already_populated_blocks.contains(block_id)) {
+            continue;
+        }
+        if (_cache->exist(_cache_key, block_offset, size)) {
+            _already_populated_blocks.emplace(block_id);
+            continue;
+        }
+        _populate_to_cache(reinterpret_cast<const char*>(sb->buffer.data()) + (block_offset - sb_begin), block_offset,
+                           size, sb);
+    }
+}
+
 void CacheInputStream::_write_cache(int64_t offset, const IOBuffer& iobuf, DiskCacheWriteOptions* options) {
     DCHECK(offset % _block_size == 0);
     const int64_t block_id = offset / _block_size;
@@ -682,6 +755,9 @@ void CacheInputStream::_write_cache(int64_t offset, const IOBuffer& iobuf, DiskC
         _stats.write_block_cache_bytes += iobuf.size();
         _stats.write_mem_cache_bytes += options->stats.write_mem_bytes;
         _stats.write_disk_cache_bytes += options->stats.write_disk_bytes;
+        if (MetadataIoStats* metadata = _metadata_stats()) {
+            metadata->populate_bytes += iobuf.size();
+        }
     } else if (!_can_ignore_populate_error(r)) {
         _stats.write_cache_fail_count += 1;
         _stats.write_cache_fail_bytes += iobuf.size();
