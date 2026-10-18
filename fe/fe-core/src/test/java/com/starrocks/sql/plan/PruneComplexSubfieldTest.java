@@ -1282,8 +1282,8 @@ public class PruneComplexSubfieldTest extends PlanTestNoneDBBase {
 
     @Test
     public void testPushDownSubfieldSkipsComputedJsonSource() throws Exception {
-        boolean oldFusion = connectContext.getSessionVariable().isEnableJsonExtractFusion();
-        connectContext.getSessionVariable().setEnableJsonExtractFusion(false);
+        boolean oldRewrite = connectContext.getSessionVariable().isEnableJsonPathRewrite();
+        connectContext.getSessionVariable().setEnableJsonPathRewrite(false);
         try {
             connectContext.getSessionVariable().setCboPruneJsonSubfieldDepth(20);
 
@@ -1310,29 +1310,28 @@ public class PruneComplexSubfieldTest extends PlanTestNoneDBBase {
                     "args nullable: true; result nullable: true], '$.a.b');");
             assertContains(noFirePlan, "4:HASH JOIN");
         } finally {
-            connectContext.getSessionVariable().setEnableJsonExtractFusion(oldFusion);
+            connectContext.getSessionVariable().setEnableJsonPathRewrite(oldRewrite);
         }
     }
 
     @Test
-    public void testJsonFusionOverCastKeepsStringExtraction() throws Exception {
-        boolean oldFusion = connectContext.getSessionVariable().isEnableJsonExtractFusion();
+    public void testJsonPathRewriteOverCastKeepsStringExtraction() throws Exception {
+        boolean oldRewrite = connectContext.getSessionVariable().isEnableJsonPathRewrite();
         try {
             // We read j1 -> '$.c' so that PruneSubfieldRule rewrites the scan and the predicate on s1 goes through
             // NormalizeCastJsonExpr.
             String sql = "select j1 -> '$.c' from jsv0 where cast(cast(s1 as json) -> '$.a' -> '$.b' as varchar) = 'x'";
-            connectContext.getSessionVariable().setEnableJsonExtractFusion(true);
+            connectContext.getSessionVariable().setEnableJsonPathRewrite(true);
             String plan = getFragmentPlan(sql);
-            assertContains(plan, "json_query_from_string(3: s1, '$.a.b')");
-            assertNotContains(plan, "get_json_string(", "AS JSON");
+            assertContains(plan, "get_json_string(3: s1, '$.a.b')");
+            assertNotContains(plan, "AS JSON");
             assertContains(getVerboseExplain(sql), "ColumnAccessPath: [/j1/c(json)]");
 
-            connectContext.getSessionVariable().setEnableJsonExtractFusion(false);
+            connectContext.getSessionVariable().setEnableJsonPathRewrite(false);
             plan = getFragmentPlan(sql);
             assertContains(plan, "get_json_string(CAST(3: s1 AS JSON), '$.a.b')");
-            assertNotContains(plan, "json_query_from_string");
         } finally {
-            connectContext.getSessionVariable().setEnableJsonExtractFusion(oldFusion);
+            connectContext.getSessionVariable().setEnableJsonPathRewrite(oldRewrite);
         }
     }
 

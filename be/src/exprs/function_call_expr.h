@@ -62,6 +62,8 @@ private:
     StatusOr<ColumnPtr> evaluate_arguments(ExprContext* context, Columns args, size_t num_rows,
                                            bool has_input_chunk = true);
     StatusOr<ColumnPtr> finish_result(StatusOr<ColumnPtr> result);
+    std::string conjunct_fingerprint(FunctionContext* fn_ctx) const;
+    StatusOr<ColumnPtr> evaluate_shared(ExprContext* context, ColumnPtr input, const std::vector<uint32_t>* rows);
     const FunctionDescriptor* _get_function_by_fid(const TFunction& fn);
     const FunctionDescriptor* _get_function(const TFunction& fn, const std::vector<TypeDescriptor>& arg_types,
                                             const TypeDescriptor& result_type, std::vector<bool> arg_nullables);
@@ -73,6 +75,10 @@ private:
     const FunctionDescriptor* _fn_desc{nullptr};
 
     bool _is_returning_random_value = false;
+
+    // Not empty when the conjuncts of one chunk share the results of this call: the function is
+    // conjunct_shared, its first argument is a slot and the others are constants.
+    std::string _conjunct_fingerprint;
 
     // only set when it's a agg state combinator function to track its lifecycle be with the expr
     StateCombinatorPtr _agg_state_func = nullptr;

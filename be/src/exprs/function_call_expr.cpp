@@ -14,6 +14,7 @@
 
 #include "exprs/function_call_expr.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <string_view>
 #include <unordered_set>
@@ -160,6 +161,7 @@ Status VectorizedFunctionCallExpr::open(starrocks::RuntimeState* state, starrock
             const_columns.emplace_back(std::move(child_col));
         }
         fn_ctx->set_constant_columns(std::move(const_columns));
+        _conjunct_fingerprint = conjunct_fingerprint(fn_ctx);
     }
 
     if (_fn_desc->prepare_function != nullptr) {
@@ -198,7 +200,107 @@ bool VectorizedFunctionCallExpr::is_constant() const {
     return Expr::is_constant();
 }
 
+std::string VectorizedFunctionCallExpr::conjunct_fingerprint(FunctionContext* fn_ctx) const {
+    if (!_fn_desc->conjunct_shared || _fn_desc->selected_function == nullptr || _children.empty() ||
+        !_children[0]->is_slotref()) {
+        return {};
+    }
+    // Two calls with the same name and the same constant arguments over one column have one result.
+    std::string fingerprint = _fn_desc->name;
+    for (size_t i = 1; i < _children.size(); ++i) {
+        if (!fn_ctx->is_notnull_constant_column(i)) {
+            return {};
+        }
+        const std::string value = fn_ctx->get_constant_column(i)->debug_item(0);
+        fingerprint.append("|").append(std::to_string(value.size())).append(":").append(value);
+    }
+    return fingerprint;
+}
+
+// We expect several conjuncts of one chunk to call the function with the same arguments, often on rows that a
+// previous conjunct already saw, so a row is computed once per chunk and kept in the cache of the conjuncts.
+// `rows` are the requested rows of the input, all rows when it is null.
+StatusOr<ColumnPtr> VectorizedFunctionCallExpr::evaluate_shared(ExprContext* context, ColumnPtr input,
+                                                                const std::vector<uint32_t>* rows) {
+    auto& entries = ExprContext::conjunct_eval_cache(context)->shared_results;
+    const size_t input_size = input->size();
+    auto entry = std::find_if(entries.begin(), entries.end(), [&](const auto& e) {
+        return e.input.get() == input.get() && e.input_size == input_size && e.fingerprint == _conjunct_fingerprint;
+    });
+    if (entry == entries.end()) {
+        entries.push_back({_conjunct_fingerprint, input, input_size, nullptr, std::vector<uint8_t>(input_size, 0)});
+        entry = entries.end() - 1;
+    }
+
+    std::vector<uint32_t> missing;
+    auto add_missing = [&](uint32_t row) {
+        if (entry->computed[row] == 0) {
+            entry->computed[row] = 1;
+            missing.push_back(row);
+        }
+    };
+    if (rows == nullptr) {
+        for (uint32_t row = 0; row < input_size; ++row) {
+            add_missing(row);
+        }
+    } else {
+        for (uint32_t row : *rows) {
+            add_missing(row);
+        }
+    }
+
+    if (!missing.empty()) {
+        const bool all_rows = missing.size() == input_size && rows == nullptr;
+        auto* fn_ctx = context->fn_context(_fn_context_index);
+        SelectedColumns args;
+        args.reserve(_children.size());
+        args.push_back({input, all_rows ? nullptr : &missing});
+        for (size_t i = 1; i < _children.size(); ++i) {
+            auto constant = fn_ctx->get_constant_column(i)->clone();
+            constant->resize(missing.size());
+            args.push_back({std::move(constant), nullptr});
+        }
+        StatusOr<ColumnPtr> part;
+        if (_fn_desc->exception_safe) {
+            part = _fn_desc->selected_function(fn_ctx, args, missing.size());
+        } else {
+            SCOPED_SET_CATCHED(false);
+            part = _fn_desc->selected_function(fn_ctx, args, missing.size());
+        }
+        part = finish_result(std::move(part));
+        if (!part.ok()) {
+            // The rows of this call are marked computed but hold no value, so the entry must not be read again.
+            entries.erase(entry);
+            return part.status();
+        }
+        ColumnPtr values = ColumnHelper::unfold_const_column(_type, missing.size(), part.value());
+        if (all_rows) {
+            entry->result = std::move(values);
+        } else {
+            if (entry->result == nullptr) {
+                auto placeholder = ColumnHelper::create_column(_type, true);
+                placeholder->append_nulls(input_size);
+                entry->result = std::move(placeholder);
+            }
+            entry->result->as_mutable_raw_ptr()->update_rows(*values, missing.data());
+        }
+    }
+
+    if (rows == nullptr) {
+        return entry->result;
+    }
+    auto result = entry->result->clone_empty();
+    result->append_selective(*entry->result, rows->data(), 0, rows->size());
+    return result;
+}
+
 StatusOr<ColumnPtr> VectorizedFunctionCallExpr::evaluate_checked(starrocks::ExprContext* context, Chunk* ptr) {
+    if (!_conjunct_fingerprint.empty() && ptr != nullptr && ExprContext::conjunct_eval_cache(context) != nullptr) {
+        ASSIGN_OR_RETURN(ColumnPtr input, context->evaluate(_children[0], ptr));
+        if (!input->is_constant()) {
+            return evaluate_shared(context, std::move(input), nullptr);
+        }
+    }
     Columns args;
     args.reserve(_children.size());
     for (Expr* child : _children) {
@@ -212,6 +314,12 @@ StatusOr<ColumnPtr> VectorizedFunctionCallExpr::evaluate_checked(starrocks::Expr
 StatusOr<ColumnPtr> VectorizedFunctionCallExpr::evaluate_selected(ExprContext* context, Chunk* chunk,
                                                                   const std::vector<uint32_t>& rows) {
     if (rows.empty()) return ColumnHelper::create_column(_type, is_nullable());
+    if (!_conjunct_fingerprint.empty() && ExprContext::conjunct_eval_cache(context) != nullptr) {
+        ASSIGN_OR_RETURN(auto input, _children[0]->evaluate_checked(context, chunk));
+        if (!input->is_constant() && !input->is_view()) {
+            return evaluate_shared(context, std::move(input), &rows);
+        }
+    }
     if (_fn_desc->selected_function != nullptr) {
         SelectedColumns args;
         args.reserve(_children.size());

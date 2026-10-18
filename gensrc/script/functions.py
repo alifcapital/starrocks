@@ -904,7 +904,7 @@ vectorized_functions = [
      "JsonFunctions::native_json_path_prepare", "JsonFunctions::native_json_path_close", {'selected': 'JsonFunctions::get_json_string_selected'}],
     [110021, "get_json_bool", False, False, "BOOLEAN", ["JSON", "VARCHAR"], "JsonFunctions::get_native_json_bool",
      "JsonFunctions::native_json_path_prepare", "JsonFunctions::native_json_path_close", {'selected': 'JsonFunctions::get_native_json_bool_selected'}],
-    # get_json_bool over VARCHAR input — fused simdjson fast path on constant paths
+    # get_json_bool over VARCHAR input, the same value as get_json_bool(parse_json(v), p)
     [1100106, "get_json_bool", False, False, "BOOLEAN", ["VARCHAR", "VARCHAR"], "JsonFunctions::get_json_bool",
      "JsonFunctions::native_json_path_prepare", "JsonFunctions::native_json_path_close", {"selected": "JsonFunctions::get_json_bool_selected"}],
 
@@ -914,14 +914,12 @@ vectorized_functions = [
     [110004, "json_string", False, True, "VARCHAR", ["JSON"], "JsonFunctions::json_string", {'selected': 'JsonFunctions::json_string_selected'}],
     [110005, "json_query", False, False, "JSON", ["JSON", "VARCHAR"], "JsonFunctions::json_query",
      "JsonFunctions::native_json_path_prepare", "JsonFunctions::native_json_path_close", {'selected': 'JsonFunctions::json_query_selected'}],
-    # VARCHAR-input json_query overload — fused simdjson path; FE rewrite uses this for
-    # parse_json(x) -> 'p' and cast(json_query(parse_json(x), 'p') as JSON) patterns.
-    [1100107, "json_query_from_string", False, False, "JSON", ["VARCHAR", "VARCHAR"],
-     "JsonFunctions::json_query_from_string",
-     "JsonFunctions::native_json_path_prepare", "JsonFunctions::native_json_path_close", {"selected": "JsonFunctions::json_query_from_string_selected"}],
-    [1100108, "json_query_many_from_string", False, False, "JSON", ["VARCHAR", "VARCHAR", "..."],
-     "JsonFunctions::json_query_many_from_string",
-     "JsonFunctions::json_query_many_prepare", "JsonFunctions::json_query_many_close", {"selected": "JsonFunctions::json_query_many_from_string_selected"}],
+    # Constant paths of a JSON document stored as text, parsed once for all of them. Conjuncts of one chunk
+    # that call it with the same paths over the same column share the result (conjunct_shared).
+    [1100108, "json_extract_paths", False, False, "JSON", ["VARCHAR", "VARCHAR", "..."],
+     "JsonFunctions::json_extract_paths",
+     "JsonFunctions::json_extract_paths_prepare", "JsonFunctions::json_extract_paths_close",
+     {"selected": "JsonFunctions::json_extract_paths_selected", "conjunct_shared": True}],
     # [110006, "json_value", "JSON", ["JSON", "VARCHAR"], "JsonFunctions::json_query"],
     [110007, "json_exists", False, False, "BOOLEAN", ["JSON", "VARCHAR"], "JsonFunctions::json_exists",
      "JsonFunctions::native_json_path_prepare", "JsonFunctions::native_json_path_close", {'selected': 'JsonFunctions::json_exists_selected'}],

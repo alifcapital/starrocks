@@ -677,13 +677,10 @@ StarRocks は 2 種類の RF を提供します：ローカル RF とグロー�
 * **デフォルト値**：true
 * **導入バージョン**：v3.3.20、v3.4.9、v3.5.8、v4.0.2
 
-### enable_json_extract_fusion
+### enable_json_path_rewrite
 
-* **説明**：定数パスを使用する VARCHAR JSON の高速抽出を有効にします。デフォルトは `true` です。`SET` は現在のセッションを変更し、`SET GLOBAL` は新しいセッションのデフォルトを設定します。オプティマイザは `json_query(parse_json(value), path)` や矢印式も統合できます。CAST の変換先の型とエラー処理は維持されます。
-
-  `sql_mode` に `ALLOW_THROW_EXCEPTION` が含まれる場合、抽出は文書全体を検証し、JSON 解析エラーを報告します。このモードが無効の場合、高速パスは指定された値を読み取り、パス外の不正な値の検出を保証しません。抽出中に検出されたエラーは NULL を返します。ワイルドカード、スライス、非定数パスには完全なパーサーを使用します。この変数を `false` に設定すると、オプティマイザによる統合と高速抽出の両方を無効にし、文書全体の解析に戻します。
-
-  同期 Stream Load と Routine Load はこのセッション変数を BE に渡さないため、これらの経路では高速抽出は無効のままです。
+* **説明**：VARCHAR または CHAR 列に格納された JSON から定数パスを抽出する式をオプティマイザが書き換えるかどうか。書き換えの対象は、テキスト、`parse_json(text)`、`CAST(text AS JSON)` に対する `get_json_string`、`get_json_object`、`get_json_int`、`get_json_double`、`get_json_bool`、および `parse_json(text)` と `CAST(text AS JSON)` に対するパス付きの `json_query`（`->` を含む）、`json_exists`、`json_length` です。1 つの射影または 1 つの述語の中で同じテキストに対する呼び出しは 1 つの `json_extract_paths(text, path1, path2, ...)` 呼び出しを共有するため、各ドキュメントは 1 回だけ解析されます。書き換えは結果を変えません。どの形式も `parse_json(text)` に対する同じ関数の値を返し、不正なドキュメントや `sql_mode` に `ALLOW_THROW_EXCEPTION` が含まれる場合も同じです。`ALLOW_THROW_EXCEPTION` が有効な場合、エラーメッセージが異なるため `CAST(text AS JSON)` は書き換えられません。ワイルドカードやスライスを含むパス、および定数でないパスは書き換えられません。
+* **デフォルト**：true
 
 ### enable_insert_strict
 

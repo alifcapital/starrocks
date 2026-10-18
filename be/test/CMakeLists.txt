@@ -209,6 +209,7 @@ set(EXEC_FILES
         ./exprs/coalesce_expr_test.cpp
         ./exprs/compound_predicate_test.cpp
         ./exprs/condition_expr_test.cpp
+        ./exprs/conjunct_eval_cache_test.cpp
         ./exprs/encryption_functions_test.cpp
         ./exprs/function_call_expr_test.cpp
         ./exprs/generate_series_core_test.cpp

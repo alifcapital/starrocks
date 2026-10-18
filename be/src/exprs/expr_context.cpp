@@ -161,7 +161,43 @@ std::string ExprContext::get_error_msg() const {
     return "";
 }
 
-StatusOr<ColumnPtr> ExprContext::evaluate_with_cast_cache(Chunk* chunk, uint8_t* filter, DatetimeCastCache* cache) {
+namespace {
+
+// The cache of the conjunct that this thread evaluates, the context that evaluates it, and whether its
+// VARCHAR -> DATETIME entry may be used.
+struct ActiveConjunctCache {
+    const ExprContext* owner = nullptr;
+    ExprContext::ConjunctEvalCache* cache = nullptr;
+    bool datetime_cast = false;
+};
+thread_local ActiveConjunctCache active_conjunct_cache;
+
+// Installs a cache for the evaluation of one conjunct on this thread and restores the previous one at the end.
+class ScopedConjunctCache {
+public:
+    ScopedConjunctCache(const ExprContext* owner, ExprContext::ConjunctEvalCache* cache, bool datetime_cast)
+            : _previous(active_conjunct_cache) {
+        active_conjunct_cache = {owner, cache, datetime_cast};
+    }
+    ~ScopedConjunctCache() { active_conjunct_cache = _previous; }
+
+private:
+    ActiveConjunctCache _previous;
+};
+
+} // namespace
+
+ExprContext::ConjunctEvalCache* ExprContext::conjunct_eval_cache(const ExprContext* context) {
+    return active_conjunct_cache.owner == context ? active_conjunct_cache.cache : nullptr;
+}
+
+ExprContext::ConjunctEvalCache::DatetimeCast* ExprContext::datetime_cast_cache(const ExprContext* context) {
+    return active_conjunct_cache.owner == context && active_conjunct_cache.datetime_cast
+                   ? &active_conjunct_cache.cache->datetime_cast
+                   : nullptr;
+}
+
+StatusOr<ColumnPtr> ExprContext::evaluate_with_conjunct_cache(Chunk* chunk, uint8_t* filter, ConjunctEvalCache* cache) {
     // Restrict sharing to ordinary comparisons. More complex expressions can evaluate
     // their children on temporary or filtered chunks.
     const auto is_slot_cast = [](const Expr* expr) {
@@ -172,13 +208,24 @@ StatusOr<ColumnPtr> ExprContext::evaluate_with_cast_cache(Chunk* chunk, uint8_t*
             comparison && ((is_slot_cast(_root->get_child(0)) && _root->get_child(1)->is_constant()) ||
                            (is_slot_cast(_root->get_child(1)) && _root->get_child(0)->is_constant()));
     if (!cast_comparison) {
-        *cache = {};
-        return evaluate(chunk, filter);
+        cache->datetime_cast = {};
     }
-    auto* previous = _datetime_cast_cache;
-    _datetime_cast_cache = cache;
-    DeferOp restore([&] { _datetime_cast_cache = previous; });
+    ScopedConjunctCache scope(this, cache, cast_comparison);
     return evaluate(chunk, filter);
+}
+
+StatusOr<ColumnPtr> ExprContext::evaluate_selected_with_conjunct_cache(Chunk* chunk, const std::vector<uint32_t>& rows,
+                                                                       ConjunctEvalCache* cache) {
+    DCHECK(_prepared);
+    DCHECK(_opened);
+    DCHECK(!_closed);
+    // A child evaluated on selected rows is a temporary column, so the VARCHAR -> DATETIME entry stays unused.
+    ScopedConjunctCache scope(this, cache, false);
+    try {
+        return _root->evaluate_selected(this, chunk, rows);
+    } catch (std::runtime_error& e) {
+        return Status::RuntimeError(fmt::format("Expr evaluate meet error: {}", e.what()));
+    }
 }
 
 StatusOr<ColumnPtr> ExprContext::evaluate(Chunk* chunk, uint8_t* filter) {

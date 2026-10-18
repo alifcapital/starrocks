@@ -2057,115 +2057,108 @@ public class ExpressionTest extends PlanTestBase {
     }
 
     @Test
-    public void testJsonFusionSwitchAndCast() throws Exception {
-        boolean previous = connectContext.getSessionVariable().isEnableJsonExtractFusion();
+    public void testJsonPathRewriteSwitchAndCast() throws Exception {
+        boolean previous = connectContext.getSessionVariable().isEnableJsonPathRewrite();
         try {
             String sql = "select cast(json_query(parse_json(cast(v4 as varchar)), '$.a') as tinyint) from t1";
-            connectContext.getSessionVariable().setEnableJsonExtractFusion(true);
+            connectContext.getSessionVariable().setEnableJsonPathRewrite(true);
             String plan = getFragmentPlan(sql);
-            assertContains(plan, "CAST(json_query_from_string(", "AS TINYINT");
-            connectContext.getSessionVariable().setEnableJsonExtractFusion(false);
+            assertContains(plan, "CAST(json_query(json_extract_paths(CAST(1: v4 AS VARCHAR), '$.a'), '$.0') AS TINYINT)");
+            assertNotContains(plan, "parse_json(");
+            connectContext.getSessionVariable().setEnableJsonPathRewrite(false);
             plan = getFragmentPlan(sql);
             assertContains(plan, "CAST(json_query(parse_json(", "AS TINYINT");
+            assertNotContains(plan, "json_extract_paths");
         } finally {
-            connectContext.getSessionVariable().setEnableJsonExtractFusion(previous);
+            connectContext.getSessionVariable().setEnableJsonPathRewrite(previous);
         }
     }
 
     @Test
-    public void testJsonFusionStrictModeKeepsSharedParse() throws Exception {
-        boolean previous = connectContext.getSessionVariable().isEnableJsonExtractFusion();
+    public void testJsonPathRewriteInStrictMode() throws Exception {
         long previousSqlMode = connectContext.getSessionVariable().getSqlMode();
         try {
-            connectContext.getSessionVariable().setEnableJsonExtractFusion(true);
             connectContext.getSessionVariable().setSqlMode(previousSqlMode | SqlModeHelper.MODE_ALLOW_THROW_EXCEPTION);
+            // parse_json() fails in strict mode with the error of json_extract_paths(), so it is rewritten.
             String sql = "select cast(json_query(parse_json(cast(v4 as varchar)), '$.a') as bigint), "
                     + "cast(json_query(parse_json(cast(v4 as varchar)), '$.b') as bigint) from t1";
             String plan = getFragmentPlan(sql);
-            assertContains(plan, "common expressions:", "parse_json(");
-            Assertions.assertEquals(1, StringUtils.countMatches(plan, "parse_json("));
-            Assertions.assertFalse(plan.contains("json_query_from_string"));
+            assertContains(plan, "common expressions:", "<slot 6> : CAST(1: v4 AS VARCHAR)",
+                    "<slot 7> : json_extract_paths(6: cast, '$.a', '$.b')",
+                    "CAST(json_query(7: json_extract_paths, '$.0') AS BIGINT)",
+                    "CAST(json_query(7: json_extract_paths, '$.1') AS BIGINT)");
+            Assertions.assertEquals(1, StringUtils.countMatches(plan, "json_extract_paths("));
+            assertNotContains(plan, "parse_json(");
         } finally {
             connectContext.getSessionVariable().setSqlMode(previousSqlMode);
-            connectContext.getSessionVariable().setEnableJsonExtractFusion(previous);
         }
     }
 
     @Test
-    public void testJsonFusionSharesPaths() throws Exception {
-        boolean previous = connectContext.getSessionVariable().isEnableJsonExtractFusion();
+    public void testJsonPathRewriteSharesPaths() throws Exception {
+        boolean previous = connectContext.getSessionVariable().isEnableJsonPathRewrite();
         try {
-            connectContext.getSessionVariable().setEnableJsonExtractFusion(true);
+            connectContext.getSessionVariable().setEnableJsonPathRewrite(true);
             String first = "cast(json_query(parse_json(cast(v4 as varchar)), '$.a') as bigint)";
             String second = "cast(json_query(parse_json(cast(v4 as varchar)), '$.b') as bigint)";
             for (String sql : List.of("select " + first + ", " + second + " from t1",
                     "select sum(" + first + "), sum(" + second + ") from t1")) {
                 String plan = getFragmentPlan(sql);
-                assertContains(plan, "common expressions:", "json_query_many_from_string(");
-                Assertions.assertEquals(1, StringUtils.countMatches(plan, "json_query_many_from_string("));
-                Assertions.assertFalse(plan.contains("json_query_from_string("));
+                assertContains(plan, "common expressions:", ": cast, '$.a', '$.b')", "json_query(",
+                        "_paths, '$.0')", "_paths, '$.1')");
+                Assertions.assertEquals(1, StringUtils.countMatches(plan, "json_extract_paths("));
+                assertNotContains(plan, "parse_json(");
             }
             String repeated = getFragmentPlan("select " + first + ", " + first + " from t1");
-            Assertions.assertFalse(repeated.contains("json_query_many_from_string("));
-            assertContains(repeated, "json_query_from_string(");
+            Assertions.assertEquals(1, StringUtils.countMatches(repeated, "json_extract_paths("), repeated);
+            assertNotContains(repeated, "'$.b'", "parse_json(");
             String independent = getFragmentPlan("select " + first + ", " + second.replace("v4", "v5") + " from t1");
-            Assertions.assertFalse(independent.contains("json_query_many_from_string("));
+            assertContains(independent, "json_extract_paths(CAST(1: v4 AS VARCHAR), '$.a')",
+                    "json_extract_paths(CAST(2: v5 AS VARCHAR), '$.b')");
+            // A lambda argument is evaluated in its own context, so the rewrite leaves it.
             String lambda = getFragmentPlan("select array_map(x -> "
                     + "cast(json_query(parse_json(x), '$.a') as bigint) + "
                     + "cast(json_query(parse_json(x), '$.b') as bigint), [cast(v4 as varchar)]) from t1");
-            Assertions.assertEquals(1, StringUtils.countMatches(lambda, "json_query_many_from_string("));
-            connectContext.getSessionVariable().setEnableJsonExtractFusion(false);
+            assertContains(lambda, "parse_json(");
+            assertNotContains(lambda, "json_extract_paths");
+            connectContext.getSessionVariable().setEnableJsonPathRewrite(false);
             String off = getFragmentPlan("select " + first + ", " + second + " from t1");
             Assertions.assertEquals(1, StringUtils.countMatches(off, "parse_json("));
-            Assertions.assertFalse(off.contains("json_query_many_from_string("));
+            assertNotContains(off, "json_extract_paths");
         } finally {
-            connectContext.getSessionVariable().setEnableJsonExtractFusion(previous);
+            connectContext.getSessionVariable().setEnableJsonPathRewrite(previous);
         }
     }
 
     @Test
-    public void testJsonFusionOverCastToJson() throws Exception {
-        boolean previous = connectContext.getSessionVariable().isEnableJsonExtractFusion();
+    public void testJsonPathRewriteOverCastToJson() throws Exception {
         long previousSqlMode = connectContext.getSessionVariable().getSqlMode();
         try {
-            connectContext.getSessionVariable().setEnableJsonExtractFusion(true);
             String project = "select cast(cast(t1a as json) -> '$.a' -> '$.b' as varchar) from test_all_type";
             String plan = getFragmentPlan(project);
-            assertContains(plan, "CAST(json_query_from_string(1: t1a, '$.a.b') AS VARCHAR");
+            assertContains(plan, "json_extract_paths(1: t1a, '$.a.b')");
             assertNotContains(plan, "AS JSON");
-
-            String filter = "select t1b from test_all_type "
-                    + "where cast(cast(t1a as json) -> '$.a' -> '$.b' as varchar) = 'x'";
-            plan = getFragmentPlan(filter);
-            assertContains(plan, "PREDICATES: CAST(json_query_from_string(1: t1a, '$.a.b') AS VARCHAR");
-            assertNotContains(plan, "AS JSON", "get_json_string(");
 
             String shared = "select cast(cast(t1a as json) -> '$.a' as bigint), "
                     + "cast(cast(t1a as json) -> '$.b' as bigint) from test_all_type";
             plan = getFragmentPlan(shared);
-            Assertions.assertEquals(1, StringUtils.countMatches(plan, "json_query_many_from_string("));
+            Assertions.assertEquals(1, StringUtils.countMatches(plan, "json_extract_paths(1: t1a, '$.a', '$.b')"));
             assertNotContains(plan, "AS JSON");
 
             plan = getFragmentPlan("select json_query(cast(t1a as json), t1a) from test_all_type");
             assertContains(plan, "json_query(CAST(1: t1a AS JSON), 1: t1a)");
-            assertNotContains(plan, "json_query_from_string");
+            assertNotContains(plan, "json_extract_paths");
 
             plan = getFragmentPlan("select cast(v_json as json) -> '$.a' from tjson");
-            assertNotContains(plan, "json_query_from_string");
+            assertNotContains(plan, "json_extract_paths");
 
+            // In strict mode CAST fails with another message than parse_json(), so it stays.
             connectContext.getSessionVariable().setSqlMode(previousSqlMode | SqlModeHelper.MODE_ALLOW_THROW_EXCEPTION);
             plan = getFragmentPlan(project);
             assertContains(plan, "json_query(CAST(1: t1a AS JSON), '$.a.b')");
-            assertNotContains(plan, "json_query_from_string");
-            connectContext.getSessionVariable().setSqlMode(previousSqlMode);
-
-            connectContext.getSessionVariable().setEnableJsonExtractFusion(false);
-            plan = getFragmentPlan(project);
-            assertContains(plan, "json_query(CAST(1: t1a AS JSON), '$.a.b')");
-            assertNotContains(plan, "json_query_from_string");
+            assertNotContains(plan, "json_extract_paths");
         } finally {
             connectContext.getSessionVariable().setSqlMode(previousSqlMode);
-            connectContext.getSessionVariable().setEnableJsonExtractFusion(previous);
         }
     }
 
@@ -2173,23 +2166,23 @@ public class ExpressionTest extends PlanTestBase {
     public void testJsonQuery() throws Exception {
         String sql = "select parse_json('{\"a\": true}')->\"a\"->\"b\"->\"c\"->\"d\"";
         String plan = getFragmentPlan(sql);
-        assertContains(plan, "json_query_from_string('{\"a\": true}', 'a.b.c.d')");
+        assertContains(plan, "json_query(parse_json('{\"a\": true}'), 'a.b.c.d')");
 
         sql = "select parse_json('{\"a\": true}')->\"$.a\"->\"$.b\"->\"$.c\"->\"$.d\"";
         plan = getFragmentPlan(sql);
-        assertContains(plan, "json_query_from_string('{\"a\": true}', '$.a.b.c.d')");
+        assertContains(plan, "json_query(parse_json('{\"a\": true}'), '$.a.b.c.d')");
 
         sql = "select parse_json('{\"a\": true}')->\"a\"->\"$.*\"";
         plan = getFragmentPlan(sql);
-        assertContains(plan, "json_query_from_string('{\"a\": true}', 'a.*");
+        assertContains(plan, "json_query(parse_json('{\"a\": true}'), 'a.*");
 
         sql = "select parse_json('{\"a\": true}')->\"a\"->\"$$$$\"";
         plan = getFragmentPlan(sql);
-        assertContains(plan, "json_query_from_string('{\"a\": true}', 'a.$$$$')");
+        assertContains(plan, "json_query(parse_json('{\"a\": true}'), 'a.$$$$')");
 
         sql = "select parse_json('{\"a\": true}')->\"a\"->\"$....\"";
         plan = getFragmentPlan(sql);
-        assertContains(plan, "json_query(json_query_from_string('{\"a\": true}', 'a'), '$....')");
+        assertContains(plan, "json_query(json_query(parse_json('{\"a\": true}'), 'a'), '$....')");
     }
 
     @Test

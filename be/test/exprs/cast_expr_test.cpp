@@ -17,9 +17,12 @@
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <limits>
+#include <thread>
 
 #include "butil/time.h"
+#include "column/binary_column.h"
 #include "column/column_builder.h"
 #include "column/fixed_length_column.h"
 #include "column/nullable_column.h"
@@ -37,6 +40,7 @@
 #include "runtime/datetime_value.h"
 #include "runtime/runtime_state.h"
 #include "runtime/time_types.h"
+#include "simd/simd.h"
 #include "types/date_value.h"
 #include "types/logical_type.h"
 #include "types/timestamp_value.h"
@@ -105,25 +109,25 @@ TEST_F(DatetimeCastReuseTest, ShareNullableResultAndKeepErrorPolicy) {
     auto* lower = comparison(TExprOpcode::GE, TimestampValue::create(2026, 3, 23, 0, 0, 0));
     auto* upper = comparison(TExprOpcode::LT, TimestampValue::create(2026, 9, 23, 0, 0, 0));
     auto* strict = comparison(TExprOpcode::LT, TimestampValue::create(2026, 9, 23, 0, 0, 0), true);
-    ExprContext::DatetimeCastCache cache;
+    ExprContext::ConjunctEvalCache cache;
     Filter filter(3, 1);
-    auto first = lower->evaluate_with_cast_cache(&chunk, filter.data(), &cache);
+    auto first = lower->evaluate_with_conjunct_cache(&chunk, filter.data(), &cache);
     ASSERT_TRUE(first.ok());
-    auto saved = cache.result;
+    auto saved = cache.datetime_cast.result;
     ASSERT_NE(nullptr, saved);
     EXPECT_EQ(2, ColumnHelper::count_nulls(saved));
-    auto second = upper->evaluate_with_cast_cache(&chunk, filter.data(), &cache);
+    auto second = upper->evaluate_with_conjunct_cache(&chunk, filter.data(), &cache);
     ASSERT_TRUE(second.ok());
-    EXPECT_EQ(saved.get(), cache.result.get());
+    EXPECT_EQ(saved.get(), cache.datetime_cast.result.get());
     Filter selected(3, 1);
     ColumnHelper::merge_two_filters(second.value(), &selected);
     EXPECT_EQ((Filter{1, 0, 0}), selected);
-    EXPECT_EQ(2, ColumnHelper::count_nulls(cache.result));
-    EXPECT_EQ(nullptr, lower->datetime_cast_cache());
-    EXPECT_EQ(nullptr, upper->datetime_cast_cache());
-    auto error = strict->evaluate_with_cast_cache(&chunk, filter.data(), &cache);
+    EXPECT_EQ(2, ColumnHelper::count_nulls(cache.datetime_cast.result));
+    EXPECT_EQ(nullptr, ExprContext::datetime_cast_cache(lower));
+    EXPECT_EQ(nullptr, ExprContext::datetime_cast_cache(upper));
+    auto error = strict->evaluate_with_conjunct_cache(&chunk, filter.data(), &cache);
     EXPECT_FALSE(error.ok());
-    EXPECT_EQ(nullptr, strict->datetime_cast_cache());
+    EXPECT_EQ(nullptr, ExprContext::datetime_cast_cache(strict));
 
     // A different input column must be parsed even within the same evaluation scope.
     ColumnBuilder<TYPE_VARCHAR> other(3);
@@ -132,9 +136,55 @@ TEST_F(DatetimeCastReuseTest, ShareNullableResultAndKeepErrorPolicy) {
     other.append(Slice("2000-01-01"));
     Chunk other_chunk;
     other_chunk.append_column(other.build(false), 1);
-    ASSERT_TRUE(lower->evaluate_with_cast_cache(&other_chunk, filter.data(), &cache).ok());
-    EXPECT_NE(saved.get(), cache.result.get());
-    EXPECT_EQ(0, ColumnHelper::count_nulls(cache.result));
+    ASSERT_TRUE(lower->evaluate_with_conjunct_cache(&other_chunk, filter.data(), &cache).ok());
+    EXPECT_NE(saved.get(), cache.datetime_cast.result.get());
+    EXPECT_EQ(0, ColumnHelper::count_nulls(cache.datetime_cast.result));
+}
+
+// A comparison of a VARCHAR slot cast to DATETIME evaluated by ExecNode::eval_conjuncts() from several threads on
+// one ExprContext, as a FILTER operator or a lake/OLAP scan with dop > 1 does. Each thread must use only its own
+// cache and leave no cache installed.
+TEST_F(DatetimeCastReuseTest, SharedContextAcrossThreads) {
+    auto* lower = comparison(TExprOpcode::GE, TimestampValue::create(2026, 1, 1, 0, 0, 0));
+    constexpr int kThreads = 4;
+    constexpr int kRows = 4096;
+    constexpr int kIterations = 20000;
+    std::atomic<int> wrong{0};
+    std::atomic<int> errors{0};
+    std::atomic<int> dangling{0};
+    std::vector<std::thread> threads;
+    for (int t = 0; t < kThreads; ++t) {
+        threads.emplace_back([&, t] {
+            auto column = BinaryColumn::create();
+            size_t expected = 0;
+            for (int row = 0; row < kRows; ++row) {
+                const bool late = row % (t + 2) == 0;
+                expected += late;
+                column->append(Slice(late ? "2026-06-01 00:00:00" : "2020-01-01 00:00:00"));
+            }
+            Chunk chunk;
+            chunk.append_column(std::move(column), 1);
+            for (int i = 0; i < kIterations; ++i) {
+                FilterPtr filter;
+                auto st = ExecNode::eval_conjuncts({lower}, &chunk, &filter, false);
+                if (!st.ok()) {
+                    errors++;
+                    continue;
+                }
+                if (SIMD::count_nonzero(*filter) != expected) {
+                    wrong++;
+                }
+            }
+            dangling += ExprContext::conjunct_eval_cache(lower) != nullptr;
+        });
+    }
+    for (auto& thread : threads) {
+        thread.join();
+    }
+    EXPECT_EQ(0, wrong.load());
+    EXPECT_EQ(0, errors.load());
+    EXPECT_EQ(0, dangling.load());
+    EXPECT_EQ(nullptr, ExprContext::conjunct_eval_cache(lower));
 }
 
 TEST_F(DatetimeCastReuseTest, ComplexCastClearsCache) {
@@ -145,14 +195,14 @@ TEST_F(DatetimeCastReuseTest, ComplexCastClearsCache) {
     auto* direct = comparison(TExprOpcode::GE, bound);
     auto* computed =
             comparison(TExprOpcode::GE, bound, false, 1, pool.add(new MockExpr(TypeDescriptor(TYPE_VARCHAR), input)));
-    ExprContext::DatetimeCastCache cache;
+    ExprContext::ConjunctEvalCache cache;
     Filter filter(2, 1);
-    ASSERT_TRUE(direct->evaluate_with_cast_cache(&chunk, filter.data(), &cache).ok());
-    ASSERT_NE(nullptr, cache.result);
-    ASSERT_TRUE(computed->evaluate_with_cast_cache(&chunk, filter.data(), &cache).ok());
-    EXPECT_EQ(nullptr, cache.input);
-    EXPECT_EQ(nullptr, cache.result);
-    EXPECT_EQ(nullptr, computed->datetime_cast_cache());
+    ASSERT_TRUE(direct->evaluate_with_conjunct_cache(&chunk, filter.data(), &cache).ok());
+    ASSERT_NE(nullptr, cache.datetime_cast.result);
+    ASSERT_TRUE(computed->evaluate_with_conjunct_cache(&chunk, filter.data(), &cache).ok());
+    EXPECT_EQ(nullptr, cache.datetime_cast.input);
+    EXPECT_EQ(nullptr, cache.datetime_cast.result);
+    EXPECT_EQ(nullptr, ExprContext::datetime_cast_cache(computed));
 }
 
 TEST_F(DatetimeCastReuseTest, ConjunctScopeAndShortCircuit) {
@@ -170,7 +220,7 @@ TEST_F(DatetimeCastReuseTest, ConjunctScopeAndShortCircuit) {
     ASSERT_TRUE(rows.ok());
     EXPECT_EQ(1, rows.value());
     EXPECT_EQ((Filter{1, 0}), filter);
-    EXPECT_EQ(nullptr, lower->datetime_cast_cache());
+    EXPECT_EQ(nullptr, ExprContext::datetime_cast_cache(lower));
 
     // Reusing the same chunk and column address must not reuse the previous batch's result.
     input->reset_column();
@@ -187,7 +237,7 @@ TEST_F(DatetimeCastReuseTest, ConjunctScopeAndShortCircuit) {
     filter.assign(2, 1);
     rows = ExecNode::eval_conjuncts_into_filter({lower, strict_other}, &chunk, &filter);
     EXPECT_FALSE(rows.ok());
-    EXPECT_EQ(nullptr, strict_other->datetime_cast_cache());
+    EXPECT_EQ(nullptr, ExprContext::datetime_cast_cache(strict_other));
 }
 
 TEST_F(VectorizedCastExprTest, IntCastToDate) {

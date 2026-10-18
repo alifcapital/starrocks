@@ -410,11 +410,6 @@ struct TQueryOptions {
   // (two-phase conditional evaluation). Off by default until fuzz/perf gates pass.
   10003: optional bool enable_conditional_two_phase_eval = false;
 
-  // Enable fused JSON-extract fast path (simdjson::ondemand) for get_json_*(VARCHAR, VARCHAR)
-  // and json_query_from_string. Default true; set false to fall back to the legacy
-  // parse_json+JsonPath::extract pipeline.
-  10004: optional bool enable_json_extract_fusion = true;
-
   // When true, percentile_approx* aggregation uses the compact intermediate
   // serialization format for transient exchange/spill state. Global-only on FE
   // and enabled only after a full cluster upgrade; see

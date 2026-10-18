@@ -27,7 +27,6 @@ import com.starrocks.sql.optimizer.rewrite.scalar.ExtractCommonPredicateRule;
 import com.starrocks.sql.optimizer.rewrite.scalar.FoldConstantsRule;
 import com.starrocks.sql.optimizer.rewrite.scalar.ImplicitCastRule;
 import com.starrocks.sql.optimizer.rewrite.scalar.InvertMonotonicPredicateRule;
-import com.starrocks.sql.optimizer.rewrite.scalar.JsonExtractFusionRule;
 import com.starrocks.sql.optimizer.rewrite.scalar.MvNormalizePredicateRule;
 import com.starrocks.sql.optimizer.rewrite.scalar.NormalizePredicateRule;
 import com.starrocks.sql.optimizer.rewrite.scalar.PruneTediousPredicateRule;
@@ -60,8 +59,7 @@ public class ScalarOperatorRewriter {
             new InvertMonotonicPredicateRule(),
             new ExtractCommonPredicateRule(),
             new ArithmeticCommutativeRule(),
-            ConsolidateLikesRule.INSTANCE,
-            new JsonExtractFusionRule()
+            ConsolidateLikesRule.INSTANCE
     );
 
     // Generated columns are matched by their normalized expression. An inverted monotonic predicate no longer
@@ -97,8 +95,7 @@ public class ScalarOperatorRewriter {
             new InvertMonotonicPredicateRule(),
             new ExtractCommonPredicateRule(),
             new ArithmeticCommutativeRule(),
-            ConsolidateLikesRule.INSTANCE,
-            new JsonExtractFusionRule()
+            ConsolidateLikesRule.INSTANCE
     );
 
     public static final List<ScalarOperatorRewriteRule> MV_SCALAR_REWRITE_RULES = DEFAULT_REWRITE_SCAN_PREDICATE_RULES.stream()

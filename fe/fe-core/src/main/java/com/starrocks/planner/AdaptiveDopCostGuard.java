@@ -30,7 +30,7 @@ public final class AdaptiveDopCostGuard {
     // AdaptiveDopCostGuardTest verifies parity, including aliases and newly registered functions.
     static final Set<String> EXPENSIVE_FUNCTIONS = Set.of(
             "parse_json", "json_query", "json_string", "to_json",
-            "json_query_from_string", "json_query_many_from_string", "get_json_bool", "get_json_double",
+            "json_extract_paths", "get_json_bool", "get_json_double",
             "get_json_int", "get_json_object", "get_json_string", "json_array",
             "json_object", "json_contains", "json_exists", "json_keys",
             "json_length", "json_pretty", "json_remove", "json_set",

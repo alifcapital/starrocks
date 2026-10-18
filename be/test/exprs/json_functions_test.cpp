@@ -20,12 +20,18 @@
 #include <velocypack/vpack.h>
 
 #include <atomic>
+#include <cstring>
+#include <optional>
+#include <random>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "butil/time.h"
+#include "column/binary_column.h"
 #include "column/column.h"
+#include "column/column_builder.h"
+#include "column/column_helper.h"
 #include "column/column_viewer.h"
 #include "column/const_column.h"
 #include "column/map_column.h"
@@ -2280,289 +2286,655 @@ INSTANTIATE_TEST_SUITE_P(JsonPrettyTest, JsonPrettyTestFixture,
                                            JsonPrettyTestParam{"", "", true, "Null input should return null"}));
 
 // ===================================================================================
-// Differential tests: JSON-extract fusion fast path vs legacy parse_json+JsonPath::extract.
-// The same input is fed through both paths via set_json_fast_path_disabled_for_test();
-// results must be byte-identical row-for-row.
+// Extraction from text. For a document v and a path p every form gives the value of
+// <consumer over JSON>(parse_json(v), p): get_json_*(v, p) and
+// <consumer over JSON>(json_extract_paths(v, p1, ..., pn), '$.i').
 // ===================================================================================
 
 namespace {
 
-struct DiffJsonCase {
-    std::string name;
-    std::vector<std::string> json_rows; // 1+ rows
-    std::string path;
+using DenseFn = StatusOr<ColumnPtr> (*)(FunctionContext*, const Columns&);
+using SelectedFn = StatusOr<ColumnPtr> (*)(FunctionContext*, const SelectedColumns&, size_t);
+using StateFn = Status (*)(FunctionContext*, FunctionContext::FunctionStateScope);
+
+struct JsonKernel {
+    const char* name;
+    DenseFn dense;
+    SelectedFn selected;
+    StateFn prepare;
+    StateFn close;
+    LogicalType result_type;
 };
 
-using JsonGetter = StatusOr<ColumnPtr> (*)(FunctionContext*, const Columns&);
+const JsonKernel kParseJson{
+        "parse_json", JsonFunctions::parse_json, JsonFunctions::parse_json_selected, nullptr, nullptr, TYPE_JSON};
+const JsonKernel kExtractPaths{"json_extract_paths",
+                               JsonFunctions::json_extract_paths,
+                               JsonFunctions::json_extract_paths_selected,
+                               JsonFunctions::json_extract_paths_prepare,
+                               JsonFunctions::json_extract_paths_close,
+                               TYPE_JSON};
 
-ColumnPtr run_get_json_string_with_flag(bool fast_path_enabled, const DiffJsonCase& tc,
-                                        JsonGetter getter = JsonFunctions::get_json_string) {
-    std::unique_ptr<FunctionContext> ctx(FunctionContext::create_test_context());
-    auto json_col = BinaryColumn::create();
-    auto path_col = BinaryColumn::create();
-    for (const auto& r : tc.json_rows) {
-        json_col->append(r);
+#define JSON_PATH_KERNEL(name, fn, type)                                                                \
+    JsonKernel {                                                                                        \
+        name, JsonFunctions::fn, JsonFunctions::fn##_selected, JsonFunctions::native_json_path_prepare, \
+                JsonFunctions::native_json_path_close, type                                             \
     }
-    path_col->append(tc.path);
-    const size_t n = tc.json_rows.size();
 
-    Columns columns;
-    columns.emplace_back(json_col);
-    columns.emplace_back(ConstColumn::create(path_col, n));
+// Consumers over JSON.
+const std::vector<JsonKernel> kJsonConsumers{
+        JSON_PATH_KERNEL("get_json_string(json)", get_native_json_string, TYPE_VARCHAR),
+        JSON_PATH_KERNEL("get_json_int(json) bigint", get_native_json_bigint, TYPE_BIGINT),
+        JSON_PATH_KERNEL("get_json_int(json) int", get_native_json_int, TYPE_INT),
+        JSON_PATH_KERNEL("get_json_double(json)", get_native_json_double, TYPE_DOUBLE),
+        JSON_PATH_KERNEL("get_json_bool(json)", get_native_json_bool, TYPE_BOOLEAN),
+        JSON_PATH_KERNEL("json_query", json_query, TYPE_JSON),
+        JSON_PATH_KERNEL("json_exists", json_exists, TYPE_BOOLEAN),
+        JSON_PATH_KERNEL("json_length", json_length, TYPE_INT),
+};
 
-    ctx->set_constant_columns(columns);
-    EXPECT_TRUE(JsonFunctions::native_json_path_prepare(ctx.get(), FunctionContext::FunctionStateScope::FRAGMENT_LOCAL)
-                        .ok());
-    EXPECT_TRUE(
-            JsonFunctions::native_json_path_prepare(ctx.get(), FunctionContext::FunctionStateScope::THREAD_LOCAL).ok());
-    set_json_fast_path_disabled_for_test(ctx.get(), !fast_path_enabled);
+// get_json_*(VARCHAR, VARCHAR) and the consumer over JSON with the same result.
+const std::vector<std::pair<JsonKernel, size_t>> kTextGetters{
+        {JSON_PATH_KERNEL("get_json_string(varchar)", get_json_string, TYPE_VARCHAR), 0},
+        {JSON_PATH_KERNEL("get_json_int(varchar) bigint", get_json_bigint, TYPE_BIGINT), 1},
+        {JSON_PATH_KERNEL("get_json_int(varchar) int", get_json_int, TYPE_INT), 2},
+        {JSON_PATH_KERNEL("get_json_double(varchar)", get_json_double, TYPE_DOUBLE), 3},
+        {JSON_PATH_KERNEL("get_json_bool(varchar)", get_json_bool, TYPE_BOOLEAN), 4},
+};
 
-    ColumnPtr result = getter(ctx.get(), columns).value();
+#undef JSON_PATH_KERNEL
 
-    EXPECT_TRUE(
-            JsonFunctions::native_json_path_close(ctx.get(), FunctionContext::FunctionStateScope::THREAD_LOCAL).ok());
-    EXPECT_TRUE(
-            JsonFunctions::native_json_path_close(ctx.get(), FunctionContext::FunctionStateScope::FRAGMENT_LOCAL).ok());
-    return result;
+RuntimeState* query_state(bool strict) {
+    static auto make = [](bool allow_throw) {
+        TQueryOptions options;
+        options.__set_allow_throw_exception(allow_throw);
+        return std::make_unique<RuntimeState>(TUniqueId(), options, TQueryGlobals(), nullptr);
+    };
+    static std::unique_ptr<RuntimeState> relaxed = make(false);
+    static std::unique_ptr<RuntimeState> strict_state = make(true);
+    return strict ? strict_state.get() : relaxed.get();
 }
 
-void assert_diff_get_json_string(const DiffJsonCase& tc) {
-    ColumnPtr legacy = run_get_json_string_with_flag(/*fast=*/false, tc);
-    ColumnPtr fast = run_get_json_string_with_flag(/*fast=*/true, tc);
-    ASSERT_EQ(legacy->size(), fast->size()) << tc.name;
-    for (size_t i = 0; i < legacy->size(); ++i) {
-        ASSERT_EQ(legacy->is_null(i), fast->is_null(i)) << tc.name << " row=" << i;
-        if (!legacy->is_null(i)) {
-            ASSERT_EQ(legacy->get(i).get_slice().to_string(), fast->get(i).get_slice().to_string())
-                    << tc.name << " row=" << i;
+ColumnPtr const_text(const std::string& value, size_t rows) {
+    auto data = BinaryColumn::create();
+    data->append(value);
+    return ConstColumn::create(std::move(data), rows);
+}
+
+ColumnPtr text_column(const std::vector<std::optional<std::string>>& values) {
+    ColumnBuilder<TYPE_VARCHAR> builder(values.size());
+    for (const auto& value : values) {
+        if (value.has_value()) {
+            builder.append(Slice(*value));
+        } else {
+            builder.append_null();
         }
     }
+    return builder.build_nullable_column();
 }
 
-} // namespace
-
-namespace {
-
-StatusOr<ColumnPtr> run_json_many(const std::vector<std::string>& rows, const std::vector<std::string>& paths,
-                                  bool enabled = true, bool strict = false) {
-    TQueryOptions options;
-    options.__set_enable_json_extract_fusion(enabled);
-    options.__set_allow_throw_exception(strict);
-    RuntimeState state(TUniqueId(), options, TQueryGlobals(), nullptr);
-    std::unique_ptr<FunctionContext> context(FunctionContext::create_test_context());
-    context->set_runtime_state(&state);
-    auto input = BinaryColumn::create();
-    for (const auto& row : rows) {
-        input->append(row);
+ColumnPtr gather(const ColumnPtr& column, const std::vector<uint32_t>& rows) {
+    if (column->is_constant()) {
+        const ColumnPtr& data = down_cast<const ConstColumn*>(column.get())->data_column();
+        auto result = data->clone_empty();
+        for (size_t i = 0; i < rows.size(); ++i) {
+            result->append(*data, 0, 1);
+        }
+        return result;
     }
-    Columns columns{input};
-    for (const auto& path : paths) {
-        auto data = BinaryColumn::create();
-        data->append(path);
-        columns.emplace_back(ConstColumn::create(data, rows.size()));
-    }
-    context->set_constant_columns(columns);
-    RETURN_IF_ERROR(JsonFunctions::json_query_many_prepare(context.get(), FunctionContext::FRAGMENT_LOCAL));
-    auto result = JsonFunctions::json_query_many_from_string(context.get(), columns);
-    EXPECT_TRUE(JsonFunctions::json_query_many_close(context.get(), FunctionContext::FRAGMENT_LOCAL).ok());
+    auto result = column->clone_empty();
+    result->append_selective(*column, rows.data(), 0, rows.size());
     return result;
 }
 
-void assert_json_many_matches_independent(const std::vector<std::string>& rows, const std::vector<std::string>& paths,
-                                          bool enabled = true) {
-    auto combined = run_json_many(rows, paths, enabled);
-    ASSERT_TRUE(combined.ok()) << combined.status();
-    ColumnViewer<TYPE_JSON> many(combined.value());
-    for (size_t path = 0; path < paths.size(); ++path) {
-        auto expected = run_get_json_string_with_flag(enabled, {paths[path], rows, paths[path]},
-                                                      JsonFunctions::json_query_from_string);
-        ColumnViewer<TYPE_JSON> single(expected);
-        for (size_t row = 0; row < rows.size(); ++row) {
-            SCOPED_TRACE(paths[path] + " input=" + rows[row]);
-            auto actual = many.is_null(row) ? noneJsonSlice() : many.value(row)->to_vslice().get(std::to_string(path));
-            ASSERT_EQ(single.is_null(row), actual.isNone());
-            if (!single.is_null(row)) {
-                ASSERT_EQ(single.value(row)->to_string_uncheck(), JsonValue(actual).to_string_uncheck());
+// Calls a kernel on columns; through its selected kernel when rows is not null.
+StatusOr<ColumnPtr> call_kernel(const JsonKernel& kernel, const Columns& columns, bool strict,
+                                const std::vector<uint32_t>* rows = nullptr) {
+    std::unique_ptr<FunctionContext> ctx(FunctionContext::create_test_context());
+    ctx->set_runtime_state(query_state(strict));
+    ctx->set_constant_columns(columns);
+    if (kernel.prepare != nullptr) {
+        RETURN_IF_ERROR(kernel.prepare(ctx.get(), FunctionContext::FRAGMENT_LOCAL));
+        RETURN_IF_ERROR(kernel.prepare(ctx.get(), FunctionContext::THREAD_LOCAL));
+    }
+    DeferOp close([&] {
+        if (kernel.close != nullptr) {
+            (void)kernel.close(ctx.get(), FunctionContext::THREAD_LOCAL);
+            (void)kernel.close(ctx.get(), FunctionContext::FRAGMENT_LOCAL);
+        }
+    });
+    if (rows == nullptr) {
+        return kernel.dense(ctx.get(), columns);
+    }
+    SelectedColumns selected;
+    for (const auto& column : columns) {
+        selected.push_back({column, rows});
+    }
+    return kernel.selected(ctx.get(), selected, rows->size());
+}
+
+std::string to_hex(const char* data, size_t size) {
+    static const char* digits = "0123456789abcdef";
+    std::string out;
+    for (size_t i = 0; i < size; ++i) {
+        const auto byte = static_cast<unsigned char>(data[i]);
+        out += digits[byte >> 4];
+        out += digits[byte & 15];
+    }
+    return out;
+}
+
+// Text of a value that tells apart every two different values: the bytes of a JSON value and of a string,
+// the bits of a double.
+std::string value_text(const ColumnPtr& column, size_t row, LogicalType type) {
+    if (column->is_null(row)) {
+        return "NULL";
+    }
+    if (column->is_constant()) {
+        return value_text(down_cast<const ConstColumn*>(column.get())->data_column(), 0, type);
+    }
+    switch (type) {
+    case TYPE_JSON: {
+        ColumnViewer<TYPE_JSON> viewer(column);
+        const JsonValue* json = viewer.value(row);
+        const auto slice = json->to_vslice();
+        return json->to_string_uncheck() + " " + to_hex(reinterpret_cast<const char*>(slice.start()), slice.byteSize());
+    }
+    case TYPE_VARCHAR: {
+        ColumnViewer<TYPE_VARCHAR> viewer(column);
+        const Slice value = viewer.value(row);
+        return value.to_string() + " " + to_hex(value.data, value.size);
+    }
+    case TYPE_DOUBLE: {
+        ColumnViewer<TYPE_DOUBLE> viewer(column);
+        const double value = viewer.value(row);
+        uint64_t bits;
+        std::memcpy(&bits, &value, sizeof(bits));
+        return column->debug_item(row) + " " + std::to_string(bits);
+    }
+    default:
+        return column->debug_item(row);
+    }
+}
+
+void expect_same_result(const StatusOr<ColumnPtr>& expected, const StatusOr<ColumnPtr>& actual, LogicalType type,
+                        size_t rows, const std::string& trace) {
+    SCOPED_TRACE(trace);
+    ASSERT_EQ(expected.ok(), actual.ok()) << "expected: " << expected.status() << " actual: " << actual.status();
+    if (!expected.ok()) {
+        ASSERT_EQ(expected.status().code(), actual.status().code());
+        ASSERT_EQ(expected.status().message(), actual.status().message());
+        return;
+    }
+    ASSERT_EQ(rows, expected.value()->size());
+    ASSERT_EQ(rows, actual.value()->size());
+    for (size_t row = 0; row < rows; ++row) {
+        ASSERT_EQ(value_text(expected.value(), row, type), value_text(actual.value(), row, type)) << "row " << row;
+    }
+}
+
+// Checks every form of extraction of paths from docs against parse_json() + extraction: dense, or through
+// the selected kernels on rows when rows is not null.
+void check_extraction(const ColumnPtr& docs, const std::vector<std::string>& paths, bool strict,
+                      const std::vector<uint32_t>* rows, bool all_consumers = true) {
+    const ColumnPtr reference_docs = rows == nullptr ? docs : gather(docs, *rows);
+    const size_t num_rows = reference_docs->size();
+    const StatusOr<ColumnPtr> parsed = call_kernel(kParseJson, {reference_docs}, strict);
+
+    auto expected_value = [&](const JsonKernel& consumer, const std::string& path) -> StatusOr<ColumnPtr> {
+        RETURN_IF_ERROR(parsed.status());
+        return call_kernel(consumer, {parsed.value(), const_text(path, num_rows)}, strict);
+    };
+
+    for (const auto& path : paths) {
+        for (const auto& [getter, consumer_index] : kTextGetters) {
+            const JsonKernel& consumer = kJsonConsumers[consumer_index];
+            expect_same_result(expected_value(consumer, path),
+                               call_kernel(getter, {docs, const_text(path, docs->size())}, strict, rows),
+                               consumer.result_type, num_rows, std::string(getter.name) + " " + path);
+        }
+    }
+
+    // A path with a wildcard or a slice sends every row of json_extract_paths() to VPack, so the paths are
+    // checked together and the simple ones once more without the others.
+    std::vector<std::string> simple_paths;
+    for (const auto& path : paths) {
+        if (path.find_first_of("*:") == std::string::npos && path.find(".$") == std::string::npos) {
+            simple_paths.push_back(path);
+        }
+    }
+    const std::vector<const std::vector<std::string>*> groups{&paths, &simple_paths};
+    for (const auto* group : groups) {
+        if (group->empty() || (group == &simple_paths && simple_paths.size() == paths.size())) {
+            continue;
+        }
+        Columns arguments{docs};
+        for (const auto& path : *group) {
+            arguments.push_back(const_text(path, docs->size()));
+        }
+        const StatusOr<ColumnPtr> extracted = call_kernel(kExtractPaths, arguments, strict, rows);
+        for (size_t i = 0; i < group->size(); ++i) {
+            for (const auto& consumer : kJsonConsumers) {
+                if (!all_consumers && consumer.result_type != TYPE_JSON) {
+                    continue;
+                }
+                const StatusOr<ColumnPtr> actual =
+                        extracted.ok()
+                                ? call_kernel(consumer,
+                                              {extracted.value(), const_text("$." + std::to_string(i), num_rows)},
+                                              strict)
+                                : StatusOr<ColumnPtr>(extracted.status());
+                expect_same_result(expected_value(consumer, (*group)[i]), actual, consumer.result_type, num_rows,
+                                   std::string("json_extract_paths ") + consumer.name + " " + (*group)[i]);
             }
         }
     }
 }
 
+std::vector<uint32_t> reversed_rows(size_t num_rows) {
+    std::vector<uint32_t> rows;
+    for (size_t row = num_rows; row > 0; --row) {
+        rows.push_back(row - 1);
+    }
+    if (num_rows > 0) {
+        rows.push_back(0);
+    }
+    return rows;
+}
+
+std::string nested(const std::string& open, const std::string& leaf, const std::string& close, int depth) {
+    std::string out;
+    for (int i = 0; i < depth; ++i) out += open;
+    out += leaf;
+    for (int i = 0; i < depth; ++i) out += close;
+    return out;
+}
+
+std::vector<std::optional<std::string>> edge_documents() {
+    std::vector<std::optional<std::string>> docs{
+            std::nullopt,
+            "",
+            "   ",
+            "abc",
+            R"("abc")",
+            "123",
+            "null",
+            "true",
+            // well-formed objects and the bytes before them
+            R"({"a":"x","b":2})",
+            " \t\n{\"a\":\"x\",\"b\":2} \r\n",
+            "\f{\"a\":\"x\",\"b\":2}",
+            "\v{\"a\":\"x\",\"b\":2}",
+            // malformed documents
+            R"({"a":1}x)",
+            R"({"a":1}{"a":2})",
+            R"({"a":1,"b":tru})",
+            R"({"b":tru,"a":1})",
+            R"({"a":1,"b":01})",
+            R"({"a":01})",
+            R"({"a":1,)",
+            R"({"a":1,"b":"x)",
+            R"({"a":1])",
+            R"({"a":1,})",
+            R"({'a':1})",
+            R"({"a":NaN,"b":1})",
+            R"({"a":1 /* c */})",
+            R"({"n":1e400})",
+            "{",
+            "[1,2,",
+            // arrays
+            R"({"a":[1,2,{"c":3}]})",
+            R"([1,{"a":2},[3]])",
+            R"([{"a":1},{"a":2}])",
+            // keys with dots and other alphabets
+            R"({"a.b":1,"a":{"b":2}})",
+            R"({"slrRefData":{"sw5.chain.id":"c1"}})",
+            R"({"статус":"ok"})",
+            R"({"A":1})",
+            // strings
+            R"({"a":"x\"y"})",
+            R"({"a":"t\tn\n/\/b\\"})",
+            "{\"a\":\"\xC3\xA9\xE4\xB8\xAD\"}",
+            "{\"a\":\"\xF0\x9F\x98\x80\"}",
+            R"({"a":"😀"})",
+            R"({"a":"\ud800"})",
+            R"({"a":"\udc00x"})",
+            R"({"a":"k"})",
+            R"({"ab":1,"ab":2})",
+            "{\"a\":\"\xFF\"}",
+            "{\"a\":\"\xC3\"}",
+            "{\"a\":\"\xED\xA0\x80\"}",
+            "{\"a\":\"x\x01y\"}",
+            "{\"b\":\"x\x01y\",\"a\":1}",
+            std::string("{\"a\":\"x\0y\"}", 11),
+            R"({"a":"\u0000"})",
+            // duplicate keys
+            R"({"a":1,"a":2})",
+            R"({"k0":0,"a":1,"k1":1,"k2":2,"k3":3,"k4":4,"k5":5,"k6":6,"a":2})",
+            R"({"o":{"a":1,"a":2},"a":{"b":1,"b":2}})",
+            R"({"o":{"x":1,"x":2,"y":3}})",
+            R"({"a":{"b":1},"a":{"b":2},"k1":1,"k2":2,"k3":3,"k4":4,"k5":5,"k6":6,"k7":7})",
+            // null and other values on the path
+            R"({"a":null})",
+            R"({"a":{"b":null}})",
+            R"({"a":"x"})",
+            "{}",
+            "[]",
+            R"({"":1})",
+            R"({"":{"":2}})",
+            // numbers
+            R"({"n":1,"a":1.0,"b":1e3})",
+            R"({"n":1E+3})",
+            R"({"n":-0})",
+            R"({"n":-0.0})",
+            R"({"n":0.1})",
+            R"({"n":0.30000000000000004})",
+            R"({"n":2147483647})",
+            R"({"n":2147483648})",
+            R"({"n":-2147483648})",
+            R"({"n":-2147483649})",
+            R"({"n":9223372036854775807})",
+            R"({"n":-9223372036854775808})",
+            R"({"n":9223372036854775808})",
+            R"({"n":18446744073709551615})",
+            R"({"n":18446744073709551616})",
+            R"({"n":-9223372036854775809})",
+            R"({"n":123456789012345678901234567890})",
+            R"({"n":-123456789012345678901234567890})",
+            R"({"n":1.7976931348623157e308})",
+            R"({"n":4.9e-324})",
+            R"({"n":1e-400})",
+            R"({"n":0e400})",
+            R"({"n":0.00001e310})",
+            R"({"n":"12"})",
+            R"({"n":"1.5"})",
+            R"({"n":"x1"})",
+            R"({"n":[1.5,-2,3e2]})",
+            "{\"n\":1" + std::string(300, '0') + ".5}",
+            "{\"n\":0." + std::string(300, '1') + "}",
+            // booleans
+            R"({"b":true})",
+            R"({"b":false})",
+            R"({"b":"true"})",
+            R"({"b":"0"})",
+            R"({"b":"1"})",
+            R"({"b":"yes"})",
+            R"({"b":2})",
+            R"({"b":0.0})",
+            // a hexadecimal id with an exponent-like part
+            R"({"a":"550e8400-e29b-41d4-a716-446655440000","b":2})",
+            // nesting
+            nested("{\"d\":", "1", "}", 1000),
+            nested("{\"d\":", "1", "}", 1100),
+            nested("{\"d\":", "1", "}", 2000),
+            nested("[", "1", "]", 1100),
+            // longer than kJSONLengthLimit
+            "{\"a\":\"" + std::string(kJSONLengthLimit - 7, 'x') + "\"}",
+    };
+    return docs;
+}
+
+const std::vector<std::string> kEdgePaths{"$",          "$.a",
+                                          "$.b",        "$.c",
+                                          "a",          "$.a.b",
+                                          "$.a[0]",     "$.a[1]",
+                                          "$.a[5]",     "$.a[2].c",
+                                          "$.a[0].c",   "$[1].a",
+                                          "$[0]",       "$[1]",
+                                          R"($."a.b")", R"($.slrRefData."sw5.chain.id")",
+                                          "$.статус",   R"($."статус")",
+                                          "$.ab",       "$.o",
+                                          "$.o.a",      "$.o.x",
+                                          "$.n",        "$.n[2]",
+                                          R"($."")",    "$.",
+                                          "$.d.d.d",    "$.a[*]",
+                                          "$.a[1:2]",   "$.a.$.b",
+                                          "$.$.a"};
+
 } // namespace
 
-TEST_F(JsonFunctionsTest, json_query_many_shared_paths) {
-    const std::vector<std::string> rows{R"({"b":2,"a":{"x":1,"y":[10,null,30]},"c":"text"})",
-                                        R"({"a":[{"x":7},null,9],"b":null})",
-                                        R"({"\u0061":{"x":"\u0062"},"b":"a\nb"})",
-                                        R"({"a":1,"a":2,"b":3})",
-                                        R"([{"a":1},{"a":2}])",
-                                        R"("root")",
-                                        "123",
-                                        "",
-                                        "   ",
-                                        "{}"};
-    const std::vector<std::string> paths{"$.a.x", "$.a.y[2]", "$.a[0].x", "$.a[1]", "$.b", "$.c", "$.missing"};
-    assert_json_many_matches_independent(rows, paths);
-    assert_json_many_matches_independent(rows, paths, false);
-    assert_json_many_matches_independent(rows, {"$", "$.a", "$.a.x", "$.a.y[2]", "$[1].a", "$.a[*]", "$.a.$.b"});
-}
-
-TEST_F(JsonFunctionsTest, json_query_many_damaged_values) {
-    const std::vector<std::string> rows{R"({"a":1,"bad":invalid,"b":2})",
-                                        R"({"bad":notjson,"a":1,"b":2})",
-                                        R"({"a":invalid,"b":2})",
-                                        R"({"a":1,"b":invalid})",
-                                        R"({"a":"\q","b":2})",
-                                        R"({"a":{"x":1,"bad":invalid},"b":2})",
-                                        R"({"a":[1,,2],"b":2})",
-                                        "{",
-                                        "[1,2,"};
-    assert_json_many_matches_independent(rows, {"$.a", "$.b", "$.a.x", "$.missing"});
-    assert_json_many_matches_independent(rows, {"$.a.x", "$.b", "$.a[*]", "$"});
-    assert_json_many_matches_independent(rows, {"$.a", "$.b"}, false);
-    for (const auto& row : rows) {
-        ASSERT_FALSE(run_json_many({row}, {"$.a", "$.b"}, true, true).ok()) << row;
+TEST_F(JsonFunctionsTest, extraction_from_text_equals_parse_json) {
+    const auto docs = edge_documents();
+    const ColumnPtr column = text_column(docs);
+    const auto rows = reversed_rows(column->size());
+    check_extraction(column, kEdgePaths, false, nullptr);
+    check_extraction(column, kEdgePaths, false, &rows);
+    // In strict mode the first malformed document fails the whole column, so every document is checked alone.
+    for (const auto& doc : docs) {
+        SCOPED_TRACE(doc.has_value() ? doc->substr(0, 64) : "NULL");
+        check_extraction(text_column({doc}), kEdgePaths, true, nullptr);
     }
 }
 
-TEST_F(JsonFunctionsTest, json_query_many_constant_and_null_input) {
-    auto data = BinaryColumn::create();
-    data->append(R"({"a":1,"b":null})");
-    const std::vector<ColumnPtr> inputs{ConstColumn::create(data, 4096), ColumnHelper::create_const_null_column(4096)};
-    for (const auto& input : inputs) {
-        std::unique_ptr<FunctionContext> context(FunctionContext::create_test_context());
-        Columns columns{input};
-        for (const auto& path : {"$.a", "$.b", "$.missing"}) {
-            auto column = BinaryColumn::create();
-            column->append(path);
-            columns.emplace_back(ConstColumn::create(column, 4096));
+TEST_F(JsonFunctionsTest, extraction_from_constant_text) {
+    for (const std::string doc : {R"({"a":"x","b":[1,2]})", R"({"a":1,"b":tru})", "abc", R"({"a":1,"a":2})"}) {
+        SCOPED_TRACE(doc);
+        const ColumnPtr constant = const_text(doc, 3);
+        const std::vector<uint32_t> rows{2, 0};
+        for (bool strict : {false, true}) {
+            check_extraction(constant, {"$.a", "$.b[1]", "$.c"}, strict, nullptr);
+            check_extraction(constant, {"$.a", "$.b[1]", "$.c"}, strict, &rows);
         }
-        context->set_constant_columns(columns);
-        ASSERT_OK(JsonFunctions::json_query_many_prepare(context.get(), FunctionContext::FRAGMENT_LOCAL));
-        auto result = JsonFunctions::json_query_many_from_string(context.get(), columns);
-        ASSERT_OK(JsonFunctions::json_query_many_close(context.get(), FunctionContext::FRAGMENT_LOCAL));
-        ASSERT_TRUE(result.ok());
+        auto result = call_kernel(kExtractPaths, {constant, const_text("$.a", 3)}, false);
+        ASSERT_OK(result.status());
         ASSERT_TRUE(result.value()->is_constant());
-        ASSERT_EQ(4096, result.value()->size());
-        ASSERT_EQ(1, down_cast<const ConstColumn*>(result.value().get())->data_column()->size());
-        if (input->only_null()) {
-            ASSERT_EQ(4096, ColumnHelper::count_nulls(result.value()));
-        } else {
-            ColumnViewer<TYPE_JSON> viewer(result.value());
-            auto object = viewer.value(4095)->to_vslice();
-            ASSERT_EQ(1, object.get("0").getInt());
-            ASSERT_TRUE(object.get("1").isNull());
-            ASSERT_TRUE(object.get("2").isNone());
-        }
+        ASSERT_EQ(3, result.value()->size());
     }
-    auto empty = run_json_many({}, {"$.a", "$.b"});
-    ASSERT_TRUE(empty.ok());
+    auto null_input =
+            call_kernel(kExtractPaths, {ColumnHelper::create_const_null_column(5), const_text("$.a", 5)}, false);
+    ASSERT_OK(null_input.status());
+    ASSERT_EQ(5, ColumnHelper::count_nulls(null_input.value()));
+    auto empty = call_kernel(kExtractPaths, {BinaryColumn::create(), const_text("$.a", 0)}, false);
+    ASSERT_OK(empty.status());
     ASSERT_EQ(0, empty.value()->size());
 }
 
-TEST_F(JsonFunctionsTest, json_query_many_concurrent_context) {
-    std::unique_ptr<FunctionContext> context(FunctionContext::create_test_context());
-    Columns constants{nullptr};
-    for (const auto& path : {"$.nested.a", "$.nested.b"}) {
-        auto column = BinaryColumn::create();
-        column->append(path);
-        constants.emplace_back(ConstColumn::create(column, 16));
-    }
-    context->set_constant_columns(constants);
-    ASSERT_OK(JsonFunctions::json_query_many_prepare(context.get(), FunctionContext::FRAGMENT_LOCAL));
-    std::atomic<bool> failed{false};
-    std::vector<std::thread> workers;
-    for (int thread = 0; thread < 8; ++thread) {
-        workers.emplace_back([&, thread]() {
-            std::string value = "thread_" + std::to_string(thread);
-            auto input = BinaryColumn::create();
-            for (int row = 0; row < 16; ++row) {
-                input->append("{\"nested\":{\"b\":\"" + value + "\",\"a\":\"" + value + "\"}}");
-            }
-            Columns columns{input, constants[1], constants[2]};
-            for (int iteration = 0; iteration < 200 && !failed.load(); ++iteration) {
-                auto result = JsonFunctions::json_query_many_from_string(context.get(), columns);
-                if (!result.ok()) {
-                    failed = true;
-                    break;
-                }
-                ColumnViewer<TYPE_JSON> viewer(result.value());
-                for (int row = 0; row < 16; ++row) {
-                    if (viewer.is_null(row)) {
-                        failed = true;
-                        break;
-                    }
-                    auto object = viewer.value(row)->to_vslice();
-                    for (const auto& key : {"0", "1"}) {
-                        auto actual = object.get(key);
-                        if (!actual.isString() || actual.copyString() != value) {
-                            failed = true;
-                        }
-                    }
-                }
-            }
-        });
-    }
-    for (auto& worker : workers) {
-        worker.join();
-    }
-    ASSERT_FALSE(failed.load());
-    ASSERT_OK(JsonFunctions::json_query_many_close(context.get(), FunctionContext::FRAGMENT_LOCAL));
+TEST_F(JsonFunctionsTest, json_extract_paths_result) {
+    const ColumnPtr docs =
+            text_column({R"({"a":1,"b":null,"c":{"d":[1,"x"]}})", R"({"a":1,"a":2})", "abc", "[1", std::nullopt});
+    auto result = call_kernel(
+            kExtractPaths,
+            {docs, const_text("$.a", 5), const_text("$.b", 5), const_text("$.c.d[1]", 5), const_text("$.missing", 5)},
+            false);
+    ASSERT_OK(result.status());
+    ColumnViewer<TYPE_JSON> viewer(result.value());
+    ASSERT_EQ(R"({"0": 1, "1": null, "2": "x"})", viewer.value(0)->to_string_uncheck());
+    // VPack finds the first of two equal keys in an object with two members.
+    ASSERT_EQ(R"({"0": 1})", viewer.value(1)->to_string_uncheck());
+    ASSERT_EQ("{}", viewer.value(2)->to_string_uncheck());
+    ASSERT_TRUE(viewer.is_null(3));
+    ASSERT_TRUE(viewer.is_null(4));
 }
 
-TEST_F(JsonFunctionsTest, diff_get_json_all_result_types) {
-    const std::vector<std::string> values{"null",
-                                          "true",
-                                          "false",
-                                          "0",
-                                          "-1",
-                                          "127.9",
-                                          "-128.9",
-                                          "32767.9",
-                                          "2147483647.9",
-                                          "9223372036854775807",
-                                          "9223372036854775808",
-                                          "18446744073709551615",
-                                          "18446744073709551616",
-                                          "1.25",
-                                          "-0.0",
-                                          "1e100",
-                                          R"("hello")",
-                                          R"("123")",
-                                          R"("1e100")",
-                                          R"("a\nb")",
-                                          R"("\u0061")",
-                                          "[]",
-                                          "[1,null,true]",
-                                          "{}",
-                                          R"({"x":1,"y":["a",null]})"};
-    DiffJsonCase tc{"typed_values", {}, "$.a"};
-    for (const auto& value : values) {
-        tc.json_rows.emplace_back(R"({"other":0,"a":)" + value + "}");
+TEST_F(JsonFunctionsTest, json_extract_paths_rejects_bad_paths) {
+    const ColumnPtr docs = text_column({R"({"a":1})"});
+    ASSERT_FALSE(call_kernel(kExtractPaths, {docs, const_text("$.a[", 1)}, false).ok());
+    ASSERT_FALSE(call_kernel(kExtractPaths, {docs, text_column({"$.a"})}, false).ok());
+    ASSERT_FALSE(call_kernel(kExtractPaths, {docs, ColumnHelper::create_const_null_column(1)}, false).ok());
+}
+
+namespace {
+
+// Documents shaped like solar_operations.original_payload.
+class PayloadGenerator {
+public:
+    explicit PayloadGenerator(uint64_t seed) : _random(seed) {}
+
+    std::string document() {
+        std::string s = "{\"id\":\"" + uuid() + "\",";
+        s += "\"posData\":{\"terminalType\":\"" + std::string(pick(30) ? "ATM" : "POS") +
+             "\",\"entryMode\":" + std::to_string(_random() % 100) +
+             ",\"cardholderPresent\":" + (pick(2) ? "true" : "false") + "},";
+        s += "\"merchantData\":{\"terminalId\":\"" + std::string(pick(30) ? "A0400" : "B1200") +
+             std::to_string(_random() % 1000) + "\",\"name\":" + text() +
+             ",\"mcc\":" + std::to_string(5000 + _random() % 1000) + "},";
+        s += "\"referenceData\":{\"rrn\":" + (pick(5) ? std::string("null") : "\"" + std::to_string(_random()) + "\"") +
+             ",\"stan\":" + std::to_string(_random() % 1000000) + "},";
+        s += "\"amount\":" + number() + ",\"fee\":" + number() + ",";
+        if (pick(50)) {
+            s += "\"posData\":{\"terminalType\":\"DUP\"},";
+        }
+        s += "\"items\":[";
+        const int items = 3 + _random() % 10;
+        for (int i = 0; i < items; ++i) {
+            s += (i ? "," : "");
+            s += "{\"k\":" + std::to_string(i) + ",\"v\":" + text() + ",\"n\":" + number() + ",\"u\":\"" + uuid() +
+                 "\",\"arr\":[1,2.5,-3,\"x\",null,{},[]]}";
+        }
+        s += "]}";
+        return s;
     }
-    for (JsonGetter getter :
-         {JsonFunctions::get_json_int, JsonFunctions::get_json_double, JsonFunctions::get_json_string,
-          JsonFunctions::get_json_bool, JsonFunctions::json_query_from_string}) {
-        auto legacy = run_get_json_string_with_flag(false, tc, getter);
-        auto fused = run_get_json_string_with_flag(true, tc, getter);
-        ASSERT_EQ(legacy->size(), fused->size());
-        for (size_t i = 0; i < values.size(); ++i) {
-            SCOPED_TRACE(values[i]);
-            ASSERT_EQ(legacy->debug_item(i), fused->debug_item(i));
+
+    // Replaces, inserts or deletes a byte, or cuts the document.
+    std::string corrupt(std::string doc) {
+        static const char pool[] = "{}[]\":,0123456789eE+-.tfn\\ \x01\xff";
+        const size_t pos = _random() % doc.size();
+        const char c = pool[_random() % (sizeof(pool) - 1)];
+        switch (_random() % 4) {
+        case 0:
+            doc[pos] = c;
+            break;
+        case 1:
+            doc.insert(doc.begin() + pos, c);
+            break;
+        case 2:
+            doc.erase(doc.begin() + pos);
+            break;
+        default:
+            doc.resize(pos);
+            break;
+        }
+        return doc;
+    }
+
+private:
+    bool pick(int one_in) { return _random() % one_in == 0; }
+
+    std::string uuid() {
+        static const char* hex = "0123456789abcdef";
+        std::string s;
+        for (int i = 0; i < 32; ++i) {
+            if (i == 8 || i == 12 || i == 16 || i == 20) s += '-';
+            s += hex[_random() % 16];
+        }
+        return s;
+    }
+
+    std::string number() {
+        switch (_random() % 12) {
+        case 0:
+            return "-" + std::to_string(_random() % 100000);
+        case 1:
+            return std::to_string(_random() % 1000) + "e" + std::to_string(_random() % 30);
+        case 2:
+            return "9223372036854775808";
+        case 3:
+            return "123456789012345678901234567890";
+        case 4:
+            return "0.1";
+        default:
+            return std::to_string(_random() % 100000) + "." + std::to_string(_random() % 100);
         }
     }
+
+    std::string text() {
+        static const char* pieces[] = {"shop",          "\\\"q\\\"", "\\n", "\\u041c\\u0430\\u0433", "\xd0\xb0",
+                                       "\\/",           "\\\\",      "\\t", "\xf0\x9f\x98\x80",      " ",
+                                       "\\ud83d\\ude00"};
+        std::string s = "\"";
+        const int n = _random() % 8;
+        for (int i = 0; i < n; ++i) {
+            s += pieces[_random() % (sizeof(pieces) / sizeof(pieces[0]))];
+        }
+        if (pick(200)) {
+            s += "\\ud800";
+        }
+        return s + "\"";
+    }
+
+    std::mt19937_64 _random;
+};
+
+} // namespace
+
+TEST_F(JsonFunctionsTest, extraction_from_generated_documents) {
+    PayloadGenerator generator(20261014);
+    std::vector<std::string> documents;
+    for (int i = 0; i < 2000; ++i) {
+        documents.push_back(generator.document());
+    }
+    const std::vector<std::string> paths{"$.posData.terminalType", "$.merchantData.terminalId", "$.referenceData.rrn"};
+    const std::vector<std::string> more_paths{"$.items[2].n", "$.amount", "$.items[1].arr[5]"};
+    constexpr size_t kChunk = 4096;
+    std::vector<std::optional<std::string>> chunk;
+    size_t produced = 0;
+    auto flush = [&]() {
+        const ColumnPtr column = text_column(chunk);
+        check_extraction(column, paths, false, nullptr);
+        if (produced < 3 * kChunk) {
+            const auto rows = reversed_rows(column->size());
+            check_extraction(column, paths, false, &rows);
+            check_extraction(column, more_paths, false, nullptr, false);
+        }
+        chunk.clear();
+    };
+    for (const auto& doc : documents) {
+        chunk.emplace_back(doc);
+    }
+    for (int i = 0; i < 100000; ++i) {
+        chunk.emplace_back(generator.corrupt(documents[i % documents.size()]));
+        if (chunk.size() == kChunk) {
+            flush();
+            ASSERT_FALSE(HasFatalFailure());
+            produced += kChunk;
+        }
+    }
+    flush();
 }
 
-TEST_F(JsonFunctionsTest, diff_get_json_root_and_reset_paths) {
-    for (const auto& tc : std::vector<DiffJsonCase>{
-                 {"root_string", {R"("hello")", R"("a\nb")", R"("\u0061")"}, "$"},
-                 {"root_array", {R"([1,2])"}, "$[1]"},
-                 {"reset_root", {R"({"a":{"b":2},"b":1})"}, "$.a.$.b"},
-                 {"reset_after_missing", {R"({"b":1})"}, "$.missing.$.b"},
-                 {"reset_array", {R"([[1],[2]])"}, "$[1].$[0][0]"},
-         }) {
-        SCOPED_TRACE(tc.name);
-        assert_diff_get_json_string(tc);
+// Byte order marks, trailing NUL bytes, surrogates, long leaves and long numbers, each compared with parse_json()
+// and extraction.
+TEST_F(JsonFunctionsTest, extraction_from_more_inputs) {
+    std::string big_leaf = "{\"o\":{";
+    for (int i = 0; i < 40; ++i) {
+        big_leaf += "\"k" + std::to_string(i) + "\":\"" + std::string(150 + i, 'x') + "\",";
+    }
+    big_leaf += "\"k3\":-5,\"n\":[1,-1,2.5,{\"z\":null}]}}";
+    const std::vector<std::optional<std::string>> docs{
+            R"({"ab":1})",
+            R"({"ab":1,"ab":2})",
+            R"({"ab":1,"ab":2,"c":3,"d":4,"e":5,"f":6,"g":7,"h":8,"i":9})",
+            "\xEF\xBB\xBF{\"ab\":1}",
+            " \xEF\xBB\xBF{\"ab\":1}",
+            std::string("{\"ab\":1}\0", 8),
+            std::string("{\"ab\":1}\n\0", 9),
+            R"({"ab":"\udc00\ud800"})",
+            R"({"ab":"\ud800𐀀"})",
+            R"({"ab":"\ud800A"})",
+            R"({"ab":"􏿿"})",
+            big_leaf,
+            "{\"n\":1" + std::string(150, '0') + "e99}",
+            "{\"n\":1" + std::string(158, '0') + "e-99}",
+            "{\"n\":-1" + std::string(158, '0') + ".5e99}",
+            R"({"n":1E+99,"m":-1e-99,"k":1.5e00})",
+            R"({"a":[[1,2],[3,[4,5]]]})",
+            R"(  [ {"a":1} , {"a":2} ]  )",
+            R"({"a":{"b":{"c":{"d":"deep"}}},"a.b":7})",
+            "{\"ab\":\"\xF4\x90\x80\x80\"}",
+            "{\"ab\":\"\xC0\xAF\"}",
+            R"({"ab":"x"} )",
+            "{\"ab\":1}\r\n\t ",
+            "{\"ab\":1}\f",
+    };
+    const std::vector<std::string> paths{"$.ab",      "$.o",          "$.o.k3", "$.n",     "$.m",        "$.k",
+                                         "$.a[0][1]", "$.a[1][1][0]", "$[1].a", "$.a.b.c", R"($."a.b")", "$"};
+    const ColumnPtr column = text_column(docs);
+    const auto rows = reversed_rows(column->size());
+    check_extraction(column, paths, false, nullptr);
+    check_extraction(column, paths, false, &rows);
+    for (const auto& doc : docs) {
+        SCOPED_TRACE(doc.has_value() ? doc->substr(0, 64) : "NULL");
+        check_extraction(text_column({doc}), paths, true, nullptr);
     }
 }
 
@@ -2597,81 +2969,8 @@ TEST_F(JsonFunctionsTest, parse_json_constant_respects_allow_throw_exception) {
     }
 }
 
-TEST_F(JsonFunctionsTest, fused_extraction_validation_mode) {
-    using Getter = StatusOr<ColumnPtr> (*)(FunctionContext*, const Columns&);
-    for (Getter getter : {JsonFunctions::get_json_int, JsonFunctions::get_json_double, JsonFunctions::get_json_string,
-                          JsonFunctions::get_json_bool, JsonFunctions::json_query_from_string}) {
-        for (bool strict : {false, true}) {
-            TQueryOptions options;
-            options.__set_allow_throw_exception(strict);
-            options.__set_enable_json_extract_fusion(true);
-            RuntimeState state(TUniqueId(), options, TQueryGlobals(), nullptr);
-            std::unique_ptr<FunctionContext> ctx(FunctionContext::create_test_context());
-            ctx->set_runtime_state(&state);
-            auto input = BinaryColumn::create();
-            input->append(R"({"a":1,"b":invalid})");
-            input->append(R"({"bad":notjson,"a":1})");
-            input->append(R"({"a":1,"b":"\q"})");
-            auto path = BinaryColumn::create();
-            path->append("$.a");
-            Columns columns{input, ConstColumn::create(path, input->size())};
-            ctx->set_constant_columns(columns);
-            ASSERT_OK(JsonFunctions::native_json_path_prepare(ctx.get(), FunctionContext::FRAGMENT_LOCAL));
-            auto result = getter(ctx.get(), columns);
-            if (strict) {
-                ASSERT_FALSE(result.ok());
-            } else {
-                ASSERT_TRUE(result.ok());
-                ASSERT_EQ(input->size(), result.value()->size());
-                ASSERT_EQ(0, ColumnHelper::count_nulls(result.value()));
-            }
-            ASSERT_OK(JsonFunctions::native_json_path_close(ctx.get(), FunctionContext::FRAGMENT_LOCAL));
-        }
-    }
-}
-
-TEST_F(JsonFunctionsTest, diff_get_json_string_simple_paths) {
-    std::vector<DiffJsonCase> cases = {
-            {"int_leaf", {R"({"k":1})"}, "$.k"},
-            {"double_leaf", {R"({"k":3.14})"}, "$.k"},
-            {"string_leaf", {R"({"k":"hello"})"}, "$.k"},
-            {"bool_leaf", {R"({"k":true})"}, "$.k"},
-            {"null_leaf", {R"({"k":null})"}, "$.k"},
-            {"deep_object_leaf", {R"({"a":{"b":{"c":42}}})"}, "$.a.b.c"},
-            {"object_leaf", {R"({"k":{"x":1,"y":2}})"}, "$.k"},
-            {"array_leaf", {R"({"k":[1,2,3]})"}, "$.k"},
-            {"array_index", {R"({"a":[10,20,30]})"}, "$.a[1]"},
-            {"chained_indices", {R"({"m":[[1,2],[3,4]]})"}, "$.m[0][1]"},
-            {"missing_key", {R"({"k":1})"}, "$.missing"},
-            {"missing_deep", {R"({"a":{"b":1}})"}, "$.a.c"},
-            {"oob_array", {R"({"a":[1,2]})"}, "$.a[5]"},
-            {"escaped_key_inside_value", {R"({"k":"a\"b"})"}, "$.k"},
-            {"unicode_key_value", {R"({"k":"é"})"}, "$.k"},
-            // Escape sequences in the OBJECT KEY itself: \uXXXX in the document must match the
-            // unescaped path segment in both the legacy (parse_json → VPack) and the fused
-            // (simdjson ondemand) paths.
-            {"unicode_escape_in_key", {R"({"\u0061":1})"}, "$.a"},
-            {"unicode_escape_in_key_deep", {R"({"\u0061":{"\u0062":42}})"}, "$.a.b"},
-            {"unicode_escape_mixed_in_key", {R"({"a\u0062c":1})"}, "$.abc"},
-            // Multi-row: parser reuse + scratch copy across rows; mixed leaf types.
-            {"multi_row_mixed_leaves",
-             {R"({"k":1})", R"({"k":"two"})", R"({"k":3.5})", R"({"k":[1,2]})", R"({"k":null})", R"({"other":1})",
-              R"({"k":true})"},
-             "$.k"},
-            {"multi_row_deep",
-             {R"({"a":{"b":{"c":1}}})", R"({"a":{"b":{"c":"two"}}})", R"({"a":{"b":{"c":[1,2]}}})"},
-             "$.a.b.c"},
-    };
-    for (const auto& tc : cases) {
-        SCOPED_TRACE(tc.name);
-        assert_diff_get_json_string(tc);
-    }
-}
-
-// Stress test: large batch with mixed escape patterns. Designed to trip the buffer-overflow
-// hazards documented in be/src/common/simdjson_util.h around unescaped_key()/get_string()
-// internal buffers. Run under ASAN to validate value_get_string_safe / field_unescaped_key_safe
-// usage in the fused path.
+// Stress test: large batch with mixed escape patterns, so the parser and the builder of the thread are reused
+// across rows of every length. Run under ASAN.
 TEST_F(JsonFunctionsTest, asan_stress_get_json_string_escapes) {
     constexpr int kNumRows = 100000;
     std::unique_ptr<FunctionContext> ctx(FunctionContext::create_test_context());
@@ -2704,6 +3003,10 @@ TEST_F(JsonFunctionsTest, asan_stress_get_json_string_escapes) {
 
     ColumnPtr result = JsonFunctions::get_json_string(ctx.get(), columns).value();
     ASSERT_EQ(kNumRows, result->size());
+    ColumnViewer<TYPE_VARCHAR> viewer(result);
+    for (int i = 0; i < kNumRows; ++i) {
+        ASSERT_EQ("x" + std::string(i % 32, '"'), viewer.value(i).to_string()) << i;
+    }
 
     ASSERT_TRUE(
             JsonFunctions::native_json_path_close(ctx.get(), FunctionContext::FunctionStateScope::THREAD_LOCAL).ok());
@@ -2711,45 +3014,21 @@ TEST_F(JsonFunctionsTest, asan_stress_get_json_string_escapes) {
             JsonFunctions::native_json_path_close(ctx.get(), FunctionContext::FunctionStateScope::FRAGMENT_LOCAL).ok());
 }
 
-TEST_F(JsonFunctionsTest, diff_get_json_string_bare_scalar_inputs) {
-    // parse_json_or_string semantics: empty / whitespace / bare-scalar inputs are wrapped
-    // as JSON strings. Fast path delegates to legacy via FallbackRow, so results match.
-    std::vector<DiffJsonCase> cases = {
-            {"empty_input", {""}, "$.k"},
-            {"whitespace_input", {"   "}, "$.k"},
-            {"bare_int", {"123"}, "$.k"},
-            {"bare_true", {"true"}, "$.k"},
-            {"bare_null_text", {"null"}, "$.k"},
-            {"bare_word", {"hello"}, "$.k"},
-            {"malformed_object", {"{not valid json"}, "$.k"},
-            {"malformed_array", {"[1,2,"}, "$.k"},
-            // Mixed batch: well-formed, malformed, bare-scalar interleaved.
-            {"multi_row_mixed_input",
-             {R"({"k":1})", "", "   ", "bare", R"({"k":2})", "[1,2,", R"({"k":"three"})"},
-             "$.k"},
-    };
-    for (const auto& tc : cases) {
-        SCOPED_TRACE(tc.name);
-        assert_diff_get_json_string(tc);
-    }
-}
-
-// Regression for the fused get_json fast path under pipeline parallelism. A pipeline ProjectOperator hands the
-// SAME ExprContext (hence the same FunctionContext) to every per-`pipeline_dop` driver without cloning, so the
-// fast path's reusable simdjson parser + scratch buffers must be per-OS-thread (thread_local), not shared
-// FunctionContext state. A shared parser is raced by concurrent drivers and scrambles string values across rows.
-// This test shares one context across threads and asserts each thread reads back only its own values.
+// A pipeline ProjectOperator hands the SAME ExprContext (hence the same FunctionContext) to every
+// per-`pipeline_dop` driver without cloning, so the reusable parser and builder must be per-OS-thread
+// (thread_local), not shared FunctionContext state. A shared parser is raced by concurrent drivers and
+// scrambles values across rows. This test shares one context across threads and asserts each thread reads
+// back only its own values.
 TEST_F(JsonFunctionsTest, get_json_string_concurrent_shared_context) {
     std::unique_ptr<FunctionContext> ctx(FunctionContext::create_test_context());
 
-    // Constant path -> the fused fast path is planned once at FRAGMENT_LOCAL prepare.
     auto seed_json = BinaryColumn::create();
     seed_json->append(R"({"k":"seed"})");
     auto seed_path = BinaryColumn::create();
     seed_path->append("$.k");
     Columns const_cols;
     const_cols.emplace_back(seed_json);
-    const_cols.emplace_back(seed_path);
+    const_cols.emplace_back(ConstColumn::create(seed_path, 1));
     ctx->set_constant_columns(const_cols);
     ASSERT_TRUE(JsonFunctions::native_json_path_prepare(ctx.get(), FunctionContext::FunctionStateScope::FRAGMENT_LOCAL)
                         .ok());
@@ -2766,14 +3045,12 @@ TEST_F(JsonFunctionsTest, get_json_string_concurrent_shared_context) {
             // A value unique to this thread, so any cross-thread contamination is detectable.
             const std::string expected = "val_" + std::to_string(t);
             auto json_col = BinaryColumn::create();
-            auto path_col = BinaryColumn::create();
             for (int r = 0; r < kRows; ++r) {
-                json_col->append(R"({"k":")" + expected + R"("})");
-                path_col->append("$.k");
+                json_col->append(R"({"k":")" + expected + R"(","n":{"k":")" + expected + R"("}})");
             }
             Columns cols;
             cols.emplace_back(json_col);
-            cols.emplace_back(path_col);
+            cols.emplace_back(const_cols[1]);
 
             for (int it = 0; it < kIters && !failed.load(std::memory_order_relaxed); ++it) {
                 auto res = JsonFunctions::get_json_string(ctx.get(), cols);
@@ -2794,10 +3071,55 @@ TEST_F(JsonFunctionsTest, get_json_string_concurrent_shared_context) {
     for (auto& w : workers) {
         w.join();
     }
-    ASSERT_FALSE(failed.load()) << "fused get_json scrambled values across concurrent drivers sharing one context";
+    ASSERT_FALSE(failed.load()) << "get_json_string scrambled values across concurrent drivers sharing one context";
 
     ASSERT_TRUE(
             JsonFunctions::native_json_path_close(ctx.get(), FunctionContext::FunctionStateScope::FRAGMENT_LOCAL).ok());
+}
+
+TEST_F(JsonFunctionsTest, json_extract_paths_concurrent_shared_context) {
+    std::unique_ptr<FunctionContext> context(FunctionContext::create_test_context());
+    Columns constants{nullptr, const_text("$.nested.a", 16), const_text("$.nested.b", 16)};
+    context->set_constant_columns(constants);
+    ASSERT_OK(JsonFunctions::json_extract_paths_prepare(context.get(), FunctionContext::FRAGMENT_LOCAL));
+    std::atomic<bool> failed{false};
+    std::vector<std::thread> workers;
+    for (int thread = 0; thread < 8; ++thread) {
+        workers.emplace_back([&, thread]() {
+            std::string value = "thread_" + std::to_string(thread);
+            auto input = BinaryColumn::create();
+            for (int row = 0; row < 16; ++row) {
+                input->append("{\"nested\":{\"b\":\"" + value + "\",\"a\":\"" + value + "\"}}");
+            }
+            Columns columns{input, constants[1], constants[2]};
+            for (int iteration = 0; iteration < 200 && !failed.load(); ++iteration) {
+                auto result = JsonFunctions::json_extract_paths(context.get(), columns);
+                if (!result.ok()) {
+                    failed = true;
+                    break;
+                }
+                ColumnViewer<TYPE_JSON> viewer(result.value());
+                for (int row = 0; row < 16; ++row) {
+                    if (viewer.is_null(row)) {
+                        failed = true;
+                        break;
+                    }
+                    auto object = viewer.value(row)->to_vslice();
+                    for (const auto& key : {"0", "1"}) {
+                        auto actual = object.get(key);
+                        if (!actual.isString() || actual.copyString() != value) {
+                            failed = true;
+                        }
+                    }
+                }
+            }
+        });
+    }
+    for (auto& worker : workers) {
+        worker.join();
+    }
+    ASSERT_FALSE(failed.load());
+    ASSERT_OK(JsonFunctions::json_extract_paths_close(context.get(), FunctionContext::FRAGMENT_LOCAL));
 }
 
 } // namespace starrocks

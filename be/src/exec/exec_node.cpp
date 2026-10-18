@@ -657,8 +657,9 @@ Status eager_prune_eval_conjuncts(const std::vector<ExprContext*>& ctxs, Chunk* 
     int prune_threshold = std::max(int(chunk->num_rows() * prune_ratio), prune_min_size);
     int zero_count = 0;
 
+    ExprContext::ConjunctEvalCache cache;
     for (auto* ctx : ctxs) {
-        ASSIGN_OR_RETURN(ColumnPtr column, ctx->evaluate(chunk))
+        ASSIGN_OR_RETURN(ColumnPtr column, ctx->evaluate_with_conjunct_cache(chunk, nullptr, &cache))
         size_t true_count = ColumnHelper::count_true_with_notnull(column);
 
         if (true_count == column->size()) {
@@ -672,6 +673,8 @@ Status eager_prune_eval_conjuncts(const std::vector<ExprContext*>& ctxs, Chunk* 
             ColumnHelper::merge_two_filters(column, raw_filter, nullptr);
             zero_count = SIMD::count_zero(*raw_filter);
             if (zero_count > prune_threshold) {
+                // The cache holds results for the rows of the chunk before the filter.
+                cache.clear();
                 int rows = chunk->filter(*raw_filter, true);
                 if (rows == 0) {
                     // When all rows in chunk is filtered, direct return
@@ -721,8 +724,9 @@ Status ExecNode::eval_conjuncts(const std::vector<ExprContext*>& ctxs, Chunk* ch
     }
     Filter* raw_filter = filter.get();
 
+    ExprContext::ConjunctEvalCache cache;
     for (auto* ctx : ctxs) {
-        ASSIGN_OR_RETURN(ColumnPtr column, ctx->evaluate(chunk))
+        ASSIGN_OR_RETURN(ColumnPtr column, ctx->evaluate_with_conjunct_cache(chunk, nullptr, &cache))
         size_t true_count = ColumnHelper::count_true_with_notnull(column);
 
         if (true_count == column->size()) {
@@ -758,16 +762,19 @@ Status ExecNode::eval_conjuncts(const std::vector<ExprContext*>& ctxs, Chunk* ch
 }
 
 StatusOr<size_t> ExecNode::eval_conjuncts_into_filter(const std::vector<ExprContext*>& ctxs, Chunk* chunk,
-                                                      Filter* filter) {
+                                                      Filter* filter, ExprContext::ConjunctEvalCache* cache) {
     // No need to do expression if none rows
     DCHECK(chunk != nullptr);
     if (chunk->num_rows() == 0) {
         return 0;
     }
-    ExprContext::DatetimeCastCache cast_cache;
+    ExprContext::ConjunctEvalCache own_cache;
+    if (cache == nullptr) {
+        cache = &own_cache;
+    }
     for (auto* ctx : ctxs) {
         // This loop only updates the selection mask; input columns remain unchanged.
-        ASSIGN_OR_RETURN(ColumnPtr column, ctx->evaluate_with_cast_cache(chunk, filter->data(), &cast_cache))
+        ASSIGN_OR_RETURN(ColumnPtr column, ctx->evaluate_with_conjunct_cache(chunk, filter->data(), cache))
         size_t true_count = ColumnHelper::count_true_with_notnull(column);
 
         if (true_count == column->size()) {

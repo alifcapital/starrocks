@@ -462,20 +462,13 @@ Status apply_selected_result(const ColumnPtr& result, std::vector<uint32_t>* row
 
 // Evaluates the conjunct ctx on the given rows of chunk with Expr::evaluate_selected(), ANDs the result
 // into filter and keeps in rows the rows that passed. slots and has_indirect_inputs are the facts about
-// the conjunct that compound_conjunct_input() needs.
+// the conjunct that compound_conjunct_input() needs. cache is shared by the conjuncts of the chunk.
 Status evaluate_conjunct_on_rows(ExprContext* ctx, const std::vector<SlotId>& slots, bool has_indirect_inputs,
                                  const ChunkPtr& chunk, LazyMaterializationContext* lazy_ctx,
-                                 std::vector<uint32_t>* rows, Filter* filter) {
+                                 ExprContext::ConjunctEvalCache* cache, std::vector<uint32_t>* rows, Filter* filter) {
     ASSIGN_OR_RETURN(ChunkPtr input, compound_conjunct_input(slots, has_indirect_inputs, chunk, lazy_ctx));
-    StatusOr<ColumnPtr> result;
-    // Same error conversion as ExprContext::evaluate().
-    try {
-        result = ctx->root()->evaluate_selected(ctx, input.get(), *rows);
-    } catch (std::runtime_error& e) {
-        return Status::RuntimeError(fmt::format("Expr evaluate meet error: {}", e.what()));
-    }
-    RETURN_IF_ERROR(result);
-    return apply_selected_result(result.value(), rows, filter);
+    ASSIGN_OR_RETURN(ColumnPtr result, ctx->evaluate_selected_with_conjunct_cache(input.get(), *rows, cache));
+    return apply_selected_result(result, rows, filter);
 }
 
 } // namespace
@@ -613,6 +606,7 @@ StatusOr<size_t> GroupReader::_evaluate_compound_predicates_on_whole_chunk(RowGr
     // for the whole range, since no row is dropped. The other conjuncts read active_chunk.
     auto& conjunct_stats = _param.scanner_ctx->compound_conjunct_stats;
     size_t hit = state.row_count;
+    ExprContext::ConjunctEvalCache cache;
     for (size_t i = 0; i < conjuncts.size(); ++i) {
         ExprContext* ctx = conjuncts[i];
         const CompoundConjunctInfo& info = _compound_conjuncts[i];
@@ -622,7 +616,7 @@ StatusOr<size_t> GroupReader::_evaluate_compound_predicates_on_whole_chunk(RowGr
                     input, compound_conjunct_input(info.slots, info.has_indirect_inputs, state.active_chunk, lazy_ctx));
         }
         const size_t input_rows = hit;
-        ASSIGN_OR_RETURN(hit, ExecNode::eval_conjuncts_into_filter({ctx}, input.get(), &state.chunk_filter));
+        ASSIGN_OR_RETURN(hit, ExecNode::eval_conjuncts_into_filter({ctx}, input.get(), &state.chunk_filter, &cache));
         conjunct_stats[i].input_rows += input_rows;
         conjunct_stats[i].output_rows += hit;
         if (hit == 0) {
@@ -648,6 +642,7 @@ StatusOr<size_t> GroupReader::_evaluate_compound_predicates_on_selected_rows(Row
     auto& conjunct_stats = _param.scanner_ctx->compound_conjunct_stats;
     // state.deferred_conjuncts is in ascending order, so we step through it together with the conjuncts.
     size_t next_deferred = 0;
+    ExprContext::ConjunctEvalCache cache;
     for (size_t conjunct_idx = 0; conjunct_idx < conjuncts.size(); ++conjunct_idx) {
         if (next_deferred < state.deferred_conjuncts.size() &&
             state.deferred_conjuncts[next_deferred] == conjunct_idx) {
@@ -660,7 +655,7 @@ StatusOr<size_t> GroupReader::_evaluate_compound_predicates_on_selected_rows(Row
         const CompoundConjunctInfo& info = _compound_conjuncts[conjunct_idx];
         const size_t input_rows = rows.size();
         RETURN_IF_ERROR(evaluate_conjunct_on_rows(conjuncts[conjunct_idx], info.slots, info.has_indirect_inputs,
-                                                  state.active_chunk, lazy_ctx, &rows, &state.chunk_filter));
+                                                  state.active_chunk, lazy_ctx, &cache, &rows, &state.chunk_filter));
         conjunct_stats[conjunct_idx].input_rows += input_rows;
         conjunct_stats[conjunct_idx].output_rows += rows.size();
     }
@@ -712,10 +707,12 @@ Status GroupReader::_evaluate_deferred_compound_predicates(const RowGroupScanSta
     std::vector<uint32_t> rows;
     bool on_selected_rows = false;
     size_t rows_left = num_rows;
+    ExprContext::ConjunctEvalCache cache;
     for (size_t i : state.deferred_conjuncts) {
         const size_t input_rows = rows_left;
         if (!on_selected_rows) {
-            ASSIGN_OR_RETURN(rows_left, ExecNode::eval_conjuncts_into_filter({conjuncts[i]}, chunk->get(), &filter));
+            ASSIGN_OR_RETURN(rows_left,
+                             ExecNode::eval_conjuncts_into_filter({conjuncts[i]}, chunk->get(), &filter, &cache));
             if (rows_left > 0 && rows_left < num_rows) {
                 selected_rows_of(filter, num_rows, &rows);
                 on_selected_rows = true;
@@ -723,7 +720,7 @@ Status GroupReader::_evaluate_deferred_compound_predicates(const RowGroupScanSta
         } else {
             const CompoundConjunctInfo& info = _compound_conjuncts[i];
             RETURN_IF_ERROR(evaluate_conjunct_on_rows(conjuncts[i], info.slots, info.has_indirect_inputs, *chunk,
-                                                      nullptr, &rows, &filter));
+                                                      nullptr, &cache, &rows, &filter));
             rows_left = rows.size();
         }
         conjunct_stats[i].input_rows += input_rows;

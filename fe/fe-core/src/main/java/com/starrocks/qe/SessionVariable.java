@@ -1109,7 +1109,7 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     public static final String ENABLE_HYPERSCAN_VEC = "enable_hyperscan_vec";
 
-    public static final String ENABLE_JSON_EXTRACT_FUSION = "enable_json_extract_fusion";
+    public static final String ENABLE_JSON_PATH_REWRITE = "enable_json_path_rewrite";
 
     // whether rewrite bitmap_union(to_bitmap(x)) to bitmap_agg(x) directly.
     public static final String ENABLE_REWRITE_BITMAP_UNION_TO_BITMAP_AGG = "enable_rewrite_bitmap_union_to_bitamp_agg";
@@ -2363,8 +2363,10 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     @VarAttr(name = ENABLE_HYPERSCAN_VEC)
     private boolean enableHyperscanVec = true;
 
-    @VarAttr(name = ENABLE_JSON_EXTRACT_FUSION)
-    private boolean enableJsonExtractFusion = true;
+    // Rewrites the extraction of constant paths from JSON text into json_extract_paths() calls that parse
+    // each document once (JsonPathExtractRule). Off only to compare plans or to stop the rewrite.
+    @VarAttr(name = ENABLE_JSON_PATH_REWRITE)
+    private boolean enableJsonPathRewrite = true;
 
     @VarAttr(name = ENABLE_PLAN_ANALYZER, flag = VariableMgr.INVISIBLE)
     private boolean enablePlanAnalyzer = false;
@@ -5179,6 +5181,10 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
         return enableColumnExprPredicate;
     }
 
+    public void setEnableColumnExprPredicate(boolean enableColumnExprPredicate) {
+        this.enableColumnExprPredicate = enableColumnExprPredicate;
+    }
+
     public boolean isEnableExchangePassThrough() {
         return enableExchangePassThrough;
     }
@@ -6331,6 +6337,10 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
         return enableScanPredicateExprReuse;
     }
 
+    public void setEnableScanPredicateExprReuse(boolean enableScanPredicateExprReuse) {
+        this.enableScanPredicateExprReuse = enableScanPredicateExprReuse;
+    }
+
     public void setEnablePredicateExprReuse(boolean enablePredicateExprReuse) {
         this.enablePredicateExprReuse = enablePredicateExprReuse;
     }
@@ -6642,12 +6652,12 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
         return mcvRowPercentagePropagationThreshold;
     }
 
-    public boolean isEnableJsonExtractFusion() {
-        return enableJsonExtractFusion;
+    public boolean isEnableJsonPathRewrite() {
+        return enableJsonPathRewrite;
     }
 
-    public void setEnableJsonExtractFusion(boolean value) {
-        enableJsonExtractFusion = value;
+    public void setEnableJsonPathRewrite(boolean value) {
+        enableJsonPathRewrite = value;
     }
 
     // Serialize to thrift object
@@ -6815,7 +6825,6 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
         tResult.setEnable_pipeline_level_shuffle(enablePipelineLevelShuffle);
         tResult.setExchange_hash_function_version(exchangeHashFunctionVersion);
         tResult.setEnable_hyperscan_vec(enableHyperscanVec);
-        tResult.setEnable_json_extract_fusion(enableJsonExtractFusion);
         tResult.setJit_level(jitLevel);
         tResult.setEnable_result_sink_accumulate(enableResultSinkAccumulate);
         tResult.setEnable_connector_sink_writer_scaling(enableConnectorSinkWriterScaling);

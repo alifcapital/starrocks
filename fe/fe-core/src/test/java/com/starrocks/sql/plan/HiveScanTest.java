@@ -15,6 +15,7 @@
 package com.starrocks.sql.plan;
 
 import com.starrocks.planner.ScanNode;
+import org.apache.commons.lang3.StringUtils;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -208,17 +209,60 @@ public class HiveScanTest extends ConnectorPlanTestBase {
     }
 
     @Test
-    public void testJsonFusionOverCastOnIcebergString() throws Exception {
-        boolean previous = connectContext.getSessionVariable().isEnableJsonExtractFusion();
-        try {
-            connectContext.getSessionVariable().setEnableJsonExtractFusion(true);
-            String sql = "select cast(cast(data as json) -> '$.body' -> '$.txn' as char) from iceberg0.partitioned_db.t1 "
-                    + "where cast(cast(data as json) -> '$.body' -> '$.mode' as char) = 'x'";
-            String plan = getFragmentPlan(sql);
-            assertContains(plan, "json_query_from_string(", "data, '$.body.txn')", "data, '$.body.mode')");
-            assertNotContains(plan, "get_json_string(", "AS JSON");
-        } finally {
-            connectContext.getSessionVariable().setEnableJsonExtractFusion(previous);
-        }
+    public void testJsonPathRewriteOverCastOnIcebergString() throws Exception {
+        String sql = "select cast(cast(data as json) -> '$.body' -> '$.txn' as char) from iceberg0.partitioned_db.t1 "
+                + "where cast(cast(data as json) -> '$.body' -> '$.mode' as char) = 'x'";
+        String plan = getFragmentPlan(sql);
+        assertContains(plan, "data, '$.body.txn')", "data, '$.body.mode')");
+        assertNotContains(plan, "AS JSON", "parse_json(");
+    }
+
+    @Test
+    public void testJsonPathRewriteOfScanConjuncts() throws Exception {
+        // Every conjunct over the column gets one json_extract_paths() call with all paths of the predicate;
+        // BE shares its result between the conjuncts of a chunk.
+        String sql = "select id from iceberg0.partitioned_db.t1 "
+                + "where get_json_string(parse_json(data), '$.posData.terminalType') = 'ATM' "
+                + "and get_json_string(parse_json(data), '$.merchantData.terminalId') like 'A0400%' "
+                + "and nullif(get_json_string(parse_json(data), '$.referenceData.rrn'), '') is not null";
+        String plan = getFragmentPlan(sql);
+        String extract = "json_extract_paths(2: data, '$.posData.terminalType', '$.merchantData.terminalId', "
+                + "'$.referenceData.rrn')";
+        Assertions.assertEquals(3, StringUtils.countMatches(plan, extract), plan);
+        assertContains(plan, "get_json_string(" + extract + ", '$.0') = 'ATM'",
+                "get_json_string(" + extract + ", '$.1') LIKE 'A0400%'",
+                "nullif(get_json_string(" + extract + ", '$.2'), '') IS NOT NULL");
+        assertNotContains(plan, "parse_json(");
+
+        // One path keeps the extraction from text.
+        plan = getFragmentPlan("select id from iceberg0.partitioned_db.t1 "
+                + "where get_json_string(parse_json(data), '$.posData.terminalType') = 'ATM'");
+        assertContains(plan, "get_json_string(2: data, '$.posData.terminalType') = 'ATM'");
+        assertNotContains(plan, "json_extract_paths", "parse_json(");
+
+        // get_json_string over the text takes part in the group as well.
+        plan = getFragmentPlan("select id from iceberg0.partitioned_db.t1 "
+                + "where get_json_string(data, '$.a') = 'x' and get_json_string(data, '$.b') = 'y'");
+        assertContains(plan, "get_json_string(json_extract_paths(2: data, '$.a', '$.b'), '$.0') = 'x'",
+                "get_json_string(json_extract_paths(2: data, '$.a', '$.b'), '$.1') = 'y'");
+    }
+
+    @Test
+    public void testJsonPathRewriteOfSubqueryAndCte() throws Exception {
+        // parse_json(x) AS j in a subquery: the conditions on j reach the scan and the projection is merged
+        // into the scan before the rewrite, so both read the text.
+        String sql = "select j -> 'body', get_json_string(j, '$.id') from "
+                + "(select parse_json(data) j from iceberg0.partitioned_db.t1) s "
+                + "where get_json_string(j, '$.a') = 'x' and get_json_string(j, '$.b') = 'y'";
+        String plan = getFragmentPlan(sql);
+        assertNotContains(plan, "parse_json(");
+        assertContains(plan, "json_extract_paths(2: data, '$.a', '$.b')", "json_extract_paths(2: data, 'body', '$.id')");
+
+        String cte = "with c as (select parse_json(data) j, id from iceberg0.partitioned_db.t1) "
+                + "select get_json_string(c1.j, '$.a'), get_json_string(c2.j, '$.b') "
+                + "from c c1 join c c2 on c1.id = c2.id";
+        plan = getFragmentPlan(cte);
+        assertNotContains(plan, "parse_json(");
+        assertContains(plan, "get_json_string(", "data, '$.a')", "data, '$.b')");
     }
 }

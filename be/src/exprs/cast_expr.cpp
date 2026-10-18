@@ -1172,10 +1172,10 @@ public:
     }
 
     StatusOr<ColumnPtr> cast_column(ExprContext* context, ColumnPtr column) {
-        ExprContext::DatetimeCastCache* cache = nullptr;
+        ExprContext::ConjunctEvalCache::DatetimeCast* cache = nullptr;
         if constexpr (FromType == TYPE_VARCHAR && ToType == TYPE_DATETIME) {
             if (context != nullptr && _children[0]->is_slotref()) {
-                cache = context->datetime_cast_cache();
+                cache = ExprContext::datetime_cast_cache(context);
                 if (cache != nullptr && cache->input.get() == column.get() &&
                     cache->allow_throw_exception == AllowThrowException) {
                     return cache->result;

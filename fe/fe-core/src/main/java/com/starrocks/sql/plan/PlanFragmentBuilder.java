@@ -575,6 +575,30 @@ public class PlanFragmentBuilder {
             return ScalarOperatorUtil.getStream(expr).anyMatch(isHeavyExpr);
         }
 
+        // The heavy expressions computed by the scan inline the common sub-expressions they read, and the project reads
+        // the heavy results as slots. A common sub-expression that only the heavy expressions read would still be
+        // computed by the project on every row for nothing, so we keep only the ones the project expressions read.
+        private static void removeUnusedCommonSubExprs(Projection projection) {
+            Map<ColumnRefOperator, ScalarOperator> commonSubExprs = projection.getCommonSubOperatorMap();
+            if (commonSubExprs == null || commonSubExprs.isEmpty()) {
+                return;
+            }
+            ColumnRefSet used = new ColumnRefSet();
+            projection.getColumnRefMap().values().forEach(expr -> used.union(expr.getUsedColumns()));
+            boolean grown = true;
+            while (grown) {
+                grown = false;
+                for (Map.Entry<ColumnRefOperator, ScalarOperator> entry : commonSubExprs.entrySet()) {
+                    ColumnRefSet reads = entry.getValue().getUsedColumns();
+                    if (used.contains(entry.getKey()) && !used.containsAll(reads)) {
+                        used.union(reads);
+                        grown = true;
+                    }
+                }
+            }
+            commonSubExprs.keySet().removeIf(column -> !used.contains(column));
+        }
+
         public Map<ColumnRefOperator, ScalarOperator> extractHeavyExprs(Projection projection) {
             Map<ColumnRefOperator, ScalarOperator> commonSubExprs =
                     Optional.ofNullable(projection.getCommonSubOperatorMap())
@@ -804,6 +828,7 @@ public class PlanFragmentBuilder {
                             .put(entry.getKey(), new SlotRef(entry.getKey().toString(), slotDescriptor));
                 }
                 ((OlapScanNode) inputFragment.getPlanRoot()).setHeavyExprs(heavyExprMap);
+                removeUnusedCommonSubExprs(node);
             }
 
             TupleDescriptor tupleDescriptor = context.getDescTbl().createTupleDescriptor();

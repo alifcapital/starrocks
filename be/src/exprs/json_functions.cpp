@@ -16,12 +16,16 @@
 
 #include <re2/re2.h>
 
+#ifdef __AVX2__
+#include <immintrin.h>
+#endif
+
 #include <algorithm>
 #include <boost/tokenizer.hpp>
+#include <cwctype>
 #include <memory>
 #include <mutex>
 #include <string_view>
-#include <unordered_map>
 #include <vector>
 
 #include "column/chunk.h"
@@ -46,14 +50,12 @@
 #include "glog/logging.h"
 #include "gutil/casts.h"
 #include "gutil/strings/substitute.h"
-#include "runtime/runtime_state.h"
 #include "runtime/types.h"
 #include "storage/chunk_helper.h"
 #include "types/logical_type.h"
 #include "util/json.h"
 #include "util/json_converter.h"
 #include "util/json_flattener.h"
-#include "util/simdjson_util.h"
 #include "velocypack/Builder.h"
 #include "velocypack/Iterator.h"
 
@@ -300,12 +302,6 @@ StatusOr<ColumnPtr> JsonFunctions::get_json_bool(FunctionContext* context, const
     return _get_json_value<TYPE_BOOLEAN>(context, columns);
 }
 
-// FE-fusion target for `parse_json(x) -> 'p'` and `cast(json_query(parse_json(x), 'p') as JSON)`.
-// Same VARCHAR/VARCHAR signature as get_json_string, but returns JSON.
-StatusOr<ColumnPtr> JsonFunctions::json_query_from_string(FunctionContext* context, const Columns& columns) {
-    return _get_json_value<TYPE_JSON>(context, columns);
-}
-
 template <typename Inputs>
 StatusOr<ColumnPtr> JsonFunctions::get_native_json_bool_impl(FunctionContext* context, const Inputs& columns) {
     return _json_query_impl<TYPE_BOOLEAN>(context, columns);
@@ -511,9 +507,45 @@ StatusOr<ColumnPtr> _string_json(FunctionContext* context, const Inputs& columns
 }
 
 //////////////////////////// User visiable functions /////////////////////////////////
+
+// One step of a constant JSON path: the member `key` of an object when key is not empty, otherwise the
+// element `index` of an array.
+struct JsonPathStep {
+    std::string key;
+    int index = -1;
+};
+
+// Converts a parsed path into steps. Returns false for a path with a wildcard, a slice or a "$" after the
+// first step; JsonPath::extract() handles such a path.
+static bool to_json_path_steps(const JsonPath& path, std::vector<JsonPathStep>* steps) {
+    steps->clear();
+    // JsonPath::extract() starts at paths[1]; paths[0] is the root.
+    for (size_t i = 1; i < path.paths.size(); ++i) {
+        const JsonPathPiece& piece = path.paths[i];
+        if (piece.key == "$") {
+            // "$" moves back to the root, which before the first step is where the path already is.
+            if (!steps->empty()) {
+                return false;
+            }
+        } else if (!piece.key.empty()) {
+            steps->push_back({piece.key, -1});
+        }
+        const ArraySelectorType type = piece.array_selector ? piece.array_selector->type : INVALID;
+        if (type == SINGLE) {
+            steps->push_back({std::string(), down_cast<const ArraySelectorSingle*>(piece.array_selector.get())->index});
+        } else if (type != NONE) {
+            return false;
+        }
+    }
+    return true;
+}
+
 struct NativeJsonState {
 public:
     JsonPath json_path;
+    // Steps of json_path, valid when simple_path is true.
+    std::vector<JsonPathStep> steps;
+    bool simple_path = false;
 
     // flat json used
     std::once_flag init_flat_once;
@@ -527,96 +559,367 @@ public:
     ObjectPool pool;
     Expr* ref;
     Expr* cast_expr;
-
-    // Fused-fast-path planning fields. Populated in native_json_path_prepare(FRAGMENT_LOCAL).
-    // Read-only afterwards — safe to share across cloned drivers via _fragment_local_fn_state copy.
-    JsonPathShape fast_shape = JsonPathShape::Unsupported;
-    std::vector<JsonMoveStep> fast_moves;
-    bool fast_path_disabled = false;
 };
 
 static NativeJsonState* get_native_json_state(FunctionContext* context) {
     return reinterpret_cast<NativeJsonState*>(context->get_function_state(FunctionContext::FRAGMENT_LOCAL));
 }
 
-static JsonGetThreadState* get_json_thread_state(FunctionContext* /*context*/) {
-    // The fused fast path keeps reusable MUTABLE scratch here (a simdjson ondemand parser + buffers).
+static JsonGetThreadState* get_json_thread_state() {
+    // The extraction from text keeps reusable MUTABLE scratch here (a simdjson DOM parser and a VPack builder).
     // FunctionContext::THREAD_LOCAL state is NOT per-pipeline-driver: a pipeline ProjectOperator (and the
     // scan operators) share one ExprContext -- hence one FunctionContext -- across all `pipeline_dop` drivers
     // (project_operator.h: `_expr_ctxs` is a reference handed to every per-driver operator; the operator never
-    // clones it). simdjson's ondemand parser is not thread-safe, so a shared instance is raced by concurrent
-    // drivers and scrambles string values across rows. Use a genuine per-OS-thread instance instead: a driver
-    // runs a chunk to completion without preemption, and concurrent drivers are on different threads.
+    // clones it). A shared parser is raced by concurrent drivers. Use a genuine per-OS-thread instance instead:
+    // a driver runs a chunk to completion without preemption, and concurrent drivers are on different threads.
     thread_local JsonGetThreadState ts;
-    // Bound pathological growth: being thread_local, ts persists for the thread's lifetime and its simdjson
-    // parser + scratch buffers grow to the largest document seen on this thread. Once they exceed a cap, reset
-    // them at this chunk boundary (this accessor runs once per chunk, not per row), so a one-off huge document
-    // does not pin memory. The reset fires only after an oversized document; the check itself is trivial.
+    // Bound pathological growth: being thread_local, ts persists for the thread's lifetime and its parser and
+    // builder grow to the largest document seen on this thread. Once they exceed a cap, reset them at this
+    // chunk boundary (this accessor runs once per chunk, not per row), so a one-off huge document does not pin
+    // memory. The reset fires only after an oversized document; the check itself is trivial.
     constexpr size_t kRetainCapBytes = 1 << 20; // 1 MB
-    if (ts.parser.capacity() > kRetainCapBytes || ts.leaf_builder.buffer()->capacity() > kRetainCapBytes) {
-        ts.parser = simdjson::ondemand::parser{};
-        ts.padded_scratch.clear();
-        ts.padded_scratch.shrink_to_fit();
-        ts.unescape_scratch.clear();
-        ts.unescape_scratch.shrink_to_fit();
-        ts.key_scratch.clear();
-        ts.key_scratch.shrink_to_fit();
-        ts.leaf_builder = vpack::Builder{};
+    if (ts.parser.capacity() > kRetainCapBytes || ts.builder.buffer()->capacity() > kRetainCapBytes) {
+        ts.parser = simdjson::dom::parser{};
+        ts.builder = vpack::Builder{};
     }
     return &ts;
 }
 
-void JsonFunctions::_plan_fast_moves(const JsonPath& path, NativeJsonState* state) {
-    state->fast_moves.clear();
-    state->fast_shape = JsonPathShape::SimpleFlat;
-    bool has_index = false;
+namespace {
 
-    for (size_t i = 0; i < path.paths.size(); ++i) {
-        const auto& p = path.paths[i];
-        // Skip the root anchor "$" with NONE selector at index 0.
-        if (i == 0 && p.key == "$" && p.array_selector && p.array_selector->type == ArraySelectorType::NONE) {
-            continue;
-        }
+enum class PathLookup { kFound, kMissing, kAmbiguous };
 
-        // A noninitial root anchor resets traversal, including the earlier missing-field checks.
-        if (i > 1 && p.key == "$") {
-            state->fast_shape = JsonPathShape::Unsupported;
-            state->fast_moves.clear();
-            return;
-        }
-
-        const auto sel_type = p.array_selector ? p.array_selector->type : ArraySelectorType::INVALID;
-
-        if (sel_type == ArraySelectorType::WILDCARD || sel_type == ArraySelectorType::SLICE ||
-            sel_type == ArraySelectorType::INVALID) {
-            state->fast_shape = JsonPathShape::Unsupported;
-            state->fast_moves.clear();
-            return;
-        }
-
-        // Field part (skip empty key — used by chained selectors like $.a[0][1] producing ("",SINGLE 1)).
-        if (!p.key.empty() && p.key != "$") {
-            JsonMoveStep step;
-            step.kind = JsonMoveStep::Kind::Field;
-            step.field = p.key;
-            step.index = -1;
-            state->fast_moves.push_back(std::move(step));
-        }
-        if (sel_type == ArraySelectorType::SINGLE) {
-            int idx = down_cast<const ArraySelectorSingle*>(p.array_selector.get())->index;
-            JsonMoveStep step;
-            step.kind = JsonMoveStep::Kind::ArrayIndex;
-            step.field.clear();
-            step.index = idx;
-            state->fast_moves.push_back(std::move(step));
-            has_index = true;
+// Follows the steps over a simdjson document the way JsonPath::extract() follows the VPack document. We fear
+// a key that occurs twice in an object: VPack finds one of the duplicates through the sorted index of the
+// object, and which one depends on the size of the object. So we report such a key as ambiguous and the
+// caller takes the value from VPack.
+PathLookup lookup_json_path(simdjson::dom::element value, const std::vector<JsonPathStep>& steps,
+                            simdjson::dom::element* out) {
+    for (const JsonPathStep& step : steps) {
+        if (!step.key.empty()) {
+            simdjson::dom::object object;
+            if (value.get_object().get(object)) {
+                return PathLookup::kMissing;
+            }
+            bool found = false;
+            for (simdjson::dom::key_value_pair field : object) {
+                if (field.key == step.key) {
+                    if (found) {
+                        return PathLookup::kAmbiguous;
+                    }
+                    found = true;
+                    value = field.value;
+                }
+            }
+            if (!found) {
+                return PathLookup::kMissing;
+            }
+        } else {
+            simdjson::dom::array array;
+            if (value.get_array().get(array) || array.at(step.index).get(value)) {
+                return PathLookup::kMissing;
+            }
         }
     }
+    *out = value;
+    return PathLookup::kFound;
+}
 
-    if (has_index) {
-        state->fast_shape = JsonPathShape::HasIndex;
+// Adds a simdjson value with the Builder calls that vpack::Parser makes for the same JSON text, so the bytes
+// are those of parse_json(). vpack::Parser adds a non-negative integer as UInt and a negative one as Int.
+// The value becomes the member `key` of the open object when key is not null.
+void add_dom_value(const std::string_view* key, simdjson::dom::element value, vpack::Builder* builder) {
+    auto add = [key, builder](const vpack::Value& item) {
+        if (key != nullptr) {
+            builder->add(vpack::StringRef(key->data(), key->size()), item);
+        } else {
+            builder->add(item);
+        }
+    };
+    switch (value.type()) {
+    case simdjson::dom::element_type::ARRAY: {
+        add(vpack::Value(vpack::ValueType::Array));
+        simdjson::dom::array array = value.get_array().value_unsafe();
+        for (simdjson::dom::element child : array) {
+            add_dom_value(nullptr, child, builder);
+        }
+        builder->close();
+        break;
+    }
+    case simdjson::dom::element_type::OBJECT: {
+        add(vpack::Value(vpack::ValueType::Object));
+        simdjson::dom::object object = value.get_object().value_unsafe();
+        for (simdjson::dom::key_value_pair field : object) {
+            add_dom_value(&field.key, field.value, builder);
+        }
+        builder->close();
+        break;
+    }
+    case simdjson::dom::element_type::INT64: {
+        const int64_t number = value.get_int64().value_unsafe();
+        if (number >= 0) {
+            add(vpack::Value(static_cast<uint64_t>(number)));
+        } else {
+            add(vpack::Value(number));
+        }
+        break;
+    }
+    case simdjson::dom::element_type::UINT64:
+        add(vpack::Value(value.get_uint64().value_unsafe()));
+        break;
+    case simdjson::dom::element_type::DOUBLE:
+        add(vpack::Value(value.get_double().value_unsafe()));
+        break;
+    case simdjson::dom::element_type::STRING: {
+        const std::string_view str = value.get_string().value_unsafe();
+        add(vpack::Value(str));
+        break;
+    }
+    case simdjson::dom::element_type::BOOL:
+        add(vpack::Value(value.get_bool().value_unsafe()));
+        break;
+    case simdjson::dom::element_type::NULL_VALUE:
+        add(vpack::Value(vpack::ValueType::Null));
+        break;
     }
 }
+
+// vpack::Parser checks the range of a number with its own arithmetic: it multiplies the mantissa by
+// pow(10, exponent) and rejects an infinite result, so it rejects "0e400" and "0.00001e310", and it sums the
+// integer digits in a double, which can overflow for a number near DBL_MAX. simdjson accepts these numbers.
+// Such a number needs an exponent of three digits or more, or a long run of digits. We expect them to be
+// very rare, so for a text that may hold one we take the document from VPack. A candidate exponent must
+// follow a digit and end with a byte that ends a JSON number, so a hexadecimal id such as "550e8400-..."
+// is not a candidate.
+constexpr size_t kLongDigitRun = 160;
+
+bool is_json_digit(char c) {
+    return c >= '0' && c <= '9';
+}
+
+// `pos` is an 'e' or 'E' that follows a digit.
+bool is_long_exponent(const char* data, size_t size, size_t pos) {
+    size_t i = pos + 1;
+    if (i < size && (data[i] == '+' || data[i] == '-')) {
+        ++i;
+    }
+    const size_t first_digit = i;
+    while (i < size && is_json_digit(data[i])) {
+        ++i;
+    }
+    if (i - first_digit < 3 || i >= size) {
+        return false;
+    }
+    const char end = data[i];
+    return end == ',' || end == '}' || end == ']' || end == ' ' || end == '\t' || end == '\n' || end == '\r';
+}
+
+bool may_have_vpack_rejected_number_scalar(const char* data, size_t size, size_t from, size_t run) {
+    for (size_t i = from; i < size; ++i) {
+        const char c = data[i];
+        if (is_json_digit(c)) {
+            if (++run >= kLongDigitRun) {
+                return true;
+            }
+            continue;
+        }
+        run = 0;
+        if ((c | 0x20) == 'e' && i > 0 && is_json_digit(data[i - 1]) && is_long_exponent(data, size, i)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+#ifdef __AVX2__
+// One bit per byte of 64 bytes.
+struct JsonByteMasks {
+    uint64_t digit;
+    uint64_t e;
+    // '+' and '-', and also ')' and '/'; a scalar check confirms every candidate.
+    uint64_t sign;
+};
+
+JsonByteMasks json_byte_masks(const char* data) {
+    const __m256i lo = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data));
+    const __m256i hi = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + 32));
+    auto mask = [](__m256i lo_eq, __m256i hi_eq) {
+        return static_cast<uint64_t>(static_cast<uint32_t>(_mm256_movemask_epi8(lo_eq))) |
+               (static_cast<uint64_t>(static_cast<uint32_t>(_mm256_movemask_epi8(hi_eq))) << 32);
+    };
+    const __m256i zero = _mm256_set1_epi8('0');
+    const __m256i nine = _mm256_set1_epi8(9);
+    const __m256i lo_digit = _mm256_sub_epi8(lo, zero);
+    const __m256i hi_digit = _mm256_sub_epi8(hi, zero);
+    const __m256i lower = _mm256_set1_epi8(0x20);
+    const __m256i e = _mm256_set1_epi8('e');
+    const __m256i sign_bits = _mm256_set1_epi8(static_cast<char>(0xF9));
+    const __m256i sign = _mm256_set1_epi8(0x29);
+    JsonByteMasks masks;
+    masks.digit = mask(_mm256_cmpeq_epi8(_mm256_min_epu8(lo_digit, nine), lo_digit),
+                       _mm256_cmpeq_epi8(_mm256_min_epu8(hi_digit, nine), hi_digit));
+    masks.e = mask(_mm256_cmpeq_epi8(_mm256_or_si256(lo, lower), e), _mm256_cmpeq_epi8(_mm256_or_si256(hi, lower), e));
+    masks.sign = mask(_mm256_cmpeq_epi8(_mm256_and_si256(lo, sign_bits), sign),
+                      _mm256_cmpeq_epi8(_mm256_and_si256(hi, sign_bits), sign));
+    return masks;
+}
+#endif
+
+bool may_have_vpack_rejected_number(const char* data, size_t size) {
+    size_t i = 0;
+    size_t run = 0;
+#ifdef __AVX2__
+    if (size >= 128) {
+        JsonByteMasks cur = json_byte_masks(data);
+        uint64_t prev_digit = 0;
+        // The block after the current one gives the bytes that follow a candidate at its end.
+        for (; i + 128 <= size; i += 64) {
+            const JsonByteMasks next = json_byte_masks(data + i + 64);
+            const uint64_t after_digit = (cur.digit << 1) | (prev_digit >> 63);
+            const uint64_t digit1 = (cur.digit >> 1) | (next.digit << 63);
+            const uint64_t digit2 = (cur.digit >> 2) | (next.digit << 62);
+            const uint64_t digit3 = (cur.digit >> 3) | (next.digit << 61);
+            const uint64_t sign1 = (cur.sign >> 1) | (next.sign << 63);
+            uint64_t candidates = cur.e & after_digit & (digit1 | sign1) & digit2 & digit3;
+            while (candidates != 0) {
+                if (is_long_exponent(data, size, i + __builtin_ctzll(candidates))) {
+                    return true;
+                }
+                candidates &= candidates - 1;
+            }
+            if (cur.digit == ~uint64_t{0}) {
+                run += 64;
+                if (run >= kLongDigitRun) {
+                    return true;
+                }
+            } else {
+                if (run + __builtin_ctzll(~cur.digit) >= kLongDigitRun) {
+                    return true;
+                }
+                run = __builtin_clzll(~cur.digit);
+            }
+            prev_digit = cur.digit;
+            cur = next;
+        }
+    }
+#endif
+    return may_have_vpack_rejected_number_scalar(data, size, i, run);
+}
+
+// Parses `raw` with simdjson when the document equals the one of JsonValue::parse_json_or_string(raw).
+// Returns false for a row that has to go through VPack: a text that parse_json_or_string() does not parse
+// as an object or an array, a text that simdjson rejects, and a text with a number that VPack may reject.
+bool parse_dom(const Slice& raw, simdjson::dom::parser* parser, simdjson::dom::element* root) {
+    if (raw.size > kJSONLengthLimit) {
+        return false;
+    }
+    const char* begin = raw.data;
+    const char* end = begin + raw.size;
+    const char* first = std::find_if_not(begin, end, std::iswspace);
+    if (first == end || (*first != '{' && *first != '[')) {
+        return false;
+    }
+    if (parser->parse(raw.data, raw.size).get(*root)) {
+        return false;
+    }
+    return !may_have_vpack_rejected_number(raw.data, raw.size);
+}
+
+// Appends a value found in the simdjson document. Returns false when the row has to go through VPack.
+template <LogicalType ResultType>
+bool append_dom_value(simdjson::dom::element value, vpack::Builder* builder, ColumnBuilder<ResultType>* result) {
+    if constexpr (ResultType == TYPE_VARCHAR) {
+        std::string_view str;
+        if (!value.get_string().get(str)) {
+            result->append(Slice(str.data(), str.size()));
+            return true;
+        }
+    }
+    try {
+        builder->clear();
+        add_dom_value(nullptr, value, builder);
+    } catch (const vpack::Exception&) {
+        return false;
+    }
+    if (!cast_vpjson_to<ResultType, false>(builder->slice(), *result).ok()) {
+        result->append_null();
+    }
+    return true;
+}
+
+// Appends the value of `path` in parse_json(raw), the reference that every row matches.
+template <LogicalType ResultType>
+Status append_vpack_value(const Slice& raw, const JsonPath& path, bool strict, vpack::Builder* builder,
+                          ColumnBuilder<ResultType>* result) {
+    auto json = JsonValue::parse_json_or_string(raw);
+    if (!json.ok()) {
+        if (strict) {
+            return json.status();
+        }
+        result->append_null();
+        return Status::OK();
+    }
+    builder->clear();
+    vpack::Slice value = JsonPath::extract(&json.value(), path, builder);
+    if (!cast_vpjson_to<ResultType, false>(value, *result).ok()) {
+        result->append_null();
+    }
+    return Status::OK();
+}
+
+template <LogicalType ResultType>
+ColumnPtr build_extracted_column(ColumnBuilder<ResultType>* result, bool constant, size_t num_rows) {
+    auto column = result->build(constant);
+    if (constant) {
+        column->resize(num_rows);
+    }
+    return column;
+}
+
+// get_json_*(VARCHAR, VARCHAR) with a constant path. Every row gives the value of the path in parse_json(v).
+// We expect most documents to be objects or arrays that simdjson parses several times faster than VPack, so
+// such a row is parsed with simdjson, and a row that simdjson cannot reproduce goes through VPack.
+template <LogicalType ResultType, typename Inputs>
+StatusOr<ColumnPtr> extract_json_path(FunctionContext* context, const Inputs& columns, const NativeJsonState& state) {
+    FunctionColumnViewer<TYPE_VARCHAR, Inputs> viewer(columns[0]);
+    const size_t num_rows = input_num_rows(columns);
+    const bool constant = num_rows > 0 && input_columns_are_constant(columns);
+    const size_t rows = constant ? 1 : num_rows;
+    const bool strict = context->allow_throw_exception();
+    JsonGetThreadState* scratch = get_json_thread_state();
+    ColumnBuilder<ResultType> result(rows);
+    simdjson::dom::element root;
+    simdjson::dom::element value;
+    for (size_t row = 0; row < rows; ++row) {
+        if (viewer.is_null(row)) {
+            result.append_null();
+            continue;
+        }
+        const Slice raw = viewer.value(row);
+        if (state.simple_path && parse_dom(raw, &scratch->parser, &root)) {
+            const PathLookup lookup = lookup_json_path(root, state.steps, &value);
+            if (lookup == PathLookup::kMissing) {
+                result.append_null();
+                continue;
+            }
+            if (lookup == PathLookup::kFound && append_dom_value<ResultType>(value, &scratch->builder, &result)) {
+                continue;
+            }
+        }
+        RETURN_IF_ERROR(append_vpack_value<ResultType>(raw, state.json_path, strict, &scratch->builder, &result));
+    }
+    return build_extracted_column(&result, constant, num_rows);
+}
+
+// The constant paths of json_extract_paths() and the names of the members that hold their values.
+struct JsonExtractPathsState {
+    std::vector<JsonPath> paths;
+    std::vector<std::vector<JsonPathStep>> steps;
+    std::vector<std::string> keys;
+    bool simple = true;
+};
+
+} // namespace
 
 static StatusOr<JsonPath*> get_prepared_or_parse(FunctionContext* context, Slice slice, JsonPath* out) {
     auto* prepared = reinterpret_cast<NativeJsonState*>(context->get_function_state(FunctionContext::FRAGMENT_LOCAL));
@@ -630,9 +933,9 @@ static StatusOr<JsonPath*> get_prepared_or_parse(FunctionContext* context, Slice
 }
 
 Status JsonFunctions::native_json_path_prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope) {
-    // The fused fast path's mutable scratch (simdjson parser + buffers) lives in a per-OS-thread thread_local
-    // (see get_json_thread_state), NOT in FunctionContext THREAD_LOCAL state: pipeline operators share one
-    // ExprContext across drivers, so THREAD_LOCAL function state is not per-driver and a shared simdjson parser
+    // The mutable scratch of the extraction from text (simdjson parser + VPack builder) lives in a per-OS-thread
+    // thread_local (see get_json_thread_state), NOT in FunctionContext THREAD_LOCAL state: pipeline operators
+    // share one ExprContext across drivers, so THREAD_LOCAL function state is not per-driver and a shared parser
     // would be raced. Hence nothing to allocate at THREAD_LOCAL scope here.
     if (scope != FunctionContext::FRAGMENT_LOCAL) {
         return Status::OK();
@@ -650,19 +953,9 @@ Status JsonFunctions::native_json_path_prepare(FunctionContext* context, Functio
             return json_path.status();
         }
         state->json_path.reset(std::move(json_path.value()));
-
-        // Fused fast path is only valid for constant non-null paths. Plan moves now.
-        _plan_fast_moves(state->json_path, state);
+        state->simple_path = to_json_path_steps(state->json_path, &state->steps);
         VLOG(10) << "prepare json path: " << path_value;
-    } else {
-        // Variable / nullable path columns are routed to legacy at execute time.
-        state->fast_shape = JsonPathShape::Unsupported;
     }
-
-    // Session var is the single switch. When context->state() is null (no RuntimeState,
-    // e.g. unit tests built via FunctionContext::create_test_context), leave the fast path
-    // enabled — tests use set_json_fast_path_disabled_for_test() to flip it explicitly.
-    state->fast_path_disabled = context->state() != nullptr && !context->state()->enable_json_extract_fusion();
 
     context->set_function_state(scope, state);
     return Status::OK();
@@ -676,488 +969,144 @@ Status JsonFunctions::native_json_path_close(FunctionContext* context, FunctionC
     return Status::OK();
 }
 
-void set_json_fast_path_disabled_for_test(FunctionContext* ctx, bool disabled) {
-    auto* state = reinterpret_cast<NativeJsonState*>(ctx->get_function_state(FunctionContext::FRAGMENT_LOCAL));
-    if (state != nullptr) {
-        state->fast_path_disabled = disabled;
-    }
-}
-
-// =====================================================================================
-// Fused simdjson fast path for get_json_*(VARCHAR, VARCHAR).
-// =====================================================================================
-
-// Resolve one object field by UNESCAPED key, mirroring `.get()` semantics:
-// returns false on success (and assigns the field value to `out`), true on miss/error.
-//
-// simdjson's find_field_unordered compares the raw, still-escaped key token byte for
-// byte (raw_json_string::unsafe_is_equal -> memcmp), so a document key that carries a JSON
-// unicode/backslash escape never matches the already-unescaped path segment. The legacy
-// parse_json->VPack route compares unescaped keys, so we iterate the object and compare the unescaped key to stay
-// byte-identical. field_unescaped_key_safe returns the raw token view for the common
-// escape-free key (no copy) and only unescapes into `key_buf` when the key contains a
-// backslash, so escape-free payloads keep the fast path's cost.
-template <typename Container>
-static bool fused_resolve_field(Container&& container, std::string_view seg, faststring* key_buf,
-                                simdjson::ondemand::value& out) {
-    simdjson::ondemand::object obj;
-    if (container.get_object().get(obj)) {
-        return true; // not an object / parse error -> miss
-    }
-    for (auto field : obj) {
-        if (field.error()) {
-            return true;
-        }
-        auto key = field_unescaped_key_safe(field, key_buf);
-        if (key.error()) {
-            return true;
-        }
-        if (key.value() == seg) {
-            return field.value().get(out); // false == success
-        }
-    }
-    return true; // key absent
-}
-
-template <LogicalType ResultType>
-JsonFunctions::ExtractResult JsonFunctions::_fused_extract_one(const Slice& raw, const NativeJsonState* fs,
-                                                               JsonGetThreadState* ts, ColumnBuilder<ResultType>& out) {
-    // Bare scalars use parse_json_or_string semantics. Quoted root strings also need the
-    // fallback because ondemand::document cannot expose a scalar as ondemand::value.
-    if (UNLIKELY(raw.size > kJSONLengthLimit)) {
-        out.append_null();
-        return ExtractResult::Handled;
-    }
-    if (raw.empty()) {
-        return ExtractResult::FallbackRow;
-    }
-    auto ws_end = std::find_if_not(raw.data, raw.data + raw.size, [](unsigned char c) { return std::isspace(c); });
-    if (ws_end == raw.data + raw.size) {
-        return ExtractResult::FallbackRow;
-    }
-    char first = *ws_end;
-    if (first != '{' && first != '[') {
-        return ExtractResult::FallbackRow;
-    }
-
-    // Step 2: pad + iterate.
-    const size_t cap = raw.size + simdjson::SIMDJSON_PADDING;
-    ts->padded_scratch.resize(cap);
-    std::memcpy(ts->padded_scratch.data(), raw.data, raw.size);
-    std::memset(ts->padded_scratch.data() + raw.size, 0, simdjson::SIMDJSON_PADDING);
-
-    simdjson::ondemand::document doc;
-    if (ts->parser.iterate(ts->padded_scratch.data(), raw.size, cap).get(doc)) {
-        out.append_null();
-        return ExtractResult::Handled;
-    }
-
-    // Step 3: descend pre-planned moves. The first move is special because the document is
-    // not a value yet (find_field_unordered/get_array work directly on document_reference).
-    simdjson::ondemand::value cur;
-    if (fs->fast_moves.empty()) {
-        if (doc.get_value().get(cur)) {
-            out.append_null();
-            return ExtractResult::Handled;
-        }
-    } else {
-        const auto& m0 = fs->fast_moves[0];
-        if (m0.kind == JsonMoveStep::Kind::Field) {
-            if (fused_resolve_field(doc, m0.field, &ts->key_scratch, cur)) {
-                out.append_null();
-                return ExtractResult::Handled;
-            }
-        } else {
-            simdjson::ondemand::array arr;
-            if (doc.get_array().get(arr) || arr.at(m0.index).get(cur)) {
-                out.append_null();
-                return ExtractResult::Handled;
-            }
-        }
-        for (size_t i = 1; i < fs->fast_moves.size(); ++i) {
-            const auto& m = fs->fast_moves[i];
-            if (m.kind == JsonMoveStep::Kind::Field) {
-                if (fused_resolve_field(cur, m.field, &ts->key_scratch, cur)) {
-                    out.append_null();
-                    return ExtractResult::Handled;
-                }
-            } else {
-                simdjson::ondemand::array arr;
-                if (cur.get_array().get(arr) || arr.at(m.index).get(cur)) {
-                    out.append_null();
-                    return ExtractResult::Handled;
-                }
-            }
-        }
-    }
-
-    // Step 4: emit leaf.
-    if constexpr (ResultType == TYPE_VARCHAR) {
-        simdjson::ondemand::json_type t;
-        if (cur.type().get(t)) {
-            out.append_null();
-            return ExtractResult::Handled;
-        }
-        if (t == simdjson::ondemand::json_type::string) {
-            auto sv = value_get_string_safe(&cur, &ts->unescape_scratch);
-            if (sv.error()) {
-                out.append_null();
-                return ExtractResult::Handled;
-            }
-            out.append(Slice(sv.value())); // ColumnBuilder<TYPE_VARCHAR> copies into ColumnString
-            return ExtractResult::Handled;
-        }
-        // non-string leaf -> mini-VPack -> cast_vpjson_to (singleLinePrettyPrint)
-    }
-
-    ts->leaf_builder.clear();
-    auto st = convert_simdjson_to_vpack(cur, &ts->leaf_builder);
-    if (!st.ok()) {
-        out.append_null();
-        return ExtractResult::Handled;
-    }
-    auto cast_st = cast_vpjson_to<ResultType, false>(ts->leaf_builder.slice(), out);
-    (void)cast_st; // cast_vpjson_to appends NULL on its own errors (AllowThrowException=false)
-    return ExtractResult::Handled;
-}
-
-template <LogicalType ResultType>
-Status JsonFunctions::_fallback_extract_one(const Slice& raw, const NativeJsonState* fs, JsonGetThreadState* ts,
-                                            ColumnBuilder<ResultType>& out) {
-    // Single-row legacy path: parse_json_or_string + JsonPath::extract + cast_vpjson_to.
-    // Strict NULL discipline: any error appends NULL, never returns Status::error.
-    auto jv_or = JsonValue::parse_json_or_string(raw);
-    if (!jv_or.ok()) {
-        out.append_null();
-        return Status::OK();
-    }
-    JsonValue jv = std::move(jv_or.value());
-
-    ts->leaf_builder.clear();
-    vpack::Slice slice = JsonPath::extract(&jv, fs->json_path, &ts->leaf_builder);
-
-    auto cast_st = cast_vpjson_to<ResultType, false>(slice, out);
-    (void)cast_st;
-    return Status::OK();
-}
-
-template <LogicalType ResultType, typename Inputs>
-StatusOr<ColumnPtr> JsonFunctions::_fused_get_json_value(FunctionContext* context, const Inputs& columns,
-                                                         const NativeJsonState* fs, JsonGetThreadState* ts) {
-    FunctionColumnViewer<TYPE_VARCHAR, Inputs> json_v(columns[0]);
-    const int n = input_num_rows(columns);
-    ColumnBuilder<ResultType> out(n);
-
-    for (int row = 0; row < n; ++row) {
-        if (json_v.is_null(row)) {
-            out.append_null();
-            continue;
-        }
-        Slice raw = json_v.value(row);
-        switch (_fused_extract_one<ResultType>(raw, fs, ts, out)) {
-        case ExtractResult::Handled:
-            break;
-        case ExtractResult::FallbackRow:
-            (void)_fallback_extract_one<ResultType>(raw, fs, ts, out);
-            break;
-        case ExtractResult::FallbackBatch:
-            __builtin_unreachable(); // reserved for future; v4 never produces this
-        }
-    }
-    return out.build(input_columns_are_constant(columns));
-}
-
 template <LogicalType ResultType, typename Inputs>
 StatusOr<ColumnPtr> JsonFunctions::_get_json_value(FunctionContext* context, const Inputs& columns) {
     for (const auto& input : columns) {
         if (input_column(input)->only_null()) return ColumnHelper::create_const_null_column(input_num_rows(columns));
     }
 
-    auto* fstate = get_native_json_state(context);
-    auto* tstate = get_json_thread_state(context);
-
-    // ALLOW_THROW_EXCEPTION requires full-document validation. Ordinary extraction only
-    // validates values needed for the path and may ignore malformed unselected values.
-    const bool strict_mode = context != nullptr && context->allow_throw_exception();
-
-    const bool can_fast = !strict_mode && fstate != nullptr && tstate != nullptr && !fstate->fast_path_disabled &&
-                          fstate->fast_shape != JsonPathShape::Unsupported && context->is_notnull_constant_column(1) &&
-                          !input_column(columns[0])->only_null();
-
-    if (can_fast) {
-        return _fused_get_json_value<ResultType>(context, columns, fstate, tstate);
+    const auto* state = get_native_json_state(context);
+    if (state != nullptr && context->is_notnull_constant_column(1)) {
+        return extract_json_path<ResultType>(context, columns, *state);
     }
 
-    // Legacy: parse VARCHAR rows to JSON column, then run _full_json_query_impl.
+    // A path that is not constant is parsed on every row by _full_json_query_impl().
     ASSIGN_OR_RETURN(auto jsons, _string_json(context, columns));
     const auto& paths = columns[1];
     return _full_json_query_impl<ResultType>(context, Inputs{compact_input<Inputs>(jsons), paths});
 }
 
-namespace {
-
-struct JsonExtractNode {
-    std::unordered_map<std::string_view, size_t> fields;
-    std::unordered_map<size_t, size_t> indexes;
-    std::vector<size_t> outputs;
-};
-
-struct JsonMultiExtractState {
-    // Trie keys reference the immutable field strings owned by paths.
-    std::vector<std::unique_ptr<NativeJsonState>> paths;
-    std::vector<std::string> output_keys;
-    std::vector<JsonExtractNode> nodes{1};
-    std::vector<size_t> legacy_paths;
-};
-
-void append_json_selection(vpack::Slice value, const JsonMultiExtractState& state, size_t node_id,
-                           vpack::Builder* selected) {
-    if (value.isNone()) {
-        return;
-    }
-    const auto& node = state.nodes[node_id];
-    for (size_t output : node.outputs) {
-        selected->add(state.output_keys[output], value);
-    }
-    if (value.isObject()) {
-        for (const auto& [key, child] : node.fields) {
-            append_json_selection(value.get(vpack::StringRef(key.data(), key.size())), state, child, selected);
-        }
-    } else if (value.isArray()) {
-        for (const auto& [index, child] : node.indexes) {
-            if (index < value.length()) {
-                append_json_selection(value.at(index), state, child, selected);
-            }
-        }
-    }
-}
-
-// A terminal path consumes its entire value; descendants then read that same VPack value.
-// Other nodes visit each input field/array element at most once and skip unselected values.
-bool extract_json_selection(simdjson::ondemand::value value, const JsonMultiExtractState& state, size_t node_id,
-                            JsonGetThreadState* scratch, std::vector<uint8_t>* visited, vpack::Builder* selected) {
-    const auto& node = state.nodes[node_id];
-    if (!node.outputs.empty()) {
-        if (node.outputs.size() == 1 && node.fields.empty() && node.indexes.empty()) {
-            // Write a leaf directly to the result instead of building and copying a temporary value.
-            selected->add(vpack::Value(state.output_keys[node.outputs[0]]));
-            return convert_simdjson_to_vpack(value, selected).ok();
-        }
-        scratch->leaf_builder.clear();
-        if (!convert_simdjson_to_vpack(value, &scratch->leaf_builder).ok()) {
-            return false;
-        }
-        append_json_selection(scratch->leaf_builder.slice(), state, node_id, selected);
-        return true;
-    }
-    simdjson::ondemand::json_type type;
-    if (value.type().get(type)) {
-        return false;
-    }
-    if (type == simdjson::ondemand::json_type::object && !node.fields.empty()) {
-        simdjson::ondemand::object object;
-        if (value.get_object().get(object)) {
-            return false;
-        }
-        size_t remaining = node.fields.size();
-        for (auto field : object) {
-            if (field.error()) {
-                return false;
-            }
-            auto key = field_unescaped_key_safe(field, &scratch->key_scratch);
-            if (key.error()) {
-                return false;
-            }
-            auto it = node.fields.find(key.value());
-            if (it == node.fields.end() || (*visited)[it->second]) {
-                continue;
-            }
-            (*visited)[it->second] = 1; // Match the first occurrence of a duplicate key.
-            simdjson::ondemand::value child;
-            if (field.value().get(child) ||
-                !extract_json_selection(child, state, it->second, scratch, visited, selected)) {
-                return false;
-            }
-            if (--remaining == 0) {
-                break;
-            }
-        }
-    } else if (type == simdjson::ondemand::json_type::array && !node.indexes.empty()) {
-        simdjson::ondemand::array array;
-        if (value.get_array().get(array)) {
-            return false;
-        }
-        size_t index = 0;
-        size_t remaining = node.indexes.size();
-        for (auto element : array) {
-            if (element.error()) {
-                return false;
-            }
-            auto it = node.indexes.find(index++);
-            if (it == node.indexes.end()) {
-                continue;
-            }
-            simdjson::ondemand::value child;
-            if (element.get(child) || !extract_json_selection(child, state, it->second, scratch, visited, selected)) {
-                return false;
-            }
-            if (--remaining == 0) {
-                break;
-            }
-        }
-    }
-    return true;
-}
-
-} // namespace
-
-Status JsonFunctions::json_query_many_prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope) {
+Status JsonFunctions::json_extract_paths_prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope) {
     if (scope != FunctionContext::FRAGMENT_LOCAL) {
         return Status::OK();
     }
-    auto state = std::make_unique<JsonMultiExtractState>();
+    auto state = std::make_unique<JsonExtractPathsState>();
     for (int i = 1; i < context->get_num_constant_columns(); ++i) {
         if (!context->is_notnull_constant_column(i)) {
-            return Status::InvalidArgument("json_query_many_from_string requires constant non-null paths");
+            return Status::InvalidArgument("json_extract_paths requires constant non-null paths");
         }
-        auto path = std::make_unique<NativeJsonState>();
-        auto text = ColumnHelper::get_const_value<TYPE_VARCHAR>(context->get_constant_column(i));
-        ASSIGN_OR_RETURN(auto parsed, JsonPath::parse(text));
-        path->json_path.reset(std::move(parsed));
-        _plan_fast_moves(path->json_path, path.get());
-        size_t output = state->paths.size();
-        state->output_keys.emplace_back(std::to_string(output));
-        if (path->fast_shape == JsonPathShape::Unsupported) {
-            state->legacy_paths.push_back(output);
-        } else {
-            size_t node = 0;
-            for (const auto& move : path->fast_moves) {
-                size_t child;
-                bool inserted;
-                if (move.kind == JsonMoveStep::Kind::Field) {
-                    auto result = state->nodes[node].fields.emplace(move.field, state->nodes.size());
-                    child = result.first->second;
-                    inserted = result.second;
-                } else {
-                    auto result = state->nodes[node].indexes.emplace(move.index, state->nodes.size());
-                    child = result.first->second;
-                    inserted = result.second;
-                }
-                if (inserted) {
-                    state->nodes.emplace_back();
-                }
-                node = child;
-            }
-            state->nodes[node].outputs.push_back(output);
-        }
+        const Slice text = ColumnHelper::get_const_value<TYPE_VARCHAR>(context->get_constant_column(i));
+        ASSIGN_OR_RETURN(auto path, JsonPath::parse(text));
+        std::vector<JsonPathStep> steps;
+        state->simple &= to_json_path_steps(path, &steps);
         state->paths.emplace_back(std::move(path));
+        state->steps.emplace_back(std::move(steps));
+        state->keys.emplace_back(std::to_string(i - 1));
     }
     context->set_function_state(scope, state.release());
     return Status::OK();
 }
 
-Status JsonFunctions::json_query_many_close(FunctionContext* context, FunctionContext::FunctionStateScope scope) {
+Status JsonFunctions::json_extract_paths_close(FunctionContext* context, FunctionContext::FunctionStateScope scope) {
     if (scope == FunctionContext::FRAGMENT_LOCAL) {
-        delete static_cast<JsonMultiExtractState*>(context->get_function_state(scope));
+        delete static_cast<JsonExtractPathsState*>(context->get_function_state(scope));
     }
     return Status::OK();
 }
 
+// Each row gives NULL when parse_json(v) is NULL, otherwise an object with the member "i" for every path i
+// that has a value in parse_json(v). We expect several paths of one document, so the document is parsed
+// once for all of them; a row that simdjson cannot reproduce goes through VPack, as in extract_json_path().
 template <typename Inputs>
-StatusOr<ColumnPtr> JsonFunctions::json_query_many_from_string_impl(FunctionContext* context, const Inputs& columns) {
+StatusOr<ColumnPtr> JsonFunctions::json_extract_paths_impl(FunctionContext* context, const Inputs& columns) {
     const auto* state =
-            static_cast<const JsonMultiExtractState*>(context->get_function_state(FunctionContext::FRAGMENT_LOCAL));
-    if (state == nullptr || columns.size() < 2 || state->paths.size() + 1 != columns.size()) {
-        return Status::InvalidArgument("json_query_many_from_string requires prepared constant paths");
+            static_cast<const JsonExtractPathsState*>(context->get_function_state(FunctionContext::FRAGMENT_LOCAL));
+    if (state == nullptr || state->paths.size() + 1 != columns.size()) {
+        return Status::InvalidArgument("json_extract_paths requires prepared constant paths");
     }
-    const bool strict = context->allow_throw_exception();
-    const bool enabled = context->state() == nullptr || context->state()->enable_json_extract_fusion();
-    auto* scratch = get_json_thread_state(context);
-    FunctionColumnViewer<TYPE_VARCHAR, Inputs> input(columns[0]);
     const size_t num_rows = input_num_rows(columns);
-    const bool constant = input_columns_are_constant(columns) && num_rows > 0;
-    const size_t evaluated_rows = constant ? 1 : num_rows;
-    ColumnBuilder<TYPE_JSON> result(evaluated_rows);
-    vpack::Builder selected;
-    vpack::Builder legacy_scratch;
-    std::vector<uint8_t> visited(state->nodes.size());
-    for (size_t row = 0; row < evaluated_rows; ++row) {
-        if (input.is_null(row)) {
+    if (input_column(columns[0])->only_null()) {
+        return ColumnHelper::create_const_null_column(num_rows);
+    }
+    FunctionColumnViewer<TYPE_VARCHAR, Inputs> viewer(columns[0]);
+    const bool constant = num_rows > 0 && input_columns_are_constant(columns);
+    const size_t rows = constant ? 1 : num_rows;
+#ifdef BE_TEST
+    json_extract_paths_rows_for_test += rows;
+#endif
+    const bool strict = context->allow_throw_exception();
+    const size_t num_paths = state->paths.size();
+    JsonGetThreadState* scratch = get_json_thread_state();
+    vpack::Builder& builder = scratch->builder;
+    vpack::Builder extract_scratch;
+    ColumnBuilder<TYPE_JSON> result(rows);
+    simdjson::dom::element root;
+    std::vector<simdjson::dom::element> values(num_paths);
+    std::vector<uint8_t> found(num_paths);
+    for (size_t row = 0; row < rows; ++row) {
+        if (viewer.is_null(row)) {
             result.append_null();
             continue;
         }
-        Slice raw = input.value(row);
-        bool structured = false;
-        if (!raw.empty()) {
-            auto first =
-                    std::find_if_not(raw.data, raw.data + raw.size, [](unsigned char c) { return std::isspace(c); });
-            structured = first != raw.data + raw.size && (*first == '{' || *first == '[');
-        }
-        const bool legacy = strict || !enabled || !structured;
-        selected.clear();
-        selected.openObject();
-        bool success = true;
-        if (!legacy) {
-            if (raw.size > kJSONLengthLimit) {
-                result.append_null();
-                continue;
+        const Slice raw = viewer.value(row);
+        if (state->simple && parse_dom(raw, &scratch->parser, &root)) {
+            bool ambiguous = false;
+            for (size_t i = 0; i < num_paths && !ambiguous; ++i) {
+                const PathLookup lookup = lookup_json_path(root, state->steps[i], &values[i]);
+                found[i] = lookup == PathLookup::kFound;
+                ambiguous = lookup == PathLookup::kAmbiguous;
             }
-            const size_t capacity = raw.size + simdjson::SIMDJSON_PADDING;
-            scratch->padded_scratch.resize(capacity);
-            std::memcpy(scratch->padded_scratch.data(), raw.data, raw.size);
-            std::memset(scratch->padded_scratch.data() + raw.size, 0, simdjson::SIMDJSON_PADDING);
-            std::fill(visited.begin(), visited.end(), 0);
-            simdjson::ondemand::document document;
-            simdjson::ondemand::value root;
-            success = !scratch->parser.iterate(scratch->padded_scratch.data(), raw.size, capacity).get(document) &&
-                      !document.get_value().get(root) &&
-                      extract_json_selection(root, *state, 0, scratch, &visited, &selected);
-        }
-        if (legacy || !state->legacy_paths.empty()) {
-            auto parsed = JsonValue::parse_json_or_string(raw);
-            if (!parsed.ok() && strict) {
-                return parsed.status();
-            }
-            if (parsed.ok()) {
-                for (size_t i = 0; i < state->paths.size(); ++i) {
-                    if (!legacy && state->paths[i]->fast_shape != JsonPathShape::Unsupported) {
-                        continue;
+            if (!ambiguous) {
+                bool built = true;
+                try {
+                    builder.clear();
+                    builder.openObject();
+                    for (size_t i = 0; i < num_paths; ++i) {
+                        if (found[i]) {
+                            const std::string_view key = state->keys[i];
+                            add_dom_value(&key, values[i], &builder);
+                        }
                     }
-                    legacy_scratch.clear();
-                    auto value = JsonPath::extract(&parsed.value(), state->paths[i]->json_path, &legacy_scratch);
-                    if (!value.isNone()) {
-                        selected.add(state->output_keys[i], value);
-                    }
+                    builder.close();
+                } catch (const vpack::Exception&) {
+                    built = false;
+                }
+                if (built) {
+                    result.append(JsonValue(builder.slice()));
+                    continue;
                 }
             }
         }
-        if (!success) {
-            // A malformed selected value must not suppress other valid selections. Re-evaluate
-            // only this exceptional row with the existing independent extraction semantics.
-            selected.clear();
-            selected.openObject();
-            for (size_t i = 0; i < state->paths.size(); ++i) {
-                ColumnBuilder<TYPE_JSON> value(1);
-                if (state->paths[i]->fast_shape == JsonPathShape::Unsupported ||
-                    _fused_extract_one<TYPE_JSON>(raw, state->paths[i].get(), scratch, value) ==
-                            ExtractResult::FallbackRow) {
-                    RETURN_IF_ERROR(_fallback_extract_one<TYPE_JSON>(raw, state->paths[i].get(), scratch, value));
-                }
-                auto column = value.build(false);
-                if (!column->is_null(0)) {
-                    ColumnViewer<TYPE_JSON> viewer(column);
-                    selected.add(state->output_keys[i], viewer.value(0)->to_vslice());
-                }
+        auto json = JsonValue::parse_json_or_string(raw);
+        if (!json.ok()) {
+            if (strict) {
+                return json.status();
+            }
+            result.append_null();
+            continue;
+        }
+        builder.clear();
+        builder.openObject();
+        for (size_t i = 0; i < num_paths; ++i) {
+            extract_scratch.clear();
+            vpack::Slice value = JsonPath::extract(&json.value(), state->paths[i], &extract_scratch);
+            if (!value.isNone()) {
+                builder.add(state->keys[i], value);
             }
         }
-        selected.close();
-        result.append(JsonValue(selected.slice()));
+        builder.close();
+        result.append(JsonValue(builder.slice()));
     }
-    auto column = result.build(constant);
-    if (constant) {
-        column->resize(num_rows);
-    }
-    return column;
+    return build_extracted_column(&result, constant, num_rows);
+}
+
+StatusOr<ColumnPtr> JsonFunctions::json_extract_paths(FunctionContext* context, const Columns& columns) {
+    return json_extract_paths_impl(context, columns);
+}
+
+StatusOr<ColumnPtr> JsonFunctions::json_extract_paths_selected(FunctionContext* context, const SelectedColumns& columns,
+                                                               size_t) {
+    return json_extract_paths_impl(context, columns);
 }
 
 template <typename Inputs>
@@ -2627,15 +2576,6 @@ StatusOr<ColumnPtr> JsonFunctions::json_set_selected(FunctionContext* context, c
 
 StatusOr<ColumnPtr> JsonFunctions::get_json_bool_selected(FunctionContext* context, const SelectedColumns& columns, size_t) {
     return _get_json_value<TYPE_BOOLEAN>(context, columns);
-}
-StatusOr<ColumnPtr> JsonFunctions::json_query_from_string_selected(FunctionContext* context, const SelectedColumns& columns, size_t) {
-    return _get_json_value<TYPE_JSON>(context, columns);
-}
-StatusOr<ColumnPtr> JsonFunctions::json_query_many_from_string_selected(FunctionContext* context, const SelectedColumns& columns, size_t) {
-    return json_query_many_from_string_impl(context, columns);
-}
-StatusOr<ColumnPtr> JsonFunctions::json_query_many_from_string(FunctionContext* context, const Columns& columns) {
-    return json_query_many_from_string_impl(context, columns);
 }
 
 } // namespace starrocks

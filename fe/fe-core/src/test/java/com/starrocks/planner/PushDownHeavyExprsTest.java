@@ -136,6 +136,7 @@ public class PushDownHeavyExprsTest {
                 "        0\n" +
                 "    ) = 1;";
         String plan = UtFrameUtils.getFragmentPlan(ctx, q);
+        // The scan computes regexp_replace(), and the project does not compute the extraction that only it reads.
         Assertions.assertTrue(plan.contains("1:Project\n" +
                 "  |  <slot 8> : CASE WHEN (((5: field_varchar_2 = 'VALUE_ALPHA') AND " +
                 "(coalesce(nullif(nullif(6: field_varchar_3, ''), '0'), '') NOT IN ('', '0'))) AND " +
@@ -145,7 +146,6 @@ public class PushDownHeavyExprsTest {
                 "(12: regexp_replace LIKE '%pattern_match_2%') THEN 11: get_json_object ELSE '0' END\n" +
                 "  |  common expressions:\n" +
                 "  |  <slot 9> : get_json_object(7: field_text_1, '$.key_json_1')\n" +
-                "  |  <slot 10> : get_json_object(7: field_text_1, '$.key_json_2')\n" +
                 "  |  <slot 11> : get_json_object(7: field_text_1, '$.key_json_3')\n" +
                 "  |  \n" +
                 "  0:OlapScanNode\n" +

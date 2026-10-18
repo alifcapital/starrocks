@@ -42,6 +42,7 @@
 #include "common/global_types.h"
 #include "common/status.h"
 #include "exec/pipeline/pipeline_fwd.h"
+#include "exprs/expr_context.h"
 #include "exprs/runtime_filter_bank.h"
 #include "gen_cpp/PlanNodes_types.h"
 #include "runtime/descriptors.h"
@@ -165,8 +166,10 @@ public:
     // then running filter on chunk.
     static Status eval_conjuncts(const std::vector<ExprContext*>& ctxs, Chunk* chunk, FilterPtr* filter_ptr = nullptr,
                                  bool apply_filter = true);
+    // Clears in `filter` the rows that a conjunct rejects. The conjuncts share `cache`, which the caller passes
+    // when more conjuncts of the same unchanged chunk follow; without it the call keeps its own.
     static StatusOr<size_t> eval_conjuncts_into_filter(const std::vector<ExprContext*>& ctxs, Chunk* chunk,
-                                                       Filter* filter);
+                                                       Filter* filter, ExprContext::ConjunctEvalCache* cache = nullptr);
 
     static void eval_filter_null_values(Chunk* chunk, const std::vector<SlotId>& filter_null_value_columns);
 

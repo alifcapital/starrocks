@@ -312,12 +312,11 @@ TEST_F(SelectedCollectionFunctionsTest, HyperscanCrossRowMatchCannotHideValidMat
 }
 
 
-TEST_F(SelectedCollectionFunctionsTest, FusedJsonAndMultiFieldSelection) {
+TEST_F(SelectedCollectionFunctionsTest, JsonExtractionFromTextSelection) {
     // Row 2 is deliberately malformed and is never selected by compare(). Strict mode
     // must validate selected documents without touching this unrelated row.
     for (bool strict : {false, true}) {
         TQueryOptions options;
-        options.__set_enable_json_extract_fusion(true);
         options.__set_allow_throw_exception(strict);
         RuntimeState runtime(TUniqueId(), options, TQueryGlobals(), nullptr);
         std::unique_ptr<FunctionContext> ctx(FunctionContext::create_test_context());
@@ -327,15 +326,15 @@ TEST_F(SelectedCollectionFunctionsTest, FusedJsonAndMultiFieldSelection) {
         ctx->set_constant_columns(inputs);
         ASSERT_TRUE(JsonFunctions::native_json_path_prepare(ctx.get(), FunctionContext::FRAGMENT_LOCAL).ok());
         ASSERT_TRUE(JsonFunctions::native_json_path_prepare(ctx.get(), FunctionContext::THREAD_LOCAL).ok());
-        compare(ctx.get(), JsonFunctions::json_query_from_string, JsonFunctions::json_query_from_string_selected, inputs);
+        compare(ctx.get(), JsonFunctions::get_json_string, JsonFunctions::get_json_string_selected, inputs);
+        compare(ctx.get(), JsonFunctions::get_json_bool, JsonFunctions::get_json_bool_selected, inputs);
         ASSERT_TRUE(JsonFunctions::native_json_path_close(ctx.get(), FunctionContext::THREAD_LOCAL).ok());
         ASSERT_TRUE(JsonFunctions::native_json_path_close(ctx.get(), FunctionContext::FRAGMENT_LOCAL).ok());
         inputs.emplace_back(ColumnHelper::create_const_column<TYPE_VARCHAR>(Slice("$.b"), 5));
         ctx->set_constant_columns(inputs);
-        ASSERT_TRUE(JsonFunctions::json_query_many_prepare(ctx.get(), FunctionContext::FRAGMENT_LOCAL).ok());
-        compare(ctx.get(), JsonFunctions::json_query_many_from_string,
-                JsonFunctions::json_query_many_from_string_selected, inputs);
-        ASSERT_TRUE(JsonFunctions::json_query_many_close(ctx.get(), FunctionContext::FRAGMENT_LOCAL).ok());
+        ASSERT_TRUE(JsonFunctions::json_extract_paths_prepare(ctx.get(), FunctionContext::FRAGMENT_LOCAL).ok());
+        compare(ctx.get(), JsonFunctions::json_extract_paths, JsonFunctions::json_extract_paths_selected, inputs);
+        ASSERT_TRUE(JsonFunctions::json_extract_paths_close(ctx.get(), FunctionContext::FRAGMENT_LOCAL).ok());
     }
 }
 

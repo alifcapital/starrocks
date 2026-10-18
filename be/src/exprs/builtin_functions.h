@@ -48,9 +48,14 @@ struct FunctionDescriptor {
     const char* return_type;
     std::vector<const char*> arg_types;
 
+    // Conjuncts evaluated on one chunk share the result of a call with the same constant arguments over the
+    // same input column (see ExprContext::ConjunctEvalCache). Requires a selected kernel.
+    bool conjunct_shared = false;
+
     FunctionDescriptor(std::string nm, uint8_t args, ScalarFunction sf, PrepareFunction pf, CloseFunction cf,
                        bool exception_safe_, bool check_overflow_, const char* in_return_type = nullptr,
-                       std::vector<const char*> in_arg_types = {}, SelectedScalarFunction selected = nullptr)
+                       std::vector<const char*> in_arg_types = {}, SelectedScalarFunction selected = nullptr,
+                       bool conjunct_shared_ = false)
             : name(std::move(nm)),
               args_nums(args),
               scalar_function(std::move(sf)),
@@ -60,11 +65,12 @@ struct FunctionDescriptor {
               exception_safe(exception_safe_),
               check_overflow(check_overflow_),
               return_type(in_return_type),
-              arg_types(std::move(in_arg_types)) {}
+              arg_types(std::move(in_arg_types)),
+              conjunct_shared(conjunct_shared_) {}
 
     FunctionDescriptor(std::string nm, uint8_t args, ScalarFunction sf, bool exception_safe_, bool check_overflow_,
                        const char* in_return_type = nullptr, std::vector<const char*> in_arg_types = {},
-                       SelectedScalarFunction selected = nullptr)
+                       SelectedScalarFunction selected = nullptr, bool conjunct_shared_ = false)
             : name(std::move(nm)),
               args_nums(args),
               scalar_function(std::move(sf)),
@@ -74,7 +80,8 @@ struct FunctionDescriptor {
               exception_safe(exception_safe_),
               check_overflow(check_overflow_),
               return_type(in_return_type),
-              arg_types(std::move(in_arg_types)) {}
+              arg_types(std::move(in_arg_types)),
+              conjunct_shared(conjunct_shared_) {}
 };
 
 class BuiltinFunctions {

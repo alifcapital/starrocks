@@ -85,19 +85,12 @@ StatusOr<size_t> eval_conjuncts_on_kept_rows(const std::vector<ExprContext*>& ct
     }
     rows.resize(num_rows);
 
+    ExprContext::ConjunctEvalCache cache;
     for (auto* ctx : ctxs) {
         if (rows.empty()) {
             return 0;
         }
-        auto evaluate = [&]() -> StatusOr<ColumnPtr> {
-            // Same error conversion as ExprContext::evaluate().
-            try {
-                return ctx->root()->evaluate_selected(ctx, chunk, rows);
-            } catch (std::runtime_error& e) {
-                return Status::RuntimeError(fmt::format("Expr evaluate meet error: {}", e.what()));
-            }
-        };
-        ASSIGN_OR_RETURN(ColumnPtr result, evaluate());
+        ASSIGN_OR_RETURN(ColumnPtr result, ctx->evaluate_selected_with_conjunct_cache(chunk, rows, &cache));
         RETURN_IF_ERROR(and_selected_result_into_filter(result, &rows, filter));
     }
     return rows.size();

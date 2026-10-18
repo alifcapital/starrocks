@@ -689,13 +689,10 @@ FROM test;
 * **类型**：Boolean
 * **说明**：对 CASE、IF、IFNULL 和 COALESCE 中符合条件的高开销值表达式，仅计算实际需要该分支的行。此优化减少表达式计算，不会推迟从存储读取输入列，也不依赖全局延迟物化。高开销函数通过固定列表识别，尚未根据选择率或成本自动选择；如果大部分行都需要该分支，启用后可能更慢。符合条件的 CASE 使用此执行方式而非 CASE JIT。未选中的值分支不会执行，因此也不会产生其表达式求值错误。默认关闭。
 
-### enable_json_extract_fusion
+### enable_json_path_rewrite
 
-* **说明**：为使用常量路径的 VARCHAR JSON 启用快速提取。默认值为 `true`。`SET` 修改当前会话，`SET GLOBAL` 设置新会话的默认值。优化器还可以合并 `json_query(parse_json(value), path)` 和箭头表达式。CAST 保留目标类型及错误处理规则。
-
-  当 `sql_mode` 包含 `ALLOW_THROW_EXCEPTION` 时，提取会校验整个文档并报告 JSON 解析错误。未启用该模式时，快速路径读取指定值，不保证检测路径之外的无效值；提取过程中遇到的错误返回 NULL。通配符、切片和非常量路径使用完整解析器。设置为 `false` 可同时关闭优化器合并和快速提取，恢复完整文档解析。
-
-  同步 Stream Load 和 Routine Load 不会将此会话变量传递给 BE，因此这些路径仍禁用快速提取。
+* **描述**：优化器是否改写从 VARCHAR 或 CHAR 列中存储的 JSON 提取常量路径的表达式。改写覆盖基于文本、`parse_json(text)` 和 `CAST(text AS JSON)` 的 `get_json_string`、`get_json_object`、`get_json_int`、`get_json_double`、`get_json_bool`，以及基于 `parse_json(text)` 和 `CAST(text AS JSON)` 且带路径的 `json_query`（包括 `->`）、`json_exists` 和 `json_length`。同一投影或同一谓词中基于同一文本的调用共用一个 `json_extract_paths(text, path1, path2, ...)` 调用，因此每个文档只解析一次。改写不会改变任何结果：每种形式都返回基于 `parse_json(text)` 的同一函数的值，包括格式错误的文档以及 `sql_mode` 包含 `ALLOW_THROW_EXCEPTION` 的情况。启用 `ALLOW_THROW_EXCEPTION` 时，`CAST(text AS JSON)` 不会被改写，因为其错误信息不同。包含通配符或切片的路径以及非常量路径不会被改写。
+* **默认值**：true
 
 ### enable_insert_strict
 

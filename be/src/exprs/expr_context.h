@@ -36,6 +36,8 @@
 
 #include <atomic>
 #include <memory>
+#include <string>
+#include <vector>
 
 #include "column/vectorized_fwd.h"
 #include "common/status.h"
@@ -117,15 +119,48 @@ public:
 
     std::string get_error_msg() const;
 
-    // Reuses the last VARCHAR -> DATETIME cast while conjuncts inspect an unchanged chunk.
-    // Own the input as well as the result, so a temporary column's address cannot be reused.
-    struct DatetimeCastCache {
-        ColumnPtr input;
-        ColumnPtr result;
-        bool allow_throw_exception = false;
+    // Results that the conjuncts of one unchanged chunk share. The caller keeps it for one pass of the
+    // conjuncts over a chunk and clears it when the chunk changes. Every entry owns its input column as well
+    // as its result, so a temporary column's address cannot be reused while the entry lives.
+    struct ConjunctEvalCache {
+        // Reuses the last VARCHAR -> DATETIME cast while conjuncts inspect an unchanged chunk.
+        struct DatetimeCast {
+            ColumnPtr input;
+            ColumnPtr result;
+            bool allow_throw_exception = false;
+        };
+        // The result of a conjunct_shared function over one input column. `fingerprint` names the function
+        // and its constant arguments. Row i of `result` holds the value of input row i when computed[i] is 1.
+        struct SharedResult {
+            std::string fingerprint;
+            ColumnPtr input;
+            size_t input_size = 0;
+            ColumnPtr result;
+            std::vector<uint8_t> computed;
+        };
+
+        DatetimeCast datetime_cast;
+        std::vector<SharedResult> shared_results;
+
+        void clear() {
+            datetime_cast = {};
+            shared_results.clear();
+        }
     };
-    StatusOr<ColumnPtr> evaluate_with_cast_cache(Chunk* chunk, uint8_t* filter, DatetimeCastCache* cache);
-    DatetimeCastCache* datetime_cast_cache() const { return _datetime_cast_cache; }
+    // Evaluates the root on the chunk, as evaluate() does, with `cache` shared by the conjuncts of the chunk.
+    StatusOr<ColumnPtr> evaluate_with_conjunct_cache(Chunk* chunk, uint8_t* filter, ConjunctEvalCache* cache);
+    // Evaluates the root on `rows` of the chunk with `cache` shared by the conjuncts of the chunk, and turns an
+    // exception of the expression into an error status as evaluate() does.
+    StatusOr<ColumnPtr> evaluate_selected_with_conjunct_cache(Chunk* chunk, const std::vector<uint32_t>& rows,
+                                                              ConjunctEvalCache* cache);
+    // Pipeline drivers share one ExprContext, and several of them evaluate it at the same time, so the cache is
+    // not a member of the context: the two calls above install it for the OS thread that evaluates, and restore
+    // the previous one when they return. A driver runs a chunk to the end on one thread.
+    // The cache of the conjunct that this thread evaluates with `context`, or nullptr. An expression evaluated
+    // with another context on the same thread gets nullptr.
+    static ConjunctEvalCache* conjunct_eval_cache(const ExprContext* context);
+    // The VARCHAR -> DATETIME entry of that cache, given only to a comparison of a slot cast with a constant.
+    static ConjunctEvalCache::DatetimeCast* datetime_cast_cache(const ExprContext* context);
 
     StatusOr<ColumnPtr> evaluate(Chunk* chunk, uint8_t* filter = nullptr);
     StatusOr<ColumnPtr> evaluate(Expr* expr, Chunk* chunk, uint8_t* filter = nullptr);
@@ -156,7 +191,6 @@ private:
     /// Pool backing fn_contexts_. Counts against the runtime state's UDF mem tracker.
     std::unique_ptr<MemPool> _pool;
 
-    DatetimeCastCache* _datetime_cast_cache = nullptr;
     RuntimeState* _runtime_state = nullptr;
     /// The expr tree this context is for.
     Expr* _root;

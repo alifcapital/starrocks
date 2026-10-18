@@ -15,181 +15,301 @@
 #include <benchmark/benchmark.h>
 #include <glog/logging.h>
 
+#include <memory>
 #include <random>
 #include <string>
 #include <vector>
 
 #include "column/binary_column.h"
+#include "column/chunk.h"
 #include "column/column_helper.h"
 #include "column/const_column.h"
 #include "column/vectorized_fwd.h"
+#include "common/object_pool.h"
 #include "common/statusor.h"
+#include "exec/exec_node.h"
+#include "exprs/binary_predicate.h"
+#include "exprs/column_ref.h"
+#include "exprs/expr.h"
+#include "exprs/expr_context.h"
+#include "exprs/function_call_expr.h"
 #include "exprs/function_context.h"
 #include "exprs/json_functions.h"
+#include "exprs/literal.h"
+#include "runtime/runtime_state.h"
+#include "simd/simd.h"
 #include "types/logical_type.h"
 
 namespace starrocks {
 
 namespace {
 
-// Build a JSON document of approximately `target_bytes`, with the `target` field
-// nested `depth` levels deep. `position` controls whether the target field appears
-// near the start (Early), middle (Middle), or end (Late) of each object.
-enum class FieldPosition { Early, Middle, Late };
+constexpr size_t kChunkRows = 4096;
 
-// Generate a noise field entry suitable for prepending or appending inside an object.
-// Returns: `"noise_<id>":"lorem ipsum..."` (no separator).
-std::string noise_field(int id) {
-    return std::string("\"noise_") + std::to_string(id) +
-           R"(":"lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor")";
-}
+const std::vector<std::string> kPaths{"$.data.operation.pos.terminal.type", "$.data.operation.merchant.terminal.id",
+                                      "$.data.operation.reference.ids.rrn"};
 
-std::string build_payload(int depth, size_t target_bytes, FieldPosition pos) {
-    // Decide how many noise fields to insert per level, on the head side (before the target
-    // descent) and on the tail side (after the target descent).
-    const size_t per_level = target_bytes / static_cast<size_t>(depth + 1);
-    const size_t one_field_size = noise_field(0).size() + 1; // +1 for comma separator
-    size_t heads_n = 0;
-    size_t tails_n = 0;
-    switch (pos) {
-    case FieldPosition::Early:
-        // target near the start: noise lives AFTER (tails)
-        tails_n = per_level / one_field_size;
-        break;
-    case FieldPosition::Late:
-        // target near the end: noise lives BEFORE (heads)
-        heads_n = per_level / one_field_size;
-        break;
-    case FieldPosition::Middle:
-        // split noise evenly across both sides
-        heads_n = per_level / (2 * one_field_size);
-        tails_n = per_level / (2 * one_field_size);
-        break;
-    }
-
-    int field_id = 0;
-    std::string out = "{";
-    for (int i = 0; i < depth; ++i) {
-        for (size_t k = 0; k < heads_n; ++k) {
-            out += noise_field(field_id++);
-            out += ",";
+// A document shaped like solar_operations.original_payload, about 7.6 KB. `selected` decides whether the
+// first path holds "ATM".
+std::string payload(std::mt19937_64& random, bool selected) {
+    auto uuid = [&random]() {
+        static const char* hex = "0123456789abcdef";
+        std::string s;
+        for (int i = 0; i < 32; ++i) {
+            if (i == 8 || i == 12 || i == 16 || i == 20) s += '-';
+            s += hex[random() % 16];
         }
-        out += "\"l" + std::to_string(i) + "\":{";
+        return s;
+    };
+    std::string s = "{\"id\":\"" + uuid() +
+                    "\",\"meta\":{\"source\":\"solar\",\"version\":3,\"created\":\"2026-10-14T12:00:00.000+05:00\"},";
+    s += "\"items\":[";
+    for (int i = 0; i < 38; ++i) {
+        s += (i ? "," : "");
+        s += "{\"k\":" + std::to_string(i) + ",\"name\":\"\\u041e\\u043f\\u043b\\u0430\\u0442\\u0430 \\\"" +
+             std::to_string(random() % 1000) + "\\\"\",\"amount\":" + std::to_string(random() % 100000) + "." +
+             std::to_string(random() % 100) + ",\"u\":\"" + uuid() + "\",\"flags\":[true,false,null],\"note\":\"" +
+             std::string(40 + random() % 40, 'x') + "\"}";
     }
-    out += "\"target\":\"hello-world-target-string\"";
-    for (int i = depth - 1; i >= 0; --i) {
-        for (size_t k = 0; k < tails_n; ++k) {
-            out += ",";
-            out += noise_field(field_id++);
-        }
-        out += "}";
-    }
-    out += "}";
-    return out;
+    s += "],\"data\":{\"operation\":{";
+    s += "\"pos\":{\"terminal\":{\"type\":\"" + std::string(selected ? "ATM" : "POS") +
+         "\",\"mode\":" + std::to_string(random() % 100) + "}},";
+    s += "\"merchant\":{\"terminal\":{\"id\":\"A0400" + std::to_string(random() % 1000) + "\",\"mcc\":5411}},";
+    s += "\"reference\":{\"ids\":{\"rrn\":\"" + std::to_string(random()) +
+         "\",\"stan\":" + std::to_string(random() % 1000000) + "}}";
+    s += "}}}";
+    return s;
 }
 
-std::string build_path(int depth) {
-    std::string p = "$";
-    for (int i = 0; i < depth; ++i) {
-        p += ".l" + std::to_string(i);
+// A chunk of documents in which every `one_in`-th document holds "ATM" on the first path.
+ColumnPtr documents(int one_in) {
+    std::mt19937_64 random(42);
+    auto column = BinaryColumn::create();
+    for (size_t row = 0; row < kChunkRows; ++row) {
+        column->append(payload(random, row % one_in == 0));
     }
-    p += ".target";
-    return p;
+    return column;
 }
 
-class JsonExtractBench {
+ColumnPtr const_text(const std::string& value) {
+    auto data = BinaryColumn::create();
+    data->append(value);
+    return ConstColumn::create(std::move(data), kChunkRows);
+}
+
+using Kernel = StatusOr<ColumnPtr> (*)(FunctionContext*, const Columns&);
+using StateFn = Status (*)(FunctionContext*, FunctionContext::FunctionStateScope);
+
+// One call of a function with its prepared state.
+class Call {
 public:
-    JsonExtractBench(int depth, size_t bytes, FieldPosition pos, int rows, bool fast_path)
-            : _depth(depth), _bytes(bytes), _pos(pos), _rows(rows), _fast_path(fast_path) {}
-
-    void setup() {
-        std::string payload = build_payload(_depth, _bytes, _pos);
-        std::string path = build_path(_depth);
-
-        auto json_col = BinaryColumn::create();
-        for (int r = 0; r < _rows; ++r) {
-            json_col->append(payload);
-        }
-        auto path_col_data = BinaryColumn::create();
-        path_col_data->append(path);
-
-        _columns.clear();
-        _columns.emplace_back(json_col);
-        _columns.emplace_back(ConstColumn::create(path_col_data, _rows));
-
-        _ctx.reset(FunctionContext::create_test_context());
+    Call(Kernel kernel, StateFn prepare, StateFn close, Columns columns)
+            : _kernel(kernel),
+              _close(close),
+              _columns(std::move(columns)),
+              _ctx(FunctionContext::create_test_context()) {
         _ctx->set_constant_columns(_columns);
-
-        CHECK(JsonFunctions::native_json_path_prepare(_ctx.get(), FunctionContext::FunctionStateScope::FRAGMENT_LOCAL)
-                      .ok());
-        CHECK(JsonFunctions::native_json_path_prepare(_ctx.get(), FunctionContext::FunctionStateScope::THREAD_LOCAL)
-                      .ok());
-        set_json_fast_path_disabled_for_test(_ctx.get(), !_fast_path);
+        if (prepare != nullptr) {
+            CHECK(prepare(_ctx.get(), FunctionContext::FRAGMENT_LOCAL).ok());
+        }
     }
-
-    void teardown() {
-        CHECK(JsonFunctions::native_json_path_close(_ctx.get(), FunctionContext::FunctionStateScope::THREAD_LOCAL)
-                      .ok());
-        CHECK(JsonFunctions::native_json_path_close(_ctx.get(), FunctionContext::FunctionStateScope::FRAGMENT_LOCAL)
-                      .ok());
+    ~Call() {
+        if (_close != nullptr) {
+            CHECK(_close(_ctx.get(), FunctionContext::FRAGMENT_LOCAL).ok());
+        }
     }
-
-    void run_one() {
-        auto result = JsonFunctions::get_json_string(_ctx.get(), _columns).value();
-        benchmark::DoNotOptimize(result);
+    ColumnPtr run(const ColumnPtr& input) {
+        _columns[0] = input;
+        return _kernel(_ctx.get(), _columns).value();
     }
 
 private:
-    int _depth;
-    size_t _bytes;
-    FieldPosition _pos;
-    int _rows;
-    bool _fast_path;
+    Kernel _kernel;
+    StateFn _close;
     Columns _columns;
     std::unique_ptr<FunctionContext> _ctx;
 };
 
-void run_bench(benchmark::State& state, bool fast_path) {
-    const int depth = state.range(0);
-    const size_t bytes = state.range(1);
-    const int rows = state.range(2);
-    const FieldPosition pos = static_cast<FieldPosition>(state.range(3));
+void finish(benchmark::State& state, const ColumnPtr& docs) {
+    state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(kChunkRows));
+    state.SetBytesProcessed(state.iterations() * static_cast<int64_t>(docs->byte_size()));
+}
 
-    JsonExtractBench bench(depth, bytes, pos, rows, fast_path);
-    bench.setup();
-
+// parse_json(v) followed by get_json_string over JSON: the reference semantics.
+void BM_vpack_reference(benchmark::State& state) {
+    const ColumnPtr docs = documents(1);
+    Call get(JsonFunctions::get_native_json_string, JsonFunctions::native_json_path_prepare,
+             JsonFunctions::native_json_path_close, {nullptr, const_text(kPaths[0])});
+    std::unique_ptr<FunctionContext> parse_ctx(FunctionContext::create_test_context());
     for (auto _ : state) {
-        bench.run_one();
+        ColumnPtr json = JsonFunctions::parse_json(parse_ctx.get(), {docs}).value();
+        benchmark::DoNotOptimize(get.run(json));
     }
-    state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(rows));
-    state.SetBytesProcessed(state.iterations() * static_cast<int64_t>(rows) * static_cast<int64_t>(bytes));
-
-    bench.teardown();
+    finish(state, docs);
 }
 
-void BM_legacy(benchmark::State& s) {
-    run_bench(s, /*fast=*/false);
-}
-void BM_fast(benchmark::State& s) {
-    run_bench(s, /*fast=*/true);
+void BM_extract_one_path(benchmark::State& state) {
+    const ColumnPtr docs = documents(1);
+    Call get(JsonFunctions::get_json_string, JsonFunctions::native_json_path_prepare,
+             JsonFunctions::native_json_path_close, {nullptr, const_text(kPaths[0])});
+    for (auto _ : state) {
+        benchmark::DoNotOptimize(get.run(docs));
+    }
+    finish(state, docs);
 }
 
-// Args: {depth, payload_bytes, rows, position(0=Early,1=Middle,2=Late)}
-BENCHMARK(BM_legacy)
-        ->Args({4, 1024, 4096, 0})
-        ->Args({4, 1024, 4096, 2})
-        ->Args({4, 10240, 4096, 0})
-        ->Args({4, 10240, 4096, 2})
-        ->Args({8, 10240, 4096, 2})
-        ->Args({4, 102400, 256, 2});
+void BM_extract_three_paths(benchmark::State& state) {
+    const ColumnPtr docs = documents(1);
+    Call extract(JsonFunctions::json_extract_paths, JsonFunctions::json_extract_paths_prepare,
+                 JsonFunctions::json_extract_paths_close,
+                 {nullptr, const_text(kPaths[0]), const_text(kPaths[1]), const_text(kPaths[2])});
+    for (auto _ : state) {
+        benchmark::DoNotOptimize(extract.run(docs));
+    }
+    finish(state, docs);
+}
 
-BENCHMARK(BM_fast)
-        ->Args({4, 1024, 4096, 0})
-        ->Args({4, 1024, 4096, 2})
-        ->Args({4, 10240, 4096, 0})
-        ->Args({4, 10240, 4096, 2})
-        ->Args({8, 10240, 4096, 2})
-        ->Args({4, 102400, 256, 2});
+// Conjuncts of a scan over one JSON column: X0 = 'ATM', X1 != '' and X2 != ''. Grouped, Xi is
+// get_json_string(E, '$.i') and every conjunct has its own E = json_extract_paths(v, p0, p1, p2); otherwise Xi is
+// get_json_string(v, pi).
+class Conjuncts {
+public:
+    static constexpr SlotId kSlot = 1;
+
+    Conjuncts(size_t count, bool grouped) {
+        auto value = [&](int i) {
+            return grouped ? get_json_string(extract(), ("$." + std::to_string(i)).c_str(), kJsonGetJsonString)
+                           : get_json_string(column(), kPaths[i].c_str(), kTextGetJsonString);
+        };
+        std::vector<Expr*> roots{compare(TExprOpcode::EQ, value(0), text("ATM")),
+                                 compare(TExprOpcode::NE, value(1), text("")),
+                                 compare(TExprOpcode::NE, value(2), text(""))};
+        roots.resize(count);
+        for (auto* root : roots) {
+            auto* context = _pool.add(new ExprContext(root));
+            CHECK(context->prepare(&_state).ok());
+            CHECK(context->open(&_state).ok());
+            _contexts.push_back(context);
+        }
+    }
+    ~Conjuncts() {
+        for (auto* context : _contexts) {
+            context->close(&_state);
+        }
+    }
+
+    size_t with_cache(Chunk* chunk) {
+        Filter filter(chunk->num_rows(), 1);
+        return ExecNode::eval_conjuncts_into_filter(_contexts, chunk, &filter).value();
+    }
+
+    // Every conjunct computes its expression on the whole chunk, as the column expression predicates of the
+    // storage layer do.
+    size_t without_cache(Chunk* chunk) {
+        Filter filter(chunk->num_rows(), 1);
+        for (auto* context : _contexts) {
+            ColumnHelper::merge_two_filters(context->evaluate(chunk).value(), &filter);
+        }
+        return SIMD::count_nonzero(filter);
+    }
+
+private:
+    static constexpr int64_t kTextGetJsonString = 110002;
+    static constexpr int64_t kJsonGetJsonString = 110014;
+
+    static TypeDescriptor varchar_type() { return TypeDescriptor::create_varchar_type(1 << 20); }
+
+    Expr* column() { return _pool.add(new ColumnRef(varchar_type(), kSlot)); }
+
+    Expr* text(const std::string& value) {
+        return _pool.add(new VectorizedLiteral(ColumnHelper::create_const_column<TYPE_VARCHAR>(Slice(value), 1),
+                                               varchar_type()));
+    }
+
+    Expr* call(const char* name, int64_t fid, const TypeDescriptor& result_type, const std::vector<Expr*>& args) {
+        TFunction fn;
+        TFunctionName fn_name;
+        fn_name.__set_function_name(name);
+        fn.__set_name(fn_name);
+        fn.__set_binary_type(TFunctionBinaryType::BUILTIN);
+        fn.__set_fid(fid);
+        fn.__set_has_var_args(false);
+        std::vector<TTypeDesc> arg_types;
+        for (const auto* arg : args) {
+            arg_types.push_back(arg->type().to_thrift());
+        }
+        fn.__set_arg_types(arg_types);
+        fn.__set_ret_type(result_type.to_thrift());
+        TExprNode node;
+        node.__set_node_type(TExprNodeType::FUNCTION_CALL);
+        node.__set_num_children(args.size());
+        node.__set_is_nullable(true);
+        node.__set_type(result_type.to_thrift());
+        node.__set_fn(fn);
+        auto* expr = _pool.add(new VectorizedFunctionCallExpr(node));
+        for (auto* arg : args) {
+            expr->add_child(arg);
+        }
+        return expr;
+    }
+
+    Expr* extract() {
+        std::vector<Expr*> args{column()};
+        for (const auto& path : kPaths) {
+            args.push_back(text(path));
+        }
+        return call("json_extract_paths", 1100108, TypeDescriptor::create_json_type(), args);
+    }
+
+    Expr* get_json_string(Expr* document, const char* path, int64_t fid) {
+        return call("get_json_string", fid, varchar_type(), {document, text(path)});
+    }
+
+    Expr* compare(TExprOpcode::type opcode, Expr* left, Expr* right) {
+        TExprNode node;
+        node.__set_node_type(TExprNodeType::BINARY_PRED);
+        node.__set_opcode(opcode);
+        node.__set_num_children(2);
+        node.__set_is_nullable(true);
+        node.__set_type(TypeDescriptor(TYPE_BOOLEAN).to_thrift());
+        node.__set_child_type_desc(varchar_type().to_thrift());
+        Expr* predicate = _pool.add(VectorizedBinaryPredicateFactory::from_thrift(node));
+        predicate->add_child(left);
+        predicate->add_child(right);
+        return predicate;
+    }
+
+    RuntimeState _state;
+    ObjectPool _pool;
+    std::vector<ExprContext*> _contexts;
+};
+
+// Args: {number of conjuncts, every n-th row holds "ATM", 1 = with the cache, 1 = grouped}
+void BM_conjuncts(benchmark::State& state) {
+    const ColumnPtr docs = documents(state.range(1));
+    Chunk chunk;
+    chunk.append_column(docs, Conjuncts::kSlot);
+    Conjuncts conjuncts(state.range(0), state.range(3) != 0);
+    const bool cache = state.range(2) != 0;
+    for (auto _ : state) {
+        benchmark::DoNotOptimize(cache ? conjuncts.with_cache(&chunk) : conjuncts.without_cache(&chunk));
+    }
+    finish(state, docs);
+}
+
+BENCHMARK(BM_vpack_reference)->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_extract_one_path)->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_extract_three_paths)->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_conjuncts)
+        ->Unit(benchmark::kMillisecond)
+        ->Args({1, 1, 1, 1})
+        ->Args({3, 1, 1, 1})
+        ->Args({3, 1, 0, 1})
+        ->Args({3, 1, 0, 0})
+        ->Args({1, 33, 1, 1})
+        ->Args({3, 33, 1, 1})
+        ->Args({3, 33, 0, 1})
+        ->Args({3, 33, 0, 0});
 
 } // namespace
 

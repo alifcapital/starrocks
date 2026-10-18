@@ -802,13 +802,10 @@ Default value: `true`, which means global RF is enabled. If this feature is disa
 * **Type**: Boolean
 * **Description**: Evaluates eligible expensive value expressions in CASE, IF, IFNULL, and COALESCE only for the rows that need them. This saves expression computation but does not defer reading their input columns from storage. Requires no global late materialization. Expensive expressions are classified by a fixed function list, not a selectivity or cost estimate; enabling it may slow queries where most rows need the expensive branch. A qualifying CASE uses this evaluation path instead of CASE JIT. Functions in unselected value branches are not evaluated and therefore do not raise their evaluation errors. Disabled by default.
 
-### enable_json_extract_fusion
+### enable_json_path_rewrite
 
-* **Description**: Enables fast extraction from VARCHAR JSON for constant paths. Default: `true`. `SET` changes the current session; `SET GLOBAL` sets the default for new sessions. The optimizer can also fuse `json_query(parse_json(value), path)` and arrow expressions. Casts retain their target type and error handling.
-
-  With `sql_mode` containing `ALLOW_THROW_EXCEPTION`, extraction validates the entire document and reports JSON parse errors. Without that mode, the fast path reads the requested value and does not guarantee detection of malformed values outside the path. Errors encountered during extraction return NULL. Wildcards, slices, and nonconstant paths use the full parser. Set this variable to `false` to disable both optimizer fusion and fast extraction and restore full-document parsing.
-
-  Sync stream load and routine load do not propagate this session variable to the backend; fast extraction remains disabled for those paths.
+* **Description**: Whether the optimizer rewrites the extraction of constant paths from JSON stored in VARCHAR or CHAR columns. The rewrite covers `get_json_string`, `get_json_object`, `get_json_int`, `get_json_double` and `get_json_bool` over the text, over `parse_json(text)` and over `CAST(text AS JSON)`, and `json_query` (including `->`), `json_exists` and `json_length` with a path over `parse_json(text)` and `CAST(text AS JSON)`. Calls over the same text in one projection or in one predicate use one `json_extract_paths(text, path1, path2, ...)` call, so each document is parsed once. The rewrite does not change any result: every form returns the value of the same function over `parse_json(text)`, including for malformed documents and with `ALLOW_THROW_EXCEPTION` in `sql_mode`. With `ALLOW_THROW_EXCEPTION`, `CAST(text AS JSON)` is not rewritten because its error message differs. Paths with wildcards or slices and paths that are not constants are not rewritten.
+* **Default**: true
 
 ### enable_insert_strict
 
