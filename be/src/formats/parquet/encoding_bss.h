@@ -21,6 +21,7 @@
 #include "common/status.h"
 #include "formats/parquet/encoding.h"
 #include "formats/parquet/types.h"
+#include "formats/parquet/utils.h"
 #include "util/bit_util.h"
 #include "util/byte_stream_split.h"
 #include "util/faststring.h"
@@ -119,13 +120,24 @@ public:
 
     std::string to_string() const override { return fmt::format("ByteStreamSplitDecoder<{}>", typeid(T).name()); }
 
-    void set_type_length(int byte_width) override {
+    Status set_type_length(int32_t byte_width) override {
         if constexpr (IS_FLBA) {
+            if (UNLIKELY(!ParquetUtils::is_valid_flba_type_length(byte_width))) {
+                byte_width_ = 0;
+                return Status::Corruption(
+                        fmt::format("Invalid type length {} of FIXED_LEN_BYTE_ARRAY, expect a value in [1, {}]",
+                                    byte_width, ParquetUtils::MAX_FLBA_TYPE_LENGTH));
+            }
             byte_width_ = byte_width;
         }
+        return Status::OK();
     }
 
     Status set_data(const Slice& data) override {
+        // We divide by the byte width below, so we stop if a FLBA page comes before a valid type length.
+        if (UNLIKELY(byte_width_ <= 0)) {
+            return Status::Corruption("ByteStreamSplit byte width is not set");
+        }
         len_ = data.size;
         data_ = (uint8_t*)data.data;
         if ((len_ % byte_width_) != 0) {
@@ -197,7 +209,7 @@ private:
     Status Decode(T* buffer, int max_values) {
         max_values = std::min(max_values, num_valid_values_);
         if constexpr (IS_FLBA) {
-            int64_t decode_buffer_size = max_values * byte_width_;
+            int64_t decode_buffer_size = static_cast<int64_t>(max_values) * byte_width_;
             // note(yanz): don't use reveser here because in ASAN mode this region will marked as poisoned.
             decode_buffer_.resize(decode_buffer_size);
             ByteStreamSplitUtil::ByteStreamSplitDecode(data_, byte_width_, max_values, stride_, decode_buffer_.data());

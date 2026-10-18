@@ -15,10 +15,12 @@
 #include <gtest/gtest.h>
 
 #include <iostream>
+#include <limits>
 #include <utility>
 #include <vector>
 
 #include "formats/parquet/schema.h"
+#include "formats/parquet/utils.h"
 
 namespace starrocks::parquet {
 
@@ -1027,6 +1029,69 @@ TEST_F(ParquetSchemaTest, DuplicateFieldNames) {
     SchemaDescriptor desc;
     auto st = desc.from_thrift(t_schemas, true);
     ASSERT_FALSE(st.ok()) << st.message();
+}
+
+static std::vector<SchemaElement> make_type_length_schemas(Type::type type, int32_t type_length) {
+    std::vector<SchemaElement> t_schemas;
+    t_schemas.emplace_back(GroupNode::make_root(1));
+    auto leaf = PrimitiveNode::make("type_length_col", FieldRepetitionType::OPTIONAL, type);
+    leaf.__set_type_length(type_length);
+    t_schemas.emplace_back(std::move(leaf));
+    return t_schemas;
+}
+
+TEST_F(ParquetSchemaTest, FixedLenByteArrayTypeLength) {
+    for (int32_t type_length : {1, 16, ParquetUtils::MAX_FLBA_TYPE_LENGTH}) {
+        SchemaDescriptor desc;
+        auto st = desc.from_thrift(make_type_length_schemas(Type::FIXED_LEN_BYTE_ARRAY, type_length), true);
+        ASSERT_TRUE(st.ok()) << type_length << " " << st.message();
+        ASSERT_EQ(type_length, desc.get_stored_column_by_field_idx(0)->type_length);
+    }
+}
+
+// A corrupt footer must not reach the decoders with a type length that makes them compute a wrapped size.
+TEST_F(ParquetSchemaTest, FixedLenByteArrayInvalidTypeLength) {
+    for (int32_t type_length : {0, -1, -4, std::numeric_limits<int32_t>::min(), ParquetUtils::MAX_FLBA_TYPE_LENGTH + 1,
+                                std::numeric_limits<int32_t>::max()}) {
+        SchemaDescriptor desc;
+        auto st = desc.from_thrift(make_type_length_schemas(Type::FIXED_LEN_BYTE_ARRAY, type_length), true);
+        ASSERT_TRUE(st.is_corruption()) << type_length << " " << st.to_string();
+        ASSERT_NE(std::string::npos, st.message().find("type_length_col")) << st.message();
+    }
+}
+
+TEST_F(ParquetSchemaTest, FixedLenByteArrayTypeLengthNotSet) {
+    std::vector<SchemaElement> t_schemas;
+    t_schemas.emplace_back(GroupNode::make_root(1));
+    t_schemas.emplace_back(
+            PrimitiveNode::make("type_length_col", FieldRepetitionType::OPTIONAL, Type::FIXED_LEN_BYTE_ARRAY));
+
+    SchemaDescriptor desc;
+    auto st = desc.from_thrift(t_schemas, true);
+    ASSERT_TRUE(st.is_corruption()) << st.to_string();
+}
+
+TEST_F(ParquetSchemaTest, FixedLenByteArrayInvalidTypeLengthInNestedField) {
+    std::vector<SchemaElement> t_schemas;
+    t_schemas.emplace_back(GroupNode::make_root(1));
+    t_schemas.emplace_back(GroupNode::make("struct_col", FieldRepetitionType::OPTIONAL, 1));
+    auto leaf = PrimitiveNode::make("nested_flba", FieldRepetitionType::OPTIONAL, Type::FIXED_LEN_BYTE_ARRAY);
+    leaf.__set_type_length(0);
+    t_schemas.emplace_back(std::move(leaf));
+
+    SchemaDescriptor desc;
+    auto st = desc.from_thrift(t_schemas, true);
+    ASSERT_TRUE(st.is_corruption()) << st.to_string();
+    ASSERT_NE(std::string::npos, st.message().find("nested_flba")) << st.message();
+}
+
+// Only a FIXED_LEN_BYTE_ARRAY column uses the type length, so the other types ignore whatever the footer holds.
+TEST_F(ParquetSchemaTest, TypeLengthIgnoredForOtherTypes) {
+    for (auto type : {Type::INT32, Type::INT64, Type::BYTE_ARRAY}) {
+        SchemaDescriptor desc;
+        auto st = desc.from_thrift(make_type_length_schemas(type, -1), true);
+        ASSERT_TRUE(st.ok()) << st.message();
+    }
 }
 
 // The UT logic is copied from https://github.com/apache/arrow/blob/main/cpp/src/parquet/arrow/arrow_schema_test.cc

@@ -33,6 +33,27 @@
 
 namespace starrocks::parquet {
 
+// The least number of bytes that one PLAIN-encoded value of the type takes, or 0 when we do not know it.
+static size_t min_plain_value_size(tparquet::Type::type type, int32_t type_length) {
+    switch (type) {
+    case tparquet::Type::INT32:
+    case tparquet::Type::FLOAT:
+        return 4;
+    case tparquet::Type::INT64:
+    case tparquet::Type::DOUBLE:
+        return 8;
+    case tparquet::Type::INT96:
+        return 12;
+    case tparquet::Type::BYTE_ARRAY:
+        // the length prefix
+        return 4;
+    case tparquet::Type::FIXED_LEN_BYTE_ARRAY:
+        return type_length > 0 ? type_length : 0;
+    default:
+        return 0;
+    }
+}
+
 ColumnChunkReader::ColumnChunkReader(level_t max_def_level, level_t max_rep_level, int32_t type_length,
                                      const tparquet::ColumnChunk* column_chunk, const ColumnReaderOptions& opts)
         : _max_def_level(max_def_level),
@@ -201,7 +222,7 @@ Status ColumnChunkReader::_parse_data_page(tparquet::PageType::type page_type) {
         _decoders[static_cast<int>(encoding)] = std::move(decoder);
     }
 
-    _cur_decoder->set_type_length(_type_length);
+    RETURN_IF_ERROR(_cur_decoder->set_type_length(_type_length));
     RETURN_IF_ERROR(_cur_decoder->set_data(data));
 
     _page_parse_state = PAGE_DATA_PARSED;
@@ -232,14 +253,33 @@ Status ColumnChunkReader::_parse_dict_page() {
     const EncodingInfo* code_info = nullptr;
     RETURN_IF_ERROR(EncodingInfo::get(metadata().type, dict_encoding, &code_info));
     RETURN_IF_ERROR(code_info->create_decoder(&dict_decoder));
+    // The dictionary page declares its own encoding, and a decoder such as byte stream split divides
+    // by the type length in set_data, so we set the type length before the data.
+    RETURN_IF_ERROR(dict_decoder->set_type_length(_type_length));
     RETURN_IF_ERROR(dict_decoder->set_data(data));
-    dict_decoder->set_type_length(_type_length);
+
+    // The number of values comes from the page header. We expect the page to hold that many values, and a
+    // corrupt header breaks that, so we stop before the dictionary is sized from the number. A PLAIN value
+    // takes a known minimum of bytes, which gives the most values that the page can hold.
+    const int32_t num_dict_values = header.dictionary_page_header.num_values;
+    if (num_dict_values < 0) {
+        return Status::Corruption(strings::Substitute("Parquet dictionary page declares $0 values, file: $1",
+                                                      num_dict_values, _opts.file->filename()));
+    }
+    if (dict_encoding == tparquet::Encoding::PLAIN) {
+        const size_t min_value_size = min_plain_value_size(metadata().type, _type_length);
+        if (min_value_size > 0 && static_cast<size_t>(num_dict_values) > data.size / min_value_size) {
+            return Status::Corruption(
+                    strings::Substitute("Parquet dictionary page declares $0 values but holds only $1 bytes, file: $2",
+                                        num_dict_values, data.size, _opts.file->filename()));
+        }
+    }
 
     // initialize decoder
     std::unique_ptr<Decoder> decoder;
     RETURN_IF_ERROR(EncodingInfo::get(metadata().type, tparquet::Encoding::RLE_DICTIONARY, &code_info));
     RETURN_IF_ERROR(code_info->create_decoder(&decoder));
-    RETURN_IF_ERROR(decoder->set_dict(_chunk_size, header.dictionary_page_header.num_values, dict_decoder.get()));
+    RETURN_IF_ERROR(decoder->set_dict(_chunk_size, num_dict_values, dict_decoder.get()));
 
     int rle_encoding = static_cast<int>(tparquet::Encoding::RLE_DICTIONARY);
     _decoders[rle_encoding] = std::move(decoder);
@@ -255,9 +295,14 @@ Status ColumnChunkReader::_try_load_dictionary() {
         return Status::OK();
     }
 
+    // We expect the chunk to start with the dictionary page, because the callers ask for the dictionary of a chunk
+    // that is dictionary encoded. If the first page is a data page, reading its header has moved the reader past it,
+    // and the pages that we read next would miss it, so we return an error and do not go on.
     RETURN_IF_ERROR(_parse_page_header());
-    if (!current_page_is_dict()) {
-        return Status::OK();
+    if (UNLIKELY(!current_page_is_dict())) {
+        return Status::Corruption(
+                strings::Substitute("The column chunk has no dictionary page, but its dictionary is needed, file: $0",
+                                    _opts.file->filename()));
     }
 
     RETURN_IF_ERROR(_parse_dict_page());

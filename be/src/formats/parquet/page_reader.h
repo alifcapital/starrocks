@@ -83,6 +83,9 @@ private:
                                                                   : _cur_header.uncompressed_page_size;
     }
 
+    // Checks the sizes and counts of the page header that was just parsed.
+    Status _validate_header() const;
+
     void _init_page_cache_key();
     std::string& _current_page_cache_key();
     Status _deal_page_with_cache();

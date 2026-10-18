@@ -27,6 +27,7 @@
 #include "formats/parquet/encoding_plain.h"
 #include "formats/parquet/schema.h"
 #include "gutil/casts.h"
+#include "gutil/strings/substitute.h"
 #include "runtime/types.h"
 #include "simd/simd.h"
 #include "storage/column_predicate.h"
@@ -134,6 +135,15 @@ Status StatisticsHelper::decode_value_into_column(const MutableColumnPtr& column
                     ret &= src_column->append_nulls(1);
                 } else {
                     RETURN_IF_ERROR(PlainDecoder<Slice>::decode(values[i], &decode_value));
+                    // The converter walks the bytes of the column with a stride of the type length, so every
+                    // value must have exactly that length. A statistic that does not would shift the values
+                    // after it and give a wrong min or max, which prunes row groups that have matching rows.
+                    if (field->physical_type == tparquet::Type::type::FIXED_LEN_BYTE_ARRAY &&
+                        decode_value.size != static_cast<size_t>(field->type_length)) {
+                        return Status::Corruption(strings::Substitute(
+                                "A FIXED_LEN_BYTE_ARRAY statistic value of $0 bytes differs from the type length $1",
+                                decode_value.size, field->type_length));
+                    }
                     ret &= src_column->append_strings(std::vector<Slice>{decode_value});
                 }
             }

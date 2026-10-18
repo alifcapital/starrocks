@@ -3766,7 +3766,11 @@ TEST_F(FileReaderTest, TestMapKeyIsStruct) {
     auto ctx = _create_file_random_read_context(filename, slot_descs);
     Status status = file_reader->init(ctx);
     ASSERT_FALSE(status.ok());
-    ASSERT_EQ("Map keys must be primitive type.", status.message());
+    // The footer parser adds the file to the error of the schema, so the message starts with the schema error and
+    // names the file.
+    const std::string message(status.message());
+    ASSERT_TRUE(message.starts_with("Map keys must be primitive type.")) << message;
+    ASSERT_NE(std::string::npos, message.find("map_key_is_struct.parquet")) << message;
 }
 
 TEST_F(FileReaderTest, TestInFilterStatitics) {

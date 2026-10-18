@@ -127,6 +127,12 @@ public:
             if (decoded_num < count) {
                 return Status::InternalError("didn't get enough data from dict-decoder");
             }
+            // The consumers of the codes index the dictionary with them, so we reject a code that the
+            // dictionary does not have here, where all the codes of the batch are real values.
+            if (UNLIKELY(indices_out_of_bounds(reinterpret_cast<const uint32_t*>(data), count,
+                                               _get_num_dict_values()))) {
+                return Status::Corruption("Dictionary code not in dictionary bounds");
+            }
             break;
         }
         case VALUE: {
@@ -210,6 +216,10 @@ public:
         if (decoded_num < read_count) {
             return Status::InternalError("didn't get enough data from dict-decoder");
         }
+        // only the codes of the non-NULL rows are in _indexes here, the slots of the NULL rows are not set
+        if (UNLIKELY(indices_out_of_bounds(_indexes.data(), read_count, _get_num_dict_values()))) {
+            return Status::Corruption("Dictionary code not in dictionary bounds");
+        }
 
         assign_data_with_nulls(count, read_count, null_infos.nulls_data(), reinterpret_cast<int32_t*>(_indexes.data()),
                                data);
@@ -218,7 +228,12 @@ public:
     }
 
 protected:
+    // The number of dictionary values that set_dict asks the decoder of the dictionary page for at a time.
+    static constexpr size_t kDictDecodeStep = 1 << 16;
+
     virtual size_t _get_dict_size() const = 0;
+    // The number of values of the dictionary, where _get_dict_size is its size in bytes.
+    virtual size_t _get_num_dict_values() const = 0;
     virtual Status _next_batch_value(size_t count, Column* dst, const FilterData* filter) = 0;
     virtual Status _do_next_batch_with_nulls(size_t count, const NullInfos& null_infos, ColumnContentType content_type,
                                              Column* dst, const FilterData* filter) = 0;
@@ -240,9 +255,17 @@ public:
 
     // initialize dictionary
     Status set_dict(int chunk_size, size_t num_values, Decoder* decoder) override {
-        _dict.resize(num_values);
         _indexes.resize(chunk_size);
-        RETURN_IF_ERROR(decoder->next_batch(num_values, (uint8_t*)&_dict[0]));
+        // num_values comes from the page header, and a corrupt header can claim far more values than the
+        // page holds. We want the memory we allocate to follow the values that the decoder returns, so we
+        // fill the dictionary in steps, and the decoder fails on the first step that the page cannot serve.
+        _dict.clear();
+        for (size_t done = 0; done < num_values;) {
+            const size_t step = std::min(kDictDecodeStep, num_values - done);
+            _dict.resize(done + step);
+            RETURN_IF_ERROR(decoder->next_batch(step, reinterpret_cast<uint8_t*>(_dict.data() + done)));
+            done += step;
+        }
         return Status::OK();
     }
 
@@ -363,6 +386,7 @@ public:
 
 private:
     size_t _get_dict_size() const override { return _dict.size() * SIZE_OF_TYPE; }
+    size_t _get_num_dict_values() const override { return _dict.size(); }
 
     Status _next_batch_value(size_t count, Column* dst, const FilterData* filter) override {
         FixedLengthColumn<T>* data_column /* = nullptr */;
@@ -469,28 +493,47 @@ public:
     std::string to_string() const override { return fmt::format("DictDecoder<Slice>"); }
 
     Status set_dict(int chunk_size, size_t num_values, Decoder* decoder) override {
-        auto slices_data = std::make_unique_for_overwrite<uint8_t[]>(num_values * sizeof(Slice));
-        Slice* slices = reinterpret_cast<Slice*>(slices_data.get());
-        RETURN_IF_ERROR(decoder->next_batch(num_values, (uint8_t*)slices));
+        // num_values comes from the page header, and a corrupt header can claim far more values than the
+        // page holds. We want the memory we allocate to follow the values that the decoder returns, so we
+        // take the values in steps, copy each step into _dict_data, and let the decoder fail on the first
+        // step that the page cannot serve.
+        std::vector<Slice> step_slices;
+        std::vector<size_t> lengths;
+        _dict_data.clear();
+        _max_value_length = 0;
+        for (size_t done = 0; done < num_values;) {
+            const size_t step = std::min(kDictDecodeStep, num_values - done);
+            step_slices.resize(step);
+            RETURN_IF_ERROR(decoder->next_batch(step, reinterpret_cast<uint8_t*>(step_slices.data())));
 
-        size_t total_length = 0;
-        for (int i = 0; i < num_values; ++i) {
-            total_length += slices[i].size;
+            size_t step_length = 0;
+            for (const Slice& slice : step_slices) {
+                step_length += slice.size;
+            }
+            size_t offset = _dict_data.size();
+            raw::stl_vector_resize_uninitialized(&_dict_data, offset + step_length);
+            for (const Slice& slice : step_slices) {
+                if (slice.size > 0) {
+                    memcpy(&_dict_data[offset], slice.data, slice.size);
+                }
+                offset += slice.size;
+                lengths.push_back(slice.size);
+                _max_value_length = std::max(_max_value_length, slice.size);
+            }
+            done += step;
         }
 
-        _dict.resize(num_values);
-
         // reserve enough memory to use append_strings_overflow
+        const size_t total_length = _dict_data.size();
         raw::stl_vector_resize_uninitialized(&_dict_data, total_length + Column::APPEND_OVERFLOW_MAX_SIZE);
 
+        // _dict_data does not move any more, so the values can point into it
+        _dict.resize(num_values);
         size_t offset = 0;
-        _max_value_length = 0;
-        for (int i = 0; i < num_values; ++i) {
-            memcpy(&_dict_data[offset], slices[i].data, slices[i].size);
+        for (size_t i = 0; i < num_values; ++i) {
             _dict[i].data = reinterpret_cast<char*>(&_dict_data[offset]);
-            _dict[i].size = slices[i].size;
-            offset += slices[i].size;
-            _max_value_length = std::max(_max_value_length, slices[i].size);
+            _dict[i].size = lengths[i];
+            offset += lengths[i];
         }
 
         return Status::OK();
@@ -519,22 +562,37 @@ public:
         }
 
         // dict codes size and column size HAVE TO BE EXACTLY SAME.
+        if (UNLIKELY(dict_codes.size() != null_data.size())) {
+            return Status::InternalError("The number of dictionary codes differs from the number of rows");
+        }
         FixedSliceArray slices;
         slices.resize(dict_codes.size());
+        const size_t dict_size = _dict.size();
         if (!has_null) {
+            if (UNLIKELY(indices_out_of_bounds(reinterpret_cast<const uint32_t*>(dict_codes.data()),
+                                               static_cast<int32_t>(dict_codes.size()), dict_size))) {
+                return Status::Corruption("Dictionary code not in dictionary bounds");
+            }
             for (size_t i = 0; i < dict_codes.size(); i++) {
                 slices[i] = _dict[dict_codes[i]];
             }
-        } else if (!all_null) {
-            size_t size = dict_codes.size();
+        } else {
+            // A NULL row has no dictionary code: the slot of the code is not set. We want it to hold no
+            // byte in the column, as a NULL row does when the values are read directly, because a consumer
+            // such as the decimal converter walks the bytes of a fixed-width column with a stride and
+            // counts only the rows that are not NULL. So a NULL row gets an empty value, and only the codes
+            // of the rows that are not NULL are looked up.
+            const Slice empty_value(reinterpret_cast<const char*>(_dict_data.data()), 0);
             const uint8_t* null_data_ptr = null_data.data();
-            for (size_t i = 0; i < size; i++) {
-                // if null, we assign dict code 0(there should be at least one value?)
-                // null = 0, mask = 0xffffffff
-                // null = 1, mask = 0x00000000
-                uint32_t mask = ~(static_cast<uint32_t>(-null_data_ptr[i]));
-                int32_t code = mask & dict_codes[i];
-                slices[i] = _dict[code];
+            for (size_t i = 0; i < dict_codes.size(); i++) {
+                if (null_data_ptr[i]) {
+                    slices[i] = empty_value;
+                    continue;
+                }
+                if (UNLIKELY(static_cast<uint32_t>(dict_codes[i]) >= dict_size)) {
+                    return Status::Corruption("Dictionary code not in dictionary bounds");
+                }
+                slices[i] = _dict[dict_codes[i]];
             }
         }
 
@@ -572,6 +630,7 @@ public:
 
 private:
     size_t _get_dict_size() const override { return _dict_data.size(); }
+    size_t _get_num_dict_values() const override { return _dict.size(); }
 
     Status _do_next_batch_with_nulls(size_t count, const NullInfos& null_infos, ColumnContentType content_type,
                                      Column* dst, const FilterData* filter) override {

@@ -326,7 +326,7 @@ private:
     StatusOr<CompoundScanResult> _scan_with_compound_predicate(const CompoundScanCase& scan_case);
 
     RandomAccessFile* _create_file();
-    tparquet::ColumnChunk* _create_t_column_chunk(const std::string& file_path);
+    tparquet::ColumnChunk* _create_t_column_chunk(const std::string& file_path, tparquet::Type::type type);
     tparquet::RowGroup* _create_t_row_group(GroupReaderParam* param);
     tparquet::FileMetaData* _create_t_filemeta(GroupReaderParam* param);
     tparquet::SchemaElement* _create_root_schema_element(GroupReaderParam* param);
@@ -434,11 +434,13 @@ RandomAccessFile* GroupReaderTest::_create_file() {
     return _pool.add(new RandomAccessFile(std::make_shared<MockInputStream>(), "mock-random-access-file"));
 }
 
-tparquet::ColumnChunk* GroupReaderTest::_create_t_column_chunk(const std::string& file_path) {
+tparquet::ColumnChunk* GroupReaderTest::_create_t_column_chunk(const std::string& file_path,
+                                                               tparquet::Type::type type) {
     auto* column = _pool.add(new tparquet::ColumnChunk());
 
     column->__set_file_path(file_path);
     column->file_offset = 0;
+    column->meta_data.type = type;
     column->meta_data.data_page_offset = 4;
 
     return column;
@@ -448,7 +450,7 @@ tparquet::RowGroup* GroupReaderTest::_create_t_row_group(GroupReaderParam* param
     // create column chunks
     std::vector<tparquet::ColumnChunk> cols;
     for (size_t i = 0; i < param->read_cols.size(); i++) {
-        auto* col = _create_t_column_chunk("c" + std::to_string(i));
+        auto* col = _create_t_column_chunk("c" + std::to_string(i), param->read_cols[i].type_in_parquet);
         cols.emplace_back(*col);
     }
 
@@ -1300,6 +1302,8 @@ static tparquet::FileMetaData build_t_filemeta_with_iceberg_columns(ObjectPool* 
             tparquet::ColumnChunk col;
             col.__set_file_path("c" + std::to_string(i));
             col.file_offset = 0;
+            // the reserved columns are INT64
+            col.meta_data.type = i < num_read_cols ? param->read_cols[i].type_in_parquet : tparquet::Type::INT64;
             col.meta_data.data_page_offset = 4;
             cols.push_back(col);
         }

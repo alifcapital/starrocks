@@ -27,6 +27,7 @@
 #include "common/config.h"
 #include "formats/parquet/encoding_dict.h"
 #include "formats/parquet/types.h"
+#include "formats/parquet/utils.h"
 #include "util/byte_stream_split.h"
 
 namespace starrocks::parquet {
@@ -841,7 +842,7 @@ TEST_F(ParquetEncodingTest, FixedString) {
         st = encoder->append(reinterpret_cast<uint8_t*>(&slices[0]), 100);
         ASSERT_TRUE(st.ok()) << st.to_string();
 
-        decoder->set_type_length(3);
+        ASSERT_TRUE(decoder->set_type_length(3).ok());
         DecoderChecker<Slice, false>::check(slices, encoder->build(), decoder.get());
     }
     const EncodingInfo* dict_encoding = nullptr;
@@ -877,7 +878,7 @@ TEST_F(ParquetEncodingTest, FixedString) {
 
         st = dict_decoder->set_data(dict_encoder->build());
         ASSERT_TRUE(st.ok()) << st.to_string();
-        dict_decoder->set_type_length(3);
+        ASSERT_TRUE(dict_decoder->set_type_length(3).ok());
 
         st = decoder->set_dict(config::vector_chunk_size, num_dicts, dict_decoder.get());
         ASSERT_TRUE(st.ok()) << st.to_string();
@@ -1060,7 +1061,7 @@ TEST_F(ParquetEncodingTest, DeltaLengthByteArrayFixedSizeString) {
         Status st = Status::OK();
         std::unique_ptr<Decoder> decoder;
         st = encoding->create_decoder(&decoder);
-        decoder->set_type_length(4);
+        ASSERT_TRUE(decoder->set_type_length(4).ok());
         ASSERT_TRUE(st.ok()) << st.to_string();
 
         std::unique_ptr<Encoder> encoder;
@@ -1207,7 +1208,7 @@ TEST_F(ParquetEncodingTest, DeltaByteArrayFixedSizeString) {
     {
         std::unique_ptr<Decoder> decoder;
         auto st = encoding->create_decoder(&decoder);
-        decoder->set_type_length(4);
+        ASSERT_TRUE(decoder->set_type_length(4).ok());
         ASSERT_TRUE(st.ok()) << st.to_string();
 
         std::unique_ptr<Encoder> encoder;
@@ -1433,7 +1434,7 @@ TEST_F(ParquetEncodingTest, ByteStreamSplitFLBA) {
             std::unique_ptr<Decoder> decoder;
             st = encoding->create_decoder(&decoder);
             ASSERT_TRUE(st.ok()) << st.to_string();
-            decoder->set_type_length(byte_width);
+            ASSERT_TRUE(decoder->set_type_length(byte_width).ok());
 
             // real all.
             st = decoder->set_data(encoded_data);
@@ -1452,7 +1453,7 @@ TEST_F(ParquetEncodingTest, ByteStreamSplitFLBA) {
             st = encoding->create_decoder(&decoder);
             ASSERT_TRUE(st.ok()) << st.to_string();
 
-            decoder->set_type_length(byte_width);
+            ASSERT_TRUE(decoder->set_type_length(byte_width).ok());
 
             std::unique_ptr<Encoder> encoder;
             st = encoding->create_encoder(&encoder);
@@ -1926,6 +1927,371 @@ TEST_F(ParquetEncodingTest, PlainByteArrayWithNullsAndFilterTruncatedPage) {
                                                    filter.data());
         ASSERT_FALSE(st.ok()) << "truncated_size=" << truncated_size;
     }
+}
+
+namespace {
+
+struct RawPlainPage {
+    std::string name;
+    std::string bytes;
+    bool valid;
+};
+
+void append_le32(std::string* page, uint32_t value) {
+    for (int i = 0; i < 4; ++i) {
+        page->push_back(static_cast<char>((value >> (8 * i)) & 0xff));
+    }
+}
+
+// PLAIN BYTE_ARRAY pages written by hand: two valid ones, and pages that are cut inside a length prefix or a
+// value, or that hold a length which is far bigger than the page.
+std::vector<RawPlainPage> make_raw_plain_pages() {
+    std::string two_values;
+    append_le32(&two_values, 3);
+    two_values += "abc";
+    append_le32(&two_values, 3);
+    two_values += "def";
+
+    std::string two_empty_values;
+    append_le32(&two_empty_values, 0);
+    append_le32(&two_empty_values, 0);
+
+    std::string huge_first_length;
+    append_le32(&huge_first_length, 0xFFFFFFF0U);
+    huge_first_length += "abcd";
+
+    std::string huge_second_length = two_values.substr(0, 7);
+    append_le32(&huge_second_length, 0xFFFFFFFFU);
+    huge_second_length += "def";
+
+    return {{"two values", two_values, true},
+            {"two empty values at the end of the page", two_empty_values, true},
+            {"cut inside the first length prefix", two_values.substr(0, 2), false},
+            {"cut inside the second length prefix", two_values.substr(0, 9), false},
+            {"cut inside the second value", two_values.substr(0, 12), false},
+            {"huge first length", huge_first_length, false},
+            {"huge second length", huge_second_length, false}};
+}
+
+// Runs `decode` on a new decoder for each page, which holds two values. A valid page has to decode, and any
+// other page has to give an error. The page is copied to a buffer of exactly its size, so that a read after
+// its end is a heap overflow for ASAN.
+void check_plain_pages(const std::function<Status(Decoder*)>& decode) {
+    const EncodingInfo* encoding = nullptr;
+    (void)EncodingInfo::get(tparquet::Type::BYTE_ARRAY, tparquet::Encoding::PLAIN, &encoding);
+    ASSERT_TRUE(encoding != nullptr);
+    for (const auto& page : make_raw_plain_pages()) {
+        std::vector<char> buffer(page.bytes.begin(), page.bytes.end());
+        std::unique_ptr<Decoder> decoder;
+        Status st = encoding->create_decoder(&decoder);
+        ASSERT_TRUE(st.ok()) << st.to_string();
+        st = decoder->set_data(Slice(buffer.data(), buffer.size()));
+        ASSERT_TRUE(st.ok()) << st.to_string();
+        st = decode(decoder.get());
+        if (page.valid) {
+            ASSERT_TRUE(st.ok()) << page.name << ": " << st.to_string();
+        } else {
+            ASSERT_FALSE(st.ok()) << page.name;
+        }
+    }
+}
+
+MutableColumnPtr make_plain_binary_column(bool nullable) {
+    if (nullable) {
+        return NullableColumn::create(BinaryColumn::create(), NullColumn::create());
+    }
+    return BinaryColumn::create();
+}
+
+} // namespace
+
+// A page is file data, so a length prefix or a value that does not fit in the page has to give an error in
+// every decoding path, and no path may read after the page.
+TEST_F(ParquetEncodingTest, PlainByteArrayBoundsNextBatchWithNulls) {
+    ASSERT_NO_FATAL_FAILURE(check_plain_pages([](Decoder* decoder) -> Status {
+        const std::vector<uint8_t> nulls = {0, 1, 0};
+        NullInfos null_infos = make_plain_null_infos(nulls);
+        auto dst = NullableColumn::create(BinaryColumn::create(), NullColumn::create());
+        return decoder->next_batch_with_nulls(nulls.size(), null_infos, ColumnContentType::VALUE, dst.get(), nullptr);
+    }));
+}
+
+// The values that the filter drops are parsed too, so they have to be checked as well.
+TEST_F(ParquetEncodingTest, PlainByteArrayBoundsNextBatchWithNullsAndFilter) {
+    for (int selected : {1, 0}) {
+        ASSERT_NO_FATAL_FAILURE(check_plain_pages([selected](Decoder* decoder) -> Status {
+            const std::vector<uint8_t> nulls = {0, 1, 0};
+            const std::vector<uint8_t> filter(nulls.size(), static_cast<uint8_t>(selected));
+            NullInfos null_infos = make_plain_null_infos(nulls);
+            auto dst = NullableColumn::create(BinaryColumn::create(), NullColumn::create());
+            return decoder->next_batch_with_nulls(nulls.size(), null_infos, ColumnContentType::VALUE, dst.get(),
+                                                  filter.data());
+        }));
+    }
+}
+
+TEST_F(ParquetEncodingTest, PlainByteArrayBoundsNextBatch) {
+    for (bool nullable : {true, false}) {
+        ASSERT_NO_FATAL_FAILURE(check_plain_pages([nullable](Decoder* decoder) -> Status {
+            auto dst = make_plain_binary_column(nullable);
+            return decoder->next_batch(2, ColumnContentType::VALUE, dst.get(), nullptr);
+        }));
+    }
+}
+
+// The filtered path copies a value to the column as soon as it parses it.
+TEST_F(ParquetEncodingTest, PlainByteArrayBoundsNextBatchWithFilter) {
+    for (bool nullable : {true, false}) {
+        for (int selected : {1, 0}) {
+            ASSERT_NO_FATAL_FAILURE(check_plain_pages([nullable, selected](Decoder* decoder) -> Status {
+                const std::vector<uint8_t> filter(2, static_cast<uint8_t>(selected));
+                auto dst = make_plain_binary_column(nullable);
+                return decoder->next_batch(2, ColumnContentType::VALUE, dst.get(), filter.data());
+            }));
+        }
+    }
+}
+
+TEST_F(ParquetEncodingTest, PlainByteArrayBoundsSkip) {
+    ASSERT_NO_FATAL_FAILURE(check_plain_pages([](Decoder* decoder) -> Status { return decoder->skip(2); }));
+}
+
+// This path reads the values of a dictionary page.
+TEST_F(ParquetEncodingTest, PlainByteArrayBoundsNextBatchToSlices) {
+    ASSERT_NO_FATAL_FAILURE(check_plain_pages([](Decoder* decoder) -> Status {
+        std::vector<Slice> slices(2);
+        return decoder->next_batch(2, reinterpret_cast<uint8_t*>(slices.data()));
+    }));
+}
+
+namespace {
+// The type lengths that a real file cannot have: zero, negative, and wider than the limit.
+std::vector<int32_t> invalid_flba_type_lengths() {
+    return {0,
+            -1,
+            -4,
+            std::numeric_limits<int32_t>::min(),
+            ParquetUtils::MAX_FLBA_TYPE_LENGTH + 1,
+            std::numeric_limits<int32_t>::max()};
+}
+
+std::unique_ptr<Decoder> create_test_decoder(tparquet::Type::type type, tparquet::Encoding::type encoding_type) {
+    const EncodingInfo* encoding = nullptr;
+    EXPECT_TRUE(EncodingInfo::get(type, encoding_type, &encoding).ok());
+    std::unique_ptr<Decoder> decoder;
+    EXPECT_TRUE(encoding->create_decoder(&decoder).ok());
+    return decoder;
+}
+} // namespace
+
+// The type length comes from the file footer. A decoder that gets a length no real file has must return
+// an error and must not read with a stale or default length afterwards.
+TEST_F(ParquetEncodingTest, FLBAPlainInvalidTypeLength) {
+    auto decoder = create_test_decoder(tparquet::Type::FIXED_LEN_BYTE_ARRAY, tparquet::Encoding::PLAIN);
+    std::string page(64, 'x');
+    Slice out[4];
+
+    // a decoder that never got a type length cannot read
+    ASSERT_TRUE(decoder->set_data(Slice(page.data(), page.size())).ok());
+    ASSERT_FALSE(decoder->next_batch(1, reinterpret_cast<uint8_t*>(out)).ok());
+    ASSERT_FALSE(decoder->skip(1).ok());
+
+    for (int32_t type_length : invalid_flba_type_lengths()) {
+        ASSERT_TRUE(decoder->set_type_length(4).ok());
+        Status st = decoder->set_type_length(type_length);
+        ASSERT_TRUE(st.is_corruption()) << type_length << " " << st.to_string();
+
+        ASSERT_TRUE(decoder->set_data(Slice(page.data(), page.size())).ok());
+        ASSERT_FALSE(decoder->next_batch(1, reinterpret_cast<uint8_t*>(out)).ok()) << type_length;
+        ASSERT_FALSE(decoder->skip(1).ok()) << type_length;
+    }
+
+    ASSERT_TRUE(decoder->set_type_length(1).ok());
+    ASSERT_TRUE(decoder->set_type_length(ParquetUtils::MAX_FLBA_TYPE_LENGTH).ok());
+}
+
+// type_length * count wraps around to a small number for the pairs below. The decoder has to return an
+// error before it writes any value: `out` holds only 4 values, and the page is 64 bytes.
+TEST_F(ParquetEncodingTest, FLBAPlainCountOverflow) {
+    struct Case {
+        int32_t type_length;
+        size_t count;
+    };
+    // 4 * 2^62 and 2^20 * 2^44 are 2^64, which wraps to 0; 3 * (2^64 / 3 + 1) wraps to 2.
+    const std::vector<Case> cases = {{4, size_t(1) << 62},
+                                     {ParquetUtils::MAX_FLBA_TYPE_LENGTH, size_t(1) << 44},
+                                     {3, std::numeric_limits<size_t>::max() / 3 + 1}};
+    std::string page(64, 'x');
+
+    for (const auto& c : cases) {
+        auto decoder = create_test_decoder(tparquet::Type::FIXED_LEN_BYTE_ARRAY, tparquet::Encoding::PLAIN);
+        ASSERT_TRUE(decoder->set_type_length(c.type_length).ok());
+        ASSERT_TRUE(decoder->set_data(Slice(page.data(), page.size())).ok());
+
+        Slice out[4];
+        Status st = decoder->next_batch(c.count, reinterpret_cast<uint8_t*>(out));
+        ASSERT_FALSE(st.ok()) << c.type_length << " " << c.count;
+
+        st = decoder->skip(c.count);
+        ASSERT_FALSE(st.ok()) << c.type_length << " " << c.count;
+
+        auto column = BinaryColumn::create();
+        st = decoder->next_batch(c.count, ColumnContentType::VALUE, column.get(), nullptr);
+        ASSERT_FALSE(st.ok()) << c.type_length << " " << c.count;
+        ASSERT_EQ(0U, column->size());
+
+        // more nulls than rows: count - num_nulls wraps to a huge number of values to read
+        NullInfos null_infos;
+        null_infos.reset_with_capacity(2);
+        memset(null_infos.nulls_data(), 0, 2);
+        null_infos.num_nulls = 3;
+        null_infos.num_ranges = 2;
+        auto nullable_column = NullableColumn::create(BinaryColumn::create(), NullColumn::create());
+        st = decoder->next_batch_with_nulls(2, null_infos, ColumnContentType::VALUE, nullable_column.get(), nullptr);
+        ASSERT_FALSE(st.ok()) << c.type_length;
+        ASSERT_EQ(0U, nullable_column->size());
+
+        // the failed calls did not move the read position
+        if (c.type_length == 4) {
+            std::vector<Slice> values(16);
+            st = decoder->next_batch(16, reinterpret_cast<uint8_t*>(values.data()));
+            ASSERT_TRUE(st.ok()) << st.to_string();
+            ASSERT_EQ(page.data(), values[0].data);
+            ASSERT_EQ(page.data() + 60, values[15].data);
+            ASSERT_EQ(4U, values[15].size);
+            ASSERT_FALSE(decoder->skip(1).ok());
+        }
+    }
+}
+
+TEST_F(ParquetEncodingTest, ByteStreamSplitFLBAInvalidTypeLength) {
+    auto decoder = create_test_decoder(tparquet::Type::FIXED_LEN_BYTE_ARRAY, tparquet::Encoding::BYTE_STREAM_SPLIT);
+    std::string page(8, 'x');
+
+    // set_data divides by the width, so a missing width must come back as an error, not as a division by zero
+    ASSERT_TRUE(decoder->set_data(Slice(page.data(), page.size())).is_corruption());
+
+    for (int32_t type_length : invalid_flba_type_lengths()) {
+        ASSERT_TRUE(decoder->set_type_length(4).ok());
+        Status st = decoder->set_type_length(type_length);
+        ASSERT_TRUE(st.is_corruption()) << type_length << " " << st.to_string();
+        ASSERT_TRUE(decoder->set_data(Slice(page.data(), page.size())).is_corruption()) << type_length;
+    }
+
+    ASSERT_TRUE(decoder->set_type_length(4).ok());
+    ASSERT_TRUE(decoder->set_data(Slice(page.data(), page.size())).ok());
+}
+
+TEST_F(ParquetEncodingTest, DeltaLengthByteArrayFLBAInvalidTypeLength) {
+    auto decoder =
+            create_test_decoder(tparquet::Type::FIXED_LEN_BYTE_ARRAY, tparquet::Encoding::DELTA_LENGTH_BYTE_ARRAY);
+    for (int32_t type_length : invalid_flba_type_lengths()) {
+        Status st = decoder->set_type_length(type_length);
+        ASSERT_TRUE(st.is_corruption()) << type_length << " " << st.to_string();
+    }
+    ASSERT_TRUE(decoder->set_type_length(4).ok());
+}
+
+// Only the FLBA decoders use the type length, so the decoders of the other types ignore any value.
+TEST_F(ParquetEncodingTest, TypeLengthIgnoredByOtherDecoders) {
+    for (int32_t type_length : invalid_flba_type_lengths()) {
+        ASSERT_TRUE(create_test_decoder(tparquet::Type::INT32, tparquet::Encoding::PLAIN)
+                            ->set_type_length(type_length)
+                            .ok());
+        ASSERT_TRUE(create_test_decoder(tparquet::Type::BYTE_ARRAY, tparquet::Encoding::PLAIN)
+                            ->set_type_length(type_length)
+                            .ok());
+        ASSERT_TRUE(create_test_decoder(tparquet::Type::BYTE_ARRAY, tparquet::Encoding::DELTA_LENGTH_BYTE_ARRAY)
+                            ->set_type_length(type_length)
+                            .ok());
+        ASSERT_TRUE(create_test_decoder(tparquet::Type::INT32, tparquet::Encoding::BYTE_STREAM_SPLIT)
+                            ->set_type_length(type_length)
+                            .ok());
+    }
+}
+
+// type_length is not the only factor of a size that wraps: the count of values is too. For these counts
+// count * sizeof(value) is 2^64, i.e. 0, and a decoder that multiplies without a check reads outside the
+// page. The decoder has to return an error, and the 16 bytes of `out` must stay unwritten.
+TEST_F(ParquetEncodingTest, PlainCountOverflow) {
+    std::string page(16, 'x');
+    for (auto [type, value_size] : std::vector<std::pair<tparquet::Type::type, size_t>>{
+                 {tparquet::Type::INT32, 4}, {tparquet::Type::INT64, 8}, {tparquet::Type::DOUBLE, 8}}) {
+        auto decoder = create_test_decoder(type, tparquet::Encoding::PLAIN);
+        ASSERT_TRUE(decoder->set_data(Slice(page.data(), page.size())).ok());
+        const size_t wrap_count = std::numeric_limits<size_t>::max() / value_size + 1;
+
+        uint8_t out[16] = {};
+        ASSERT_FALSE(decoder->next_batch(wrap_count, out).ok());
+        for (uint8_t byte : out) {
+            ASSERT_EQ(0, byte);
+        }
+        ASSERT_FALSE(decoder->skip(wrap_count).ok());
+
+        auto column = FixedLengthColumn<int64_t>::create();
+        ASSERT_FALSE(decoder->next_batch(wrap_count, ColumnContentType::VALUE, column.get(), nullptr).ok());
+        ASSERT_EQ(0U, column->size());
+
+        // the position did not move, and the whole page is still readable
+        ASSERT_TRUE(decoder->next_batch(16 / value_size, out).ok());
+    }
+}
+
+// Each boolean takes one bit, so the count of a read is bounded by the bits of the page. The decoder must
+// return an error for a larger count before it sizes any buffer from the count.
+TEST_F(ParquetEncodingTest, PlainBooleanCountLargerThanThePage) {
+    auto decoder = create_test_decoder(tparquet::Type::BOOLEAN, tparquet::Encoding::PLAIN);
+    std::string page(4, '\xff');
+    ASSERT_TRUE(decoder->set_data(Slice(page.data(), page.size())).ok());
+
+    const size_t huge_count = size_t(1) << 40;
+    auto column = FixedLengthColumn<uint8_t>::create();
+    ASSERT_FALSE(decoder->next_batch(huge_count, ColumnContentType::VALUE, column.get(), nullptr).ok());
+    ASSERT_EQ(0U, column->size());
+    ASSERT_FALSE(decoder->skip(huge_count).ok());
+    uint8_t out[40] = {};
+    ASSERT_FALSE(decoder->next_batch(33, out).ok());
+
+    // 32 bits are 32 values
+    ASSERT_TRUE(decoder->skip(4).ok());
+    ASSERT_TRUE(decoder->next_batch(28, out).ok());
+    ASSERT_FALSE(decoder->next_batch(1, out).ok());
+}
+
+// The header of a DELTA_BINARY_PACKED page declares the number of values, and the decoders of the delta
+// encodings size their buffers from it. A header that declares values that the page cannot hold must be
+// rejected when the page is set, before any buffer is sized.
+TEST_F(ParquetEncodingTest, DeltaHeaderDeclaresMoreValuesThanThePageHolds) {
+    // ULEB128 fields: values_per_block = 128, mini_blocks_per_block = 4, total_value_count, zigzag(first_value) = 0
+    auto make_page = [](const std::vector<uint8_t>& total_value_count, size_t body_size) {
+        std::string page = {'\x80', '\x01', '\x04'};
+        page.append(total_value_count.begin(), total_value_count.end());
+        page.push_back('\x00');
+        page.append(body_size, '\x00');
+        return page;
+    };
+    const std::vector<uint8_t> max_count = {0xff, 0xff, 0xff, 0xff, 0x0f}; // 2^32 - 1
+    const std::vector<uint8_t> count_1000 = {0xe8, 0x07};
+
+    for (auto [type, encoding] : std::vector<std::pair<tparquet::Type::type, tparquet::Encoding::type>>{
+                 {tparquet::Type::INT32, tparquet::Encoding::DELTA_BINARY_PACKED},
+                 {tparquet::Type::INT64, tparquet::Encoding::DELTA_BINARY_PACKED},
+                 {tparquet::Type::BYTE_ARRAY, tparquet::Encoding::DELTA_LENGTH_BYTE_ARRAY},
+                 {tparquet::Type::BYTE_ARRAY, tparquet::Encoding::DELTA_BYTE_ARRAY},
+                 {tparquet::Type::FIXED_LEN_BYTE_ARRAY, tparquet::Encoding::DELTA_BYTE_ARRAY}}) {
+        // 1000 values need 8 blocks of at least 5 bytes each (a minimum delta and 4 bit widths)
+        for (const auto& page : {make_page(max_count, 0), make_page(max_count, 100), make_page(count_1000, 0),
+                                 make_page(count_1000, 39)}) {
+            auto decoder = create_test_decoder(type, encoding);
+            Status st = decoder->set_data(Slice(page.data(), page.size()));
+            ASSERT_TRUE(st.is_corruption()) << type << " " << encoding << " " << st.to_string();
+        }
+    }
+
+    // a page of exactly the least size is accepted
+    auto decoder = create_test_decoder(tparquet::Type::INT32, tparquet::Encoding::DELTA_BINARY_PACKED);
+    std::string page = make_page(count_1000, 40);
+    ASSERT_TRUE(decoder->set_data(Slice(page.data(), page.size())).ok());
 }
 
 } // namespace starrocks::parquet

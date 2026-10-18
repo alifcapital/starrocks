@@ -17,6 +17,9 @@
 #include <gtest/gtest.h>
 
 #include <filesystem>
+#include <limits>
+#include <string>
+#include <vector>
 
 #include "column/binary_column.h"
 #include "column/column_helper.h"
@@ -30,6 +33,8 @@
 #include "fs/fs.h"
 #include "parquet_test_util/util.h"
 #include "runtime/descriptor_helper.h"
+#include "types/date_value.h"
+#include "util/decimal_types.h"
 
 namespace starrocks::parquet {
 
@@ -468,6 +473,537 @@ TEST_F(ColumnConverterTest, FLBATest) {
             const TypeDescriptor col_type = TypeDescriptor::from_logical_type(LogicalType::TYPE_TIME);
             check(file_path, col_type, col_name, "[6809.6]", expected_rows, true);
         }
+    }
+}
+
+// The conversion of a FLBA decimal reads type_length bytes of the source column for every non-null value.
+// The type length comes from the footer and the values may come from corrupt statistics, so a column that
+// holds fewer bytes than that must give an error instead of being read past its end.
+TEST_F(ColumnConverterTest, FLBADecimalTypeLengthAndBytes) {
+    const TypeDescriptor col_type = TypeDescriptor::create_decimalv3_type(TYPE_DECIMAL128, 38, 2);
+
+    // An empty string in `values` is a NULL value.
+    auto convert = [&](int32_t type_length, const std::vector<std::string>& values) -> Status {
+        ParquetField field{};
+        field.physical_type = tparquet::Type::FIXED_LEN_BYTE_ARRAY;
+        field.type_length = type_length;
+        field.scale = 2;
+        field.precision = 38;
+
+        std::unique_ptr<ColumnConverter> converter;
+        RETURN_IF_ERROR(ColumnConverterFactory::create_converter(field, col_type, "UTC", &converter));
+        auto src = converter->create_src_column();
+        bool appended = true;
+        for (const auto& value : values) {
+            if (value.empty()) {
+                appended &= src->append_nulls(1);
+            } else {
+                appended &= src->append_strings(std::vector<Slice>{Slice(value)});
+            }
+        }
+        if (!appended) {
+            return Status::InternalError("append to the source column failed");
+        }
+        auto dst = ColumnHelper::create_column(col_type, true);
+        return converter->convert(src.get(), dst.get());
+    };
+
+    const std::string value4(4, '\x01');
+    ASSERT_TRUE(convert(4, {value4, value4}).ok());
+    // a NULL value holds no bytes
+    ASSERT_TRUE(convert(4, {value4, "", value4}).ok());
+    // wider than the widest decimal: converted to NULL
+    ASSERT_TRUE(convert(17, {std::string(17, '\x01')}).ok());
+
+    // the type length is 4 but the values are shorter
+    ASSERT_TRUE(convert(4, {std::string(2, '\x01')}).is_corruption());
+    ASSERT_TRUE(convert(4, {value4, std::string(3, '\x01')}).is_corruption());
+    ASSERT_TRUE(convert(16, {value4}).is_corruption());
+
+    // the type length is not a width that the conversion supports
+    ASSERT_TRUE(convert(0, {value4}).is_corruption());
+    ASSERT_TRUE(convert(-1, {value4}).is_corruption());
+    ASSERT_TRUE(convert(std::numeric_limits<int32_t>::min(), {value4}).is_corruption());
+}
+
+// The conversion of an INT32 to a DATE adds the epoch to every row. The data of a NULL row is not initialized
+// and a corrupt file can hold any int32 as a day, so the sum can exceed int32. A build with UBSAN traps on a
+// signed overflow, so the conversion must not overflow, and it must keep the NULL flags and the other rows.
+TEST_F(ColumnConverterTest, Int32ToDateWithLargeValues) {
+    ParquetField field{};
+    field.physical_type = tparquet::Type::INT32;
+    const TypeDescriptor col_type = TypeDescriptor::from_logical_type(LogicalType::TYPE_DATE);
+    std::unique_ptr<ColumnConverter> converter;
+    ASSERT_TRUE(ColumnConverterFactory::create_converter(field, col_type, "UTC", &converter).ok());
+
+    // 2023-01-01, NULL with INT32_MAX, NULL with INT32_MIN, 1970-01-01, INT32_MAX, INT32_MIN
+    const std::vector<int32_t> days{19358, std::numeric_limits<int32_t>::max(), std::numeric_limits<int32_t>::min(),
+                                    0,     std::numeric_limits<int32_t>::max(), std::numeric_limits<int32_t>::min()};
+    const std::vector<uint8_t> is_null{0, 1, 1, 0, 0, 0};
+    auto data = FixedLengthColumn<int32_t>::create();
+    auto nulls = NullColumn::create();
+    for (size_t i = 0; i < days.size(); i++) {
+        data->append(days[i]);
+        nulls->append(is_null[i]);
+    }
+    auto src = NullableColumn::create(std::move(data), std::move(nulls));
+    src->update_has_null();
+
+    auto dst = ColumnHelper::create_column(col_type, true);
+    ASSERT_TRUE(converter->convert(src.get(), dst.get()).ok());
+    ASSERT_EQ(days.size(), dst->size());
+    for (size_t i = 0; i < days.size(); i++) {
+        EXPECT_EQ(is_null[i] != 0, dst->is_null(i)) << "row " << i;
+    }
+    EXPECT_EQ("2023-01-01", dst->get(0).get_date().to_string());
+    EXPECT_EQ("1970-01-01", dst->get(3).get_date().to_string());
+}
+
+// The conversion to a decimal with a larger scale multiplies a value by a power of ten that can be 10^38, so
+// the product of a large value exceeds int128. The conversion must not overflow, and it must keep the value
+// that fits and the NULL flags.
+TEST_F(ColumnConverterTest, PrimitiveToDecimalWithLargeScaleGap) {
+    const TypeDescriptor col_type = TypeDescriptor::create_decimalv3_type(TYPE_DECIMAL128, 38, 38);
+    ParquetField field{};
+    field.physical_type = tparquet::Type::INT64;
+    field.scale = 0;
+    field.precision = 18;
+    std::unique_ptr<ColumnConverter> converter;
+    ASSERT_TRUE(ColumnConverterFactory::create_converter(field, col_type, "UTC", &converter).ok());
+
+    // 1, NULL with INT64_MAX, INT64_MAX, INT64_MIN
+    const std::vector<int64_t> values{1, std::numeric_limits<int64_t>::max(), std::numeric_limits<int64_t>::max(),
+                                      std::numeric_limits<int64_t>::min()};
+    const std::vector<uint8_t> is_null{0, 1, 0, 0};
+    auto data = FixedLengthColumn<int64_t>::create();
+    auto nulls = NullColumn::create();
+    for (size_t i = 0; i < values.size(); i++) {
+        data->append(values[i]);
+        nulls->append(is_null[i]);
+    }
+    auto src = NullableColumn::create(std::move(data), std::move(nulls));
+    src->update_has_null();
+
+    auto dst = ColumnHelper::create_column(col_type, true);
+    ASSERT_TRUE(converter->convert(src.get(), dst.get()).ok());
+    ASSERT_EQ(values.size(), dst->size());
+    for (size_t i = 0; i < values.size(); i++) {
+        EXPECT_EQ(is_null[i] != 0, dst->is_null(i)) << "row " << i;
+    }
+    EXPECT_TRUE(dst->get(0).get_int128() == get_scale_factor<int128_t>(38));
+}
+
+// The same for a FIXED_LEN_BYTE_ARRAY decimal: the unscaled value is multiplied by the scale factor, and the
+// value 0x7F..FF of the type length gives a product that exceeds int128.
+TEST_F(ColumnConverterTest, FLBADecimalWithLargeScaleGap) {
+    const TypeDescriptor col_type = TypeDescriptor::create_decimalv3_type(TYPE_DECIMAL128, 38, 38);
+    // An empty string in the values is a NULL value.
+    for (int32_t type_length : {4, 8, 9, 16}) {
+        ParquetField field{};
+        field.physical_type = tparquet::Type::FIXED_LEN_BYTE_ARRAY;
+        field.type_length = type_length;
+        field.scale = 0;
+        field.precision = 38;
+        std::unique_ptr<ColumnConverter> converter;
+        ASSERT_TRUE(ColumnConverterFactory::create_converter(field, col_type, "UTC", &converter).ok());
+
+        std::string one(type_length, '\0');
+        one[type_length - 1] = 1;
+        std::string largest(type_length, '\xFF');
+        largest[0] = '\x7F';
+        std::string smallest(type_length, '\0');
+        smallest[0] = '\x80';
+
+        auto src = converter->create_src_column();
+        for (const std::string& value : {one, std::string(), largest, smallest}) {
+            if (value.empty()) {
+                ASSERT_TRUE(src->append_nulls(1));
+            } else {
+                ASSERT_TRUE(src->append_strings(std::vector<Slice>{Slice(value)}));
+            }
+        }
+
+        auto dst = ColumnHelper::create_column(col_type, true);
+        ASSERT_TRUE(converter->convert(src.get(), dst.get()).ok()) << "type length " << type_length;
+        ASSERT_EQ(4, dst->size());
+        EXPECT_FALSE(dst->is_null(0));
+        EXPECT_TRUE(dst->is_null(1));
+        EXPECT_FALSE(dst->is_null(2));
+        EXPECT_FALSE(dst->is_null(3));
+        EXPECT_TRUE(dst->get(0).get_int128() == get_scale_factor<int128_t>(38)) << "type length " << type_length;
+    }
+}
+
+// The scale factor of a decimal converter is read from a table of the powers 10^0..10^38, so a scale outside
+// 0..76 and a negative precision must not reach the table. They give a Corruption that names the column and
+// the file, for every physical type that holds a decimal. A scale above the precision is not an error.
+TEST_F(ColumnConverterTest, DecimalFooterScaleAndPrecisionAreChecked) {
+    struct Footer {
+        int32_t scale;
+        int32_t precision;
+        bool valid;
+    };
+    const std::vector<Footer> footers{
+            {0, 0, true},
+            {2, 9, true},
+            {9, 9, true},
+            {38, 38, true},
+            {76, 76, true},
+            // precision 0 means that the footer has none
+            {5, 0, true},
+            // some writers put a scale above the precision
+            {5, 3, true},
+            {76, 1, true},
+            {-1, 9, false},
+            {-1, 0, false},
+            {77, 80, false},
+            {std::numeric_limits<int32_t>::max(), std::numeric_limits<int32_t>::max(), false},
+            {std::numeric_limits<int32_t>::min(), 0, false},
+            {1, -1, false},
+    };
+    const std::string file_name = "s3://bucket/dec.parquet";
+
+    for (const TypeDescriptor& col_type : {TypeDescriptor::create_decimalv3_type(TYPE_DECIMAL32, 9, 2),
+                                           TypeDescriptor::create_decimalv3_type(TYPE_DECIMAL64, 18, 2),
+                                           TypeDescriptor::create_decimalv3_type(TYPE_DECIMAL128, 38, 2),
+                                           TypeDescriptor::from_logical_type(TYPE_DECIMALV2)}) {
+        for (tparquet::Type::type physical_type :
+             {tparquet::Type::INT32, tparquet::Type::INT64, tparquet::Type::FIXED_LEN_BYTE_ARRAY}) {
+            for (const Footer& footer : footers) {
+                ParquetField field{};
+                field.name = "dec_col";
+                field.physical_type = physical_type;
+                field.type_length = 16;
+                field.scale = footer.scale;
+                field.precision = footer.precision;
+
+                std::unique_ptr<ColumnConverter> converter;
+                Status st = ColumnConverterFactory::create_converter(field, col_type, "UTC", &converter, file_name);
+                const std::string where = "scale " + std::to_string(footer.scale) + ", precision " +
+                                          std::to_string(footer.precision) + ", physical type " +
+                                          std::to_string(physical_type);
+                if (footer.valid) {
+                    EXPECT_TRUE(st.ok()) << where << ": " << st;
+                } else {
+                    EXPECT_TRUE(st.is_corruption()) << where << ": " << st;
+                    EXPECT_NE(std::string::npos, st.to_string().find("dec_col")) << where << ": " << st;
+                    EXPECT_NE(std::string::npos, st.to_string().find(file_name)) << where << ": " << st;
+                }
+            }
+        }
+    }
+
+    // The scale of the destination decimal is checked too. TypeDescriptor::from_logical_type() gives a decimal the
+    // default precision 27 and scale 9, which is a valid destination. A destination whose scale is outside 0..38,
+    // or that has no scale (the default of a TypeDescriptor is -1), is rejected and never reaches the table.
+    for (tparquet::Type::type physical_type :
+         {tparquet::Type::INT32, tparquet::Type::INT64, tparquet::Type::FIXED_LEN_BYTE_ARRAY}) {
+        ParquetField field{};
+        field.name = "dec_col";
+        field.physical_type = physical_type;
+        field.type_length = 16;
+        field.scale = 2;
+        field.precision = 9;
+        const std::string where = "physical type " + std::to_string(physical_type);
+
+        std::unique_ptr<ColumnConverter> converter;
+        Status st = ColumnConverterFactory::create_converter(field, TypeDescriptor::from_logical_type(TYPE_DECIMAL128),
+                                                             "UTC", &converter, file_name);
+        EXPECT_TRUE(st.ok()) << where << ": " << st;
+
+        for (int32_t dst_scale :
+             {-1, 39, 100, std::numeric_limits<int32_t>::max(), std::numeric_limits<int32_t>::min()}) {
+            TypeDescriptor bad_type = TypeDescriptor::from_logical_type(TYPE_DECIMAL128);
+            bad_type.scale = dst_scale;
+            st = ColumnConverterFactory::create_converter(field, bad_type, "UTC", &converter, file_name);
+            EXPECT_FALSE(st.ok()) << where << ", destination scale " << dst_scale;
+            EXPECT_NE(std::string::npos, st.to_string().find("dec_col")) << where << ": " << st;
+            EXPECT_NE(std::string::npos, st.to_string().find(file_name)) << where << ": " << st;
+        }
+
+        TypeDescriptor without_scale;
+        without_scale.type = TYPE_DECIMAL128;
+        st = ColumnConverterFactory::create_converter(field, without_scale, "UTC", &converter, file_name);
+        EXPECT_FALSE(st.ok()) << where << ", destination without a scale";
+    }
+}
+
+// The big-endian two's complement bytes of a decimal in a FIXED_LEN_BYTE_ARRAY of the given width.
+static std::string decimal_flba_bytes(int128_t value, int width) {
+    // A byte above the 16 bytes of the value repeats the sign.
+    std::string bytes(width, value < 0 ? '\xFF' : '\0');
+    for (int i = 0; i < width && i < 16; i++) {
+        bytes[width - 1 - i] = static_cast<char>(static_cast<uint8_t>(static_cast<uint128_t>(value) >> (8 * i)));
+    }
+    return bytes;
+}
+
+// A footer with a scale above its precision is read, and its values are converted with that scale.
+TEST_F(ColumnConverterTest, DecimalScaleAbovePrecisionIsRead) {
+    const TypeDescriptor col_type = TypeDescriptor::create_decimalv3_type(TYPE_DECIMAL128, 38, 2);
+
+    // INT64 with scale 5 and precision 3, to scale 2: 123456 / 10^3 = 123.
+    {
+        ParquetField field{};
+        field.name = "dec_col";
+        field.physical_type = tparquet::Type::INT64;
+        field.scale = 5;
+        field.precision = 3;
+        std::unique_ptr<ColumnConverter> converter;
+        ASSERT_TRUE(ColumnConverterFactory::create_converter(field, col_type, "UTC", &converter).ok());
+
+        auto data = FixedLengthColumn<int64_t>::create();
+        auto nulls = NullColumn::create();
+        for (int64_t value : {123456, 7}) {
+            data->append(value);
+            nulls->append(value == 7);
+        }
+        auto src = NullableColumn::create(std::move(data), std::move(nulls));
+        src->update_has_null();
+        auto dst = ColumnHelper::create_column(col_type, true);
+        ASSERT_TRUE(converter->convert(src.get(), dst.get()).ok());
+        ASSERT_EQ(2, dst->size());
+        EXPECT_FALSE(dst->is_null(0));
+        EXPECT_TRUE(dst->is_null(1));
+        EXPECT_TRUE(dst->get(0).get_int128() == 123);
+    }
+    // FIXED_LEN_BYTE_ARRAY(4) with scale 4 and precision 2, to scale 2: 12345 / 10^2 = 123.
+    {
+        ParquetField field{};
+        field.name = "dec_col";
+        field.physical_type = tparquet::Type::FIXED_LEN_BYTE_ARRAY;
+        field.type_length = 4;
+        field.scale = 4;
+        field.precision = 2;
+        std::unique_ptr<ColumnConverter> converter;
+        ASSERT_TRUE(ColumnConverterFactory::create_converter(field, col_type, "UTC", &converter).ok());
+
+        auto src = converter->create_src_column();
+        const std::string value = decimal_flba_bytes(12345, 4);
+        ASSERT_TRUE(src->append_strings(std::vector<Slice>{Slice(value)}));
+        auto dst = ColumnHelper::create_column(col_type, true);
+        ASSERT_TRUE(converter->convert(src.get(), dst.get()).ok());
+        ASSERT_EQ(1, dst->size());
+        EXPECT_FALSE(dst->is_null(0));
+        EXPECT_TRUE(dst->get(0).get_int128() == 123);
+    }
+}
+
+// A scale of the footer that is valid but more than 38 digits above the destination scale has no int128
+// divisor, so every row of the column is NULL, as for a FIXED_LEN_BYTE_ARRAY wider than int128. A gap of
+// exactly 38 digits is converted.
+TEST_F(ColumnConverterTest, DecimalScaleGapBeyondInt128BecomesNull) {
+    const TypeDescriptor col_type = TypeDescriptor::create_decimalv3_type(TYPE_DECIMAL128, 38, 0);
+    const int128_t ten_pow_38 = get_scale_factor<int128_t>(38);
+
+    auto create = [&](tparquet::Type::type physical_type, int32_t scale, int32_t type_length) {
+        ParquetField field{};
+        field.name = "dec_col";
+        field.physical_type = physical_type;
+        field.type_length = type_length;
+        field.scale = scale;
+        field.precision = scale;
+        std::unique_ptr<ColumnConverter> converter;
+        Status st = ColumnConverterFactory::create_converter(field, col_type, "UTC", &converter);
+        EXPECT_TRUE(st.ok()) << st;
+        return converter;
+    };
+
+    auto convert_flba = [&](int32_t scale, int32_t type_length, const std::vector<std::string>& values) {
+        auto converter = create(tparquet::Type::FIXED_LEN_BYTE_ARRAY, scale, type_length);
+        // An empty string in the values is a NULL value.
+        auto src = converter->create_src_column();
+        for (const auto& value : values) {
+            if (value.empty()) {
+                EXPECT_TRUE(src->append_nulls(1));
+            } else {
+                EXPECT_TRUE(src->append_strings(std::vector<Slice>{Slice(value)}));
+            }
+        }
+        auto dst = ColumnHelper::create_column(col_type, true);
+        EXPECT_TRUE(converter->convert(src.get(), dst.get()).ok());
+        return dst;
+    };
+
+    auto convert_int64 = [&](int32_t scale, const std::vector<int64_t>& values, const std::vector<uint8_t>& is_null) {
+        auto converter = create(tparquet::Type::INT64, scale, 0);
+        auto data = FixedLengthColumn<int64_t>::create();
+        auto nulls = NullColumn::create();
+        for (size_t i = 0; i < values.size(); i++) {
+            data->append(values[i]);
+            nulls->append(is_null[i]);
+        }
+        auto src = NullableColumn::create(std::move(data), std::move(nulls));
+        src->update_has_null();
+        auto dst = ColumnHelper::create_column(col_type, true);
+        EXPECT_TRUE(converter->convert(src.get(), dst.get()).ok());
+        return dst;
+    };
+
+    // FIXED_LEN_BYTE_ARRAY, gap of 38 digits: 10^38 / 10^38 = 1.
+    {
+        auto dst = convert_flba(38, 16, {decimal_flba_bytes(ten_pow_38, 16), "", decimal_flba_bytes(-ten_pow_38, 16)});
+        ASSERT_EQ(3, dst->size());
+        EXPECT_FALSE(dst->is_null(0));
+        EXPECT_TRUE(dst->is_null(1));
+        EXPECT_FALSE(dst->is_null(2));
+        EXPECT_TRUE(dst->get(0).get_int128() == 1);
+        EXPECT_TRUE(dst->get(2).get_int128() == -1);
+    }
+    // FIXED_LEN_BYTE_ARRAY of at most 16 bytes, gap of 39 digits: every row is NULL.
+    {
+        auto dst = convert_flba(39, 16, {decimal_flba_bytes(ten_pow_38, 16), "", decimal_flba_bytes(7, 16)});
+        ASSERT_EQ(3, dst->size());
+        for (size_t i = 0; i < 3; i++) {
+            EXPECT_TRUE(dst->is_null(i)) << "row " << i;
+        }
+    }
+    // FIXED_LEN_BYTE_ARRAY wider than int128, gap of 70 digits: every row is NULL.
+    {
+        auto dst = convert_flba(70, 32, {decimal_flba_bytes(7, 32), decimal_flba_bytes(-7, 32)});
+        ASSERT_EQ(2, dst->size());
+        EXPECT_TRUE(dst->is_null(0));
+        EXPECT_TRUE(dst->is_null(1));
+    }
+    // INT64, gap of 38 digits: the quotient is converted, here 0.
+    {
+        auto dst = convert_int64(38, {1, 5, -5}, {0, 1, 0});
+        ASSERT_EQ(3, dst->size());
+        EXPECT_FALSE(dst->is_null(0));
+        EXPECT_TRUE(dst->is_null(1));
+        EXPECT_FALSE(dst->is_null(2));
+        EXPECT_TRUE(dst->get(0).get_int128() == 0);
+        EXPECT_TRUE(dst->get(2).get_int128() == 0);
+    }
+    // INT64, gap of 39 digits: every row is NULL.
+    {
+        auto dst = convert_int64(39, {1, 5, -5}, {0, 1, 0});
+        ASSERT_EQ(3, dst->size());
+        for (size_t i = 0; i < 3; i++) {
+            EXPECT_TRUE(dst->is_null(i)) << "row " << i;
+        }
+    }
+}
+
+// A nullable FIXED_LEN_BYTE_ARRAY decimal column whose pages are dictionary encoded, with NULL rows before
+// the rows that are not NULL. BinaryToDecimalConverter walks the bytes of the column with a stride of the
+// type length and counts only the rows that are not NULL, so a NULL row must hold no byte, however the
+// dictionary values were read into the column: directly, directly with a filter that drops a row, or as
+// dictionary codes first.
+TEST_F(ColumnConverterTest, DictEncodedNullableFLBADecimal) {
+    const TypeDescriptor col_type = TypeDescriptor::create_decimalv3_type(TYPE_DECIMAL128, 38, 0);
+    // the dictionary holds three values of 4 bytes, big endian
+    const std::vector<int32_t> dict_values = {11, 22, 33};
+    // rows:             NULL NULL 33 11 NULL 22
+    // codes of the rows that are not NULL:   2  0      1
+    const std::vector<int32_t> codes = {2, 0, 1};
+    const std::vector<uint8_t> is_null = {1, 1, 0, 0, 1, 0};
+    const size_t num_rows = is_null.size();
+
+    NullInfos infos;
+    infos.reset_with_capacity(num_rows);
+    infos.num_nulls = 0;
+    for (size_t i = 0; i < num_rows; ++i) {
+        infos.nulls_data()[i] = is_null[i];
+        infos.num_nulls += is_null[i];
+    }
+    // the runs NULL, value, NULL, value: more than two ranges, so the batched paths are used
+    infos.num_ranges = 4;
+
+    auto setup = [&](DictDecoder<Slice>* decoder, faststring* page) {
+        std::string dict_page;
+        for (int32_t value : dict_values) {
+            for (int shift = 24; shift >= 0; shift -= 8) {
+                dict_page.push_back(static_cast<char>((value >> shift) & 0xff));
+            }
+        }
+        FLBAPlainDecoder plain;
+        ASSERT_TRUE(plain.set_type_length(4).ok());
+        ASSERT_TRUE(plain.set_data(Slice(dict_page.data(), dict_page.size())).ok());
+        ASSERT_TRUE(decoder->set_dict(10, dict_values.size(), &plain).ok());
+
+        faststring rle;
+        RleEncoder<int32_t> encoder(&rle, 8);
+        for (int32_t code : codes) {
+            encoder.Put(code);
+        }
+        encoder.Flush();
+        page->clear();
+        page->push_back(8);
+        page->append(rle.data(), rle.length());
+        ASSERT_TRUE(decoder->set_data(Slice(page->data(), page->length())).ok());
+    };
+
+    // -1 is NULL
+    auto convert_and_check = [&](Column* src, const std::vector<int64_t>& expected) {
+        ParquetField field{};
+        field.physical_type = tparquet::Type::FIXED_LEN_BYTE_ARRAY;
+        field.type_length = 4;
+        field.scale = 0;
+        field.precision = 38;
+        std::unique_ptr<ColumnConverter> converter;
+        ASSERT_TRUE(ColumnConverterFactory::create_converter(field, col_type, "UTC", &converter).ok());
+
+        auto dst = ColumnHelper::create_column(col_type, true);
+        Status st = converter->convert(src, dst.get());
+        ASSERT_TRUE(st.ok()) << st.to_string();
+
+        auto* nullable = down_cast<NullableColumn*>(dst.get());
+        auto* data = down_cast<Decimal128Column*>(nullable->data_column_raw_ptr());
+        ASSERT_EQ(expected.size(), nullable->size());
+        for (size_t i = 0; i < expected.size(); ++i) {
+            if (expected[i] < 0) {
+                ASSERT_TRUE(nullable->is_null(i)) << "row " << i;
+            } else {
+                ASSERT_FALSE(nullable->is_null(i)) << "row " << i;
+                ASSERT_EQ(expected[i], static_cast<int64_t>(data->get_data()[i])) << "row " << i;
+            }
+        }
+    };
+
+    // the values are read directly
+    {
+        DictDecoder<Slice> decoder;
+        faststring page;
+        setup(&decoder, &page);
+        auto src = NullableColumn::create(BinaryColumn::create(), NullColumn::create());
+        ASSERT_TRUE(decoder.next_batch_with_nulls(num_rows, infos, ColumnContentType::VALUE, src.get(), nullptr).ok());
+        auto* binary = down_cast<BinaryColumn*>(src->data_column_raw_ptr());
+        ASSERT_EQ(3 * 4U, binary->get_bytes().size());
+        convert_and_check(src.get(), {-1, -1, 33, 11, -1, 22});
+    }
+    // the values are read directly, and a filter drops the row 3
+    {
+        DictDecoder<Slice> decoder;
+        faststring page;
+        setup(&decoder, &page);
+        // force the path that applies the filter, whatever the size of the dictionary is
+        decoder._dict_size_threshold = 0;
+        const std::vector<uint8_t> filter = {1, 1, 1, 0, 1, 1};
+        auto src = NullableColumn::create(BinaryColumn::create(), NullColumn::create());
+        ASSERT_TRUE(decoder.next_batch_with_nulls(num_rows, infos, ColumnContentType::VALUE, src.get(), filter.data())
+                            .ok());
+        convert_and_check(src.get(), {-1, -1, 33, -1, -1, 22});
+    }
+    // the dictionary codes are read first, and the values are looked up later
+    {
+        DictDecoder<Slice> decoder;
+        faststring page;
+        setup(&decoder, &page);
+        auto codes_column = NullableColumn::create(Int32Column::create(), NullColumn::create());
+        ASSERT_TRUE(decoder.next_batch_with_nulls(num_rows, infos, ColumnContentType::DICT_CODE, codes_column.get(),
+                                                  nullptr)
+                            .ok());
+        auto* codes_data = down_cast<Int32Column*>(codes_column->data_column_raw_ptr());
+
+        auto src = NullableColumn::create(BinaryColumn::create(), NullColumn::create());
+        ASSERT_TRUE(
+                decoder.get_dict_values(codes_data->get_data(), *codes_column, ColumnHelper::get_data_column(src.get()))
+                        .ok());
+        src->swap_null_column(*codes_column);
+        auto* binary = down_cast<BinaryColumn*>(src->data_column_raw_ptr());
+        ASSERT_EQ(3 * 4U, binary->get_bytes().size());
+        convert_and_check(src.get(), {-1, -1, 33, 11, -1, 22});
     }
 }
 

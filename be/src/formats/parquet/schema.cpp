@@ -19,6 +19,7 @@
 #include <sstream>
 #include <utility>
 
+#include "formats/parquet/utils.h"
 #include "gutil/strings/substitute.h"
 #include "types/logical_type.h"
 #include "util/slice.h"
@@ -120,6 +121,16 @@ static bool is_map(const tparquet::SchemaElement* schema) {
 
 Status SchemaDescriptor::leaf_to_field(const tparquet::SchemaElement* t_schema, const LevelInfo& cur_level_info,
                                        bool is_nullable, ParquetField* field) {
+    // Decoders use the type length as the width of every value, so we reject an invalid one here,
+    // before a column reader gets it. Otherwise a corrupt footer could make a decoder read outside
+    // the page.
+    if (t_schema->type == tparquet::Type::FIXED_LEN_BYTE_ARRAY &&
+        !ParquetUtils::is_valid_flba_type_length(t_schema->type_length)) {
+        return Status::Corruption(strings::Substitute(
+                "Invalid type length $0 of FIXED_LEN_BYTE_ARRAY column '$1', expect a value in [1, $2]",
+                t_schema->type_length, t_schema->name, ParquetUtils::MAX_FLBA_TYPE_LENGTH));
+    }
+
     field->name = t_schema->name;
     field->schema_element = *t_schema;
     field->type = ColumnType::SCALAR;

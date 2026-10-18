@@ -58,8 +58,10 @@ public:
 
 class ColumnConverterFactory {
 public:
+    // file_name is only used to name the file in an error about a corrupt footer.
     static Status create_converter(const ParquetField& field, const TypeDescriptor& typeDescriptor,
-                                   const std::string& timezone, std::unique_ptr<ColumnConverter>* converter);
+                                   const std::string& timezone, std::unique_ptr<ColumnConverter>* converter,
+                                   const std::string& file_name = std::string());
 };
 
 } // namespace starrocks::parquet

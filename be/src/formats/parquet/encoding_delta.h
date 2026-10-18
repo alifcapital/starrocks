@@ -23,6 +23,7 @@
 #include "column/column_helper.h"
 #include "common/status.h"
 #include "formats/parquet/encoding.h"
+#include "formats/parquet/utils.h"
 #include "simd/delta_decode.h"
 #include "util/bit_stream_utils.h"
 #include "util/slice.h"
@@ -354,8 +355,26 @@ private:
                                       std::to_string(values_per_mini_block_));
         }
 
+        // The header declares total_value_count_ values and the decoders of the page size their buffers
+        // from it. We expect the page to hold that many values, and a corrupt header breaks that, so we
+        // check that the blocks which carry the values fit in the page. Every block takes at least one
+        // byte for its minimum delta and one byte for the bit width of each miniblock, and the first
+        // value is in the header.
+        if (total_value_count_ > 1) {
+            const uint64_t num_blocks =
+                    (static_cast<uint64_t>(total_value_count_) - 1 + values_per_block_ - 1) / values_per_block_;
+            const uint64_t min_bytes = num_blocks * (1 + static_cast<uint64_t>(mini_blocks_per_block_));
+            if (min_bytes > static_cast<uint64_t>(_bit_reader.bytes_left())) {
+                return Status::Corruption(
+                        fmt::format("DELTA_BINARY_PACKED header declares {} values but the page holds only {} bytes "
+                                    "after the header",
+                                    total_value_count_, _bit_reader.bytes_left()));
+            }
+        }
+
         total_values_remaining_ = total_value_count_;
-        delta_bit_widths_.resize(mini_blocks_per_block_);
+        // a page of at most one value has no block, and no bit widths to hold
+        delta_bit_widths_.resize(total_value_count_ > 1 ? mini_blocks_per_block_ : 0);
         first_block_initialized_ = false;
         values_remaining_current_mini_block_ = 0;
         fixed_values_ = true;
@@ -623,7 +642,18 @@ public:
         return Status::OK();
     }
 
-    void set_type_length(int32_t type_length) override { type_length_ = type_length; }
+    Status set_type_length(int32_t type_length) override {
+        if constexpr (PT == tparquet::Type::FIXED_LEN_BYTE_ARRAY) {
+            if (UNLIKELY(!ParquetUtils::is_valid_flba_type_length(type_length))) {
+                type_length_ = 0;
+                return Status::Corruption(
+                        fmt::format("Invalid type length {} of FIXED_LEN_BYTE_ARRAY, expect a value in [1, {}]",
+                                    type_length, ParquetUtils::MAX_FLBA_TYPE_LENGTH));
+            }
+            type_length_ = type_length;
+        }
+        return Status::OK();
+    }
 
 private:
     const uint8_t* data_ = nullptr;
@@ -635,12 +665,16 @@ private:
     int num_valid_values_{0};
     uint32_t length_idx_{0};
     std::vector<int32_t> buffered_length_;
-    int type_length_;
+    int type_length_ = 0;
 
 private:
     // Decode all the encoded lengths. The decoder_ will be at the start of the encoded data after that.
     Status DecodeLengths() {
-        // get the number of encoded lengths
+        // get the number of encoded lengths. It is unsigned in the header, and a count above the int
+        // range would become a negative size below.
+        if (UNLIKELY(len_decoder_.total_values_count() > static_cast<uint32_t>(std::numeric_limits<int32_t>::max()))) {
+            return Status::Corruption("too many lengths in DELTA_LENGTH_BYTE_ARRAY");
+        }
         int num_length = len_decoder_.total_values_count();
         buffered_length_.resize(num_length);
         // call len_decoder_.Decode to decode all the lengths.
@@ -659,7 +693,12 @@ private:
         int64_t data_size = 0;
         const int32_t* length_ptr = buffered_length_.data() + length_idx_;
         if constexpr (PT == tparquet::Type::FIXED_LEN_BYTE_ARRAY) {
-            data_size += max_values * type_length_;
+            if (UNLIKELY(type_length_ <= 0)) {
+                return Status::Corruption("DELTA_LENGTH_BYTE_ARRAY type length is not set");
+            }
+            // We multiply in 64 bits: the product of two ints can exceed the int range, and then
+            // the check of data_size below would see a wrong size.
+            data_size += static_cast<int64_t>(max_values) * type_length_;
         } else {
             if (contains_negative_value(length_ptr, max_values)) {
                 return Status::Corruption("negative string delta length");
@@ -838,11 +877,16 @@ private:
 public:
     Status set_data(const Slice& data) override {
         RETURN_IF_ERROR(prefix_len_decoder_.set_data(data));
-        // get the number of encoded prefix lengths
+        // get the number of encoded prefix lengths. It is unsigned in the header, and a count above the int
+        // range would become a negative size below.
+        if (UNLIKELY(prefix_len_decoder_.total_values_count() >
+                     static_cast<uint32_t>(std::numeric_limits<int32_t>::max()))) {
+            return Status::Corruption("too many prefix lengths in DELTA_BYTE_ARRAY");
+        }
         int num_prefix = prefix_len_decoder_.total_values_count();
         // call prefix_len_decoder_.Decode to decode all the prefix lengths.
         // all the prefix lengths are buffered in buffered_prefix_length_.
-        buffered_prefix_length_.resize(num_prefix * sizeof(int32_t));
+        buffered_prefix_length_.resize(static_cast<size_t>(num_prefix) * sizeof(int32_t));
         RETURN_IF_ERROR(prefix_len_decoder_.next_batch(num_prefix, buffered_prefix_length_.data()));
         prefix_len_offset_ = 0;
         num_valid_values_ = num_prefix;

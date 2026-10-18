@@ -56,6 +56,61 @@ namespace starrocks::parquet {
 // to match destination scale.
 enum class DecimalScaleType { kNoScale, kScaleUp, kScaleDown };
 
+// The widest decimal of StarRocks is decimal256, so a scale above 76 is not a scale of any decimal.
+static constexpr int32_t kMaxDecimalScale = 76;
+// The scale factor is a power of ten of int128, and the table of such powers ends at 10^38.
+static constexpr int32_t kMaxScaleFactorDigits = 38;
+
+// How a decimal converter gets from the scale of the file to the scale of the destination.
+struct DecimalScalePlan {
+    DecimalScaleType type = DecimalScaleType::kNoScale;
+    // The converter multiplies or divides the unscaled value by 10^digits, and digits is in [0, 38].
+    int32_t digits = 0;
+    // The scale of the file is more than 38 digits above the scale of the destination, so the divisor is not
+    // an int128 and the converter makes every row NULL.
+    bool all_null = false;
+};
+
+static std::string describe_column(const ParquetField& field, const std::string& file_name) {
+    if (file_name.empty()) {
+        return strings::Substitute("column '$0'", field.name);
+    }
+    return strings::Substitute("column '$0' in file '$1'", field.name, file_name);
+}
+
+// We fear a scale or precision in the footer that makes the scale factor read outside its table, which holds
+// the powers 0..38. We expect some writers to put a scale above the precision; a scale in 0..76 is safe for the
+// table lookups, so we read such files and reject only a scale outside 0..76 or a negative precision, with a
+// Corruption that names the column and the file. The destination scale must be a scale of int128.
+// A scale of the file that is more than 38 digits above the destination scale gets a plan that makes every row
+// NULL, as a FIXED_LEN_BYTE_ARRAY wider than int128 does.
+static StatusOr<DecimalScalePlan> make_decimal_scale_plan(const ParquetField& field, int32_t dst_scale,
+                                                          const std::string& file_name) {
+    if (field.scale < 0 || field.scale > kMaxDecimalScale || field.precision < 0) {
+        return Status::Corruption(strings::Substitute(
+                "Invalid decimal scale $0 and precision $1 of $2, expect 0 <= scale <= $3 and 0 <= precision",
+                field.scale, field.precision, describe_column(field, file_name), kMaxDecimalScale));
+    }
+    if (dst_scale < 0 || dst_scale > kMaxScaleFactorDigits) {
+        return Status::InternalError(strings::Substitute("Invalid scale $0 of the destination decimal type of $1",
+                                                         dst_scale, describe_column(field, file_name)));
+    }
+    DecimalScalePlan plan;
+    if (field.scale < dst_scale) {
+        // The gap is at most dst_scale, which is at most 38.
+        plan.type = DecimalScaleType::kScaleUp;
+        plan.digits = dst_scale - field.scale;
+    } else if (field.scale > dst_scale) {
+        if (field.scale - dst_scale > kMaxScaleFactorDigits) {
+            plan.all_null = true;
+        } else {
+            plan.type = DecimalScaleType::kScaleDown;
+            plan.digits = field.scale - dst_scale;
+        }
+    }
+    return plan;
+}
+
 class Int32ToDateConverter final : public ColumnConverter {
 public:
     Int32ToDateConverter() = default;
@@ -170,13 +225,11 @@ public:
     using DestColumnType = typename RunTimeTypeTraits<DestType>::ColumnType;
     using DestPrimitiveType = typename RunTimeTypeTraits<TYPE_DECIMAL128>::CppType;
 
-    PrimitiveToDecimalConverter(int32_t src_scale, int32_t dst_scale) {
-        if (src_scale < dst_scale) {
-            _scale_type = DecimalScaleType::kScaleUp;
-            _scale_factor = get_scale_factor<DestPrimitiveType>(dst_scale - src_scale);
-        } else if (src_scale > dst_scale) {
-            _scale_type = DecimalScaleType::kScaleDown;
-            _scale_factor = get_scale_factor<DestPrimitiveType>(src_scale - dst_scale);
+    explicit PrimitiveToDecimalConverter(const DecimalScalePlan& plan)
+            : _scale_type(plan.type), _all_null(plan.all_null) {
+        DCHECK(plan.digits >= 0 && plan.digits <= kMaxScaleFactorDigits);
+        if (_scale_type != DecimalScaleType::kNoScale) {
+            _scale_factor = get_scale_factor<DestPrimitiveType>(plan.digits);
         }
     }
 
@@ -198,6 +251,11 @@ public:
 
         bool has_null = false;
         size_t size = src_column->size();
+        if (_all_null) {
+            memset(dst_null_data.data(), 0x1, size);
+            dst_nullable_column->set_has_null(size > 0);
+            return Status::OK();
+        }
         for (size_t i = 0; i < size; i++) {
             dst_null_data[i] = src_null_data[i];
             if (dst_null_data[i]) {
@@ -213,7 +271,12 @@ public:
                 value = src_data[i];
             }
             if (_scale_type == DecimalScaleType::kScaleUp) {
-                value *= _scale_factor;
+                // We fear that a large scale gap makes the product exceed int128, since the scale factor can
+                // be 10^38. Signed overflow is undefined behavior, so we multiply in unsigned arithmetic, where
+                // an overflow wraps. A value that does not fit the destination type is not detected here:
+                // the cast to the destination type keeps its low bits.
+                value = static_cast<DestPrimitiveType>(static_cast<uint128_t>(value) *
+                                                       static_cast<uint128_t>(_scale_factor));
             } else if (_scale_type == DecimalScaleType::kScaleDown) {
                 value /= _scale_factor;
             }
@@ -226,6 +289,7 @@ public:
 private:
     DecimalScaleType _scale_type = DecimalScaleType::kNoScale;
     DestPrimitiveType _scale_factor = 1;
+    bool _all_null = false;
 };
 
 // This class is to convert *fixed length* binary to decimal
@@ -237,15 +301,12 @@ public:
     using DecimalType = typename RunTimeTypeTraits<DestType>::CppType;
     using ColumnType = typename RunTimeTypeTraits<DestType>::ColumnType;
     using DestPrimitiveType = typename RunTimeTypeTraits<TYPE_DECIMAL128>::CppType;
-    BinaryToDecimalConverter(int32_t src_scale, int32_t dst_scale, int32_t type_length) {
-        if (src_scale < dst_scale) {
-            _scale_type = DecimalScaleType::kScaleUp;
-            _scale_factor = get_scale_factor<DestPrimitiveType>(dst_scale - src_scale);
-        } else if (src_scale > dst_scale) {
-            _scale_type = DecimalScaleType::kScaleDown;
-            _scale_factor = get_scale_factor<DestPrimitiveType>(src_scale - dst_scale);
+    BinaryToDecimalConverter(const DecimalScalePlan& plan, int32_t type_length)
+            : _scale_type(plan.type), _type_length(type_length), _all_null(plan.all_null) {
+        DCHECK(plan.digits >= 0 && plan.digits <= kMaxScaleFactorDigits);
+        if (_scale_type != DecimalScaleType::kNoScale) {
+            _scale_factor = get_scale_factor<DestPrimitiveType>(plan.digits);
         }
-        _type_length = type_length;
     }
 
     template <int BINSZ, DecimalScaleType scale_type, typename T, bool has_null>
@@ -282,7 +343,10 @@ public:
             src_data += BINSZ;
             // hardware branch predicator works well here.
             if constexpr (scale_type == DecimalScaleType::kScaleUp) {
-                unscale *= _scale_factor;
+                // Unsigned multiplication, so that an overflow of a large scale gap wraps and is not
+                // undefined behavior, as in PrimitiveToDecimalConverter.
+                unscale = static_cast<DestPrimitiveType>(static_cast<uint128_t>(unscale) *
+                                                         static_cast<uint128_t>(_scale_factor));
             }
             if constexpr (scale_type == DecimalScaleType::kScaleDown) {
                 unscale /= _scale_factor;
@@ -307,13 +371,32 @@ public:
         auto& dst_null_data = dst_nullable_column->null_column_raw_ptr()->get_data();
 
         size_t size = src_column->size();
-        if (_type_length > sizeof(DestPrimitiveType)) {
+        // The switch below has a case for each width from 1 to 16 and nothing else, so we must not reach
+        // it with a width below 1.
+        if (UNLIKELY(_type_length <= 0)) {
+            return Status::Corruption(
+                    strings::Substitute("Invalid type length $0 of FIXED_LEN_BYTE_ARRAY decimal", _type_length));
+        }
+        // A value wider than int128, or a scale of the file that has no int128 divisor, cannot be converted, so
+        // every row is NULL.
+        if (_all_null || _type_length > sizeof(DestPrimitiveType)) {
             memset(dst_null_data.data(), 0x1, size);
             dst_nullable_column->set_has_null(true);
             return Status::OK();
         }
 
         bool has_null = src_nullable_column->has_null();
+
+        // The conversion walks the bytes of the column with a stride of the type length and reads that
+        // many bytes for each non-null row. A value that is shorter than the type length (for example a
+        // min/max statistic in a corrupt file) would make it read past the end of the bytes, so we check
+        // that the column holds the bytes of every non-null row.
+        const size_t num_not_null = size - src_nullable_column->null_count();
+        if (UNLIKELY(src_data.size() < num_not_null * static_cast<size_t>(_type_length))) {
+            return Status::Corruption(strings::Substitute(
+                    "FIXED_LEN_BYTE_ARRAY decimal column holds $0 bytes for $1 non-null values of type length $2",
+                    src_data.size(), num_not_null, _type_length));
+        }
 
         // For calling `src_data.get_bytes().data()` , we don't need to call `build_slices` underneath.
         // And notice bytes are allocated by `RawVectorPad16`, there will be extra 16 bytes.
@@ -368,6 +451,7 @@ private:
     DecimalScaleType _scale_type = DecimalScaleType::kNoScale;
     DestPrimitiveType _scale_factor = 1;
     int32_t _type_length = 0;
+    bool _all_null = false;
 };
 
 template <typename DestType>
@@ -379,17 +463,17 @@ static std::unique_ptr<ColumnConverter> make_int32_numeric_converter(bool src_un
 }
 
 template <LogicalType DestType>
-static std::unique_ptr<ColumnConverter> make_int32_decimal_converter(bool src_unsigned, int32_t src_scale,
-                                                                     int32_t dst_scale) {
+static std::unique_ptr<ColumnConverter> make_int32_decimal_converter(bool src_unsigned, const DecimalScalePlan& plan) {
     if (src_unsigned) {
-        return std::make_unique<PrimitiveToDecimalConverter<int32_t, DestType, true>>(src_scale, dst_scale);
+        return std::make_unique<PrimitiveToDecimalConverter<int32_t, DestType, true>>(plan);
     }
-    return std::make_unique<PrimitiveToDecimalConverter<int32_t, DestType, false>>(src_scale, dst_scale);
+    return std::make_unique<PrimitiveToDecimalConverter<int32_t, DestType, false>>(plan);
 }
 
 Status ColumnConverterFactory::create_converter(const ParquetField& field, const TypeDescriptor& typeDescriptor,
                                                 const std::string& timezone,
-                                                std::unique_ptr<ColumnConverter>* converter) {
+                                                std::unique_ptr<ColumnConverter>* converter,
+                                                const std::string& file_name) {
     LogicalType col_type = typeDescriptor.type;
     bool need_convert = false;
     tparquet::Type::type parquet_type = field.physical_type;
@@ -436,19 +520,27 @@ Status ColumnConverterFactory::create_converter(const ParquetField& field, const
             // when decimal precision is greater than 27, precision may be lost in the following
             // process. However to handle most enviroment, we also make progress other than
             // rejection
-        case LogicalType::TYPE_DECIMALV2:
+        case LogicalType::TYPE_DECIMALV2: {
             // All DecimalV2 use scale 9 as scale
-            *converter = make_int32_decimal_converter<TYPE_DECIMALV2>(src_unsigned, field.scale, 9);
+            ASSIGN_OR_RETURN(auto plan, make_decimal_scale_plan(field, 9, file_name));
+            *converter = make_int32_decimal_converter<TYPE_DECIMALV2>(src_unsigned, plan);
             break;
-        case LogicalType::TYPE_DECIMAL32:
-            *converter = make_int32_decimal_converter<TYPE_DECIMAL32>(src_unsigned, field.scale, typeDescriptor.scale);
+        }
+        case LogicalType::TYPE_DECIMAL32: {
+            ASSIGN_OR_RETURN(auto plan, make_decimal_scale_plan(field, typeDescriptor.scale, file_name));
+            *converter = make_int32_decimal_converter<TYPE_DECIMAL32>(src_unsigned, plan);
             break;
-        case LogicalType::TYPE_DECIMAL64:
-            *converter = make_int32_decimal_converter<TYPE_DECIMAL64>(src_unsigned, field.scale, typeDescriptor.scale);
+        }
+        case LogicalType::TYPE_DECIMAL64: {
+            ASSIGN_OR_RETURN(auto plan, make_decimal_scale_plan(field, typeDescriptor.scale, file_name));
+            *converter = make_int32_decimal_converter<TYPE_DECIMAL64>(src_unsigned, plan);
             break;
-        case LogicalType::TYPE_DECIMAL128:
-            *converter = make_int32_decimal_converter<TYPE_DECIMAL128>(src_unsigned, field.scale, typeDescriptor.scale);
+        }
+        case LogicalType::TYPE_DECIMAL128: {
+            ASSIGN_OR_RETURN(auto plan, make_decimal_scale_plan(field, typeDescriptor.scale, file_name));
+            *converter = make_int32_decimal_converter<TYPE_DECIMAL128>(src_unsigned, plan);
             break;
+        }
         default:
             break;
         }
@@ -471,22 +563,27 @@ Status ColumnConverterFactory::create_converter(const ParquetField& field, const
             // when decimal precision is greater than 27, precision may be lost in the following
             // process. However to handle most enviroment, we also make progress other than
             // rejection
-        case LogicalType::TYPE_DECIMALV2:
+        case LogicalType::TYPE_DECIMALV2: {
             // All DecimalV2 use scale 9 as scale
-            *converter = std::make_unique<PrimitiveToDecimalConverter<int64_t, TYPE_DECIMALV2>>(field.scale, 9);
+            ASSIGN_OR_RETURN(auto plan, make_decimal_scale_plan(field, 9, file_name));
+            *converter = std::make_unique<PrimitiveToDecimalConverter<int64_t, TYPE_DECIMALV2>>(plan);
             break;
-        case LogicalType::TYPE_DECIMAL32:
-            *converter = std::make_unique<PrimitiveToDecimalConverter<int64_t, TYPE_DECIMAL32>>(field.scale,
-                                                                                                typeDescriptor.scale);
+        }
+        case LogicalType::TYPE_DECIMAL32: {
+            ASSIGN_OR_RETURN(auto plan, make_decimal_scale_plan(field, typeDescriptor.scale, file_name));
+            *converter = std::make_unique<PrimitiveToDecimalConverter<int64_t, TYPE_DECIMAL32>>(plan);
             break;
-        case LogicalType::TYPE_DECIMAL64:
-            *converter = std::make_unique<PrimitiveToDecimalConverter<int64_t, TYPE_DECIMAL64>>(field.scale,
-                                                                                                typeDescriptor.scale);
+        }
+        case LogicalType::TYPE_DECIMAL64: {
+            ASSIGN_OR_RETURN(auto plan, make_decimal_scale_plan(field, typeDescriptor.scale, file_name));
+            *converter = std::make_unique<PrimitiveToDecimalConverter<int64_t, TYPE_DECIMAL64>>(plan);
             break;
-        case LogicalType::TYPE_DECIMAL128:
-            *converter = std::make_unique<PrimitiveToDecimalConverter<int64_t, TYPE_DECIMAL128>>(field.scale,
-                                                                                                 typeDescriptor.scale);
+        }
+        case LogicalType::TYPE_DECIMAL128: {
+            ASSIGN_OR_RETURN(auto plan, make_decimal_scale_plan(field, typeDescriptor.scale, file_name));
+            *converter = std::make_unique<PrimitiveToDecimalConverter<int64_t, TYPE_DECIMAL128>>(plan);
             break;
+        }
 
         case LogicalType::TYPE_DATETIME: {
             auto _converter = std::make_unique<Int64ToDateTimeConverter>();
@@ -518,22 +615,27 @@ Status ColumnConverterFactory::create_converter(const ParquetField& field, const
             need_convert = true;
         }
         switch (col_type) {
-        case LogicalType::TYPE_DECIMALV2:
+        case LogicalType::TYPE_DECIMALV2: {
             // All DecimalV2 use scale 9 as scale
-            *converter = std::make_unique<BinaryToDecimalConverter<TYPE_DECIMALV2>>(field.scale, 9, type_length);
+            ASSIGN_OR_RETURN(auto plan, make_decimal_scale_plan(field, 9, file_name));
+            *converter = std::make_unique<BinaryToDecimalConverter<TYPE_DECIMALV2>>(plan, type_length);
             break;
-        case LogicalType::TYPE_DECIMAL32:
-            *converter = std::make_unique<BinaryToDecimalConverter<TYPE_DECIMAL32>>(field.scale, typeDescriptor.scale,
-                                                                                    type_length);
+        }
+        case LogicalType::TYPE_DECIMAL32: {
+            ASSIGN_OR_RETURN(auto plan, make_decimal_scale_plan(field, typeDescriptor.scale, file_name));
+            *converter = std::make_unique<BinaryToDecimalConverter<TYPE_DECIMAL32>>(plan, type_length);
             break;
-        case LogicalType::TYPE_DECIMAL64:
-            *converter = std::make_unique<BinaryToDecimalConverter<TYPE_DECIMAL64>>(field.scale, typeDescriptor.scale,
-                                                                                    type_length);
+        }
+        case LogicalType::TYPE_DECIMAL64: {
+            ASSIGN_OR_RETURN(auto plan, make_decimal_scale_plan(field, typeDescriptor.scale, file_name));
+            *converter = std::make_unique<BinaryToDecimalConverter<TYPE_DECIMAL64>>(plan, type_length);
             break;
-        case LogicalType::TYPE_DECIMAL128:
-            *converter = std::make_unique<BinaryToDecimalConverter<TYPE_DECIMAL128>>(field.scale, typeDescriptor.scale,
-                                                                                     type_length);
+        }
+        case LogicalType::TYPE_DECIMAL128: {
+            ASSIGN_OR_RETURN(auto plan, make_decimal_scale_plan(field, typeDescriptor.scale, file_name));
+            *converter = std::make_unique<BinaryToDecimalConverter<TYPE_DECIMAL128>>(plan, type_length);
             break;
+        }
         default:
             break;
         }
@@ -633,10 +735,13 @@ Status parquet::Int32ToDateConverter::convert(const Column* src, Column* dst) {
     // dst_data as raw int32 and add the epoch with SIMD.
     const int32_t* src_ptr = src_data.data();
     int32_t* dst_ptr = reinterpret_cast<int32_t*>(dst_data.data());
-    const int32_t epoch = date::UNIX_EPOCH_JULIAN;
-    // Compiler auto-vectorises the broadcast-add.
+    const uint32_t epoch = static_cast<uint32_t>(date::UNIX_EPOCH_JULIAN);
+    // We add the epoch to every row, so we meet the data of a NULL row, which is uninitialized, and the days of
+    // a corrupt file, which can be any int32. Signed overflow is undefined behavior, and a branch on the NULL
+    // flag would stop the vectorization, so we add in unsigned arithmetic, where an overflow wraps. The
+    // compiler auto-vectorises the broadcast-add.
     for (size_t i = 0; i < size; i++) {
-        dst_ptr[i] = src_ptr[i] + epoch;
+        dst_ptr[i] = static_cast<int32_t>(static_cast<uint32_t>(src_ptr[i]) + epoch);
     }
     dst_nullable_column->set_has_null(src_nullable_column->has_null());
     return Status::OK();

@@ -487,6 +487,16 @@ Status RawColumnReader::_restore_physical_column(ColumnPtr& column) {
 
 // ScalarColumnReader
 
+Status ScalarColumnReader::prepare() {
+    RETURN_IF_ERROR(ColumnConverterFactory::create_converter(
+            *get_column_parquet_field(), *_col_type, _opts.timezone, &_converter,
+            _opts.file != nullptr ? _opts.file->filename() : std::string()));
+    if (_can_lazy_dict_decode && _converter->need_convert) {
+        _can_lazy_dict_decode = false;
+    }
+    return RawColumnReader::prepare();
+}
+
 Status ScalarColumnReader::read_range(const Range<uint64_t>& range, const Filter* filter, ColumnPtr& dst) {
     DCHECK(get_column_parquet_field()->is_nullable ? dst->is_nullable() : true);
     RETURN_IF_ERROR(_restore_physical_column(dst));

@@ -31,6 +31,7 @@
 #include "formats/parquet/schema.h"
 #include "formats/parquet/types.h"
 #include "formats/parquet/utils.h"
+#include "fs/fs.h"
 #include "simd/simd.h"
 
 namespace tparquet {
@@ -271,6 +272,17 @@ Status OptionalStoredColumnReader::_decode_levels(size_t* num_rows, size_t* num_
 Status StoredColumnReader::create(const ColumnReaderOptions& opts, const ParquetField* field,
                                   const tparquet::ColumnChunk* chunk_metadata,
                                   std::unique_ptr<StoredColumnReader>* out) {
+    // The schema and the column chunk of the same column both declare its physical type. We pick the
+    // decoders from the chunk and the type length and the converter from the schema, so a file where the
+    // two differ would feed the decoders a width, a scale or a layout of another type. We stop such a
+    // file here.
+    if (chunk_metadata->meta_data.type != field->physical_type) {
+        return Status::Corruption(
+                fmt::format("Parquet column '{}' has type {} in the schema but {} in its column chunk, file: {}",
+                            field->name, ::tparquet::to_string(field->physical_type),
+                            ::tparquet::to_string(chunk_metadata->meta_data.type), opts.file->filename()));
+    }
+
     if (field->max_rep_level() > 0) {
         std::unique_ptr<RepeatedStoredColumnReader> reader(new RepeatedStoredColumnReader(opts));
         RETURN_IF_ERROR(reader->init(field, chunk_metadata));

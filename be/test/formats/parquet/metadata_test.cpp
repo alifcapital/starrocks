@@ -16,6 +16,10 @@
 
 #include <gtest/gtest.h>
 
+#include <limits>
+
+#include "formats/parquet/utils.h"
+
 namespace starrocks::parquet {
 
 class ParquetMetaDataTest : public testing::Test {
@@ -84,6 +88,37 @@ TEST_F(ParquetMetaDataTest, NumRows) {
 
     // check
     ASSERT_EQ(1024, meta_data.num_rows());
+}
+
+// The footer is the only source of the width of a FIXED_LEN_BYTE_ARRAY column, so a footer with a width
+// that no real file has must fail to init instead of reaching the column readers.
+TEST_F(ParquetMetaDataTest, FixedLenByteArrayTypeLength) {
+    auto init = [](int32_t type_length) {
+        tparquet::SchemaElement root;
+        root.__set_num_children(1);
+
+        tparquet::SchemaElement leaf;
+        leaf.__set_name("flba_col");
+        leaf.__set_type(tparquet::Type::FIXED_LEN_BYTE_ARRAY);
+        leaf.__set_type_length(type_length);
+        leaf.__set_num_children(0);
+
+        tparquet::FileMetaData t_meta;
+        t_meta.__set_version(0);
+        t_meta.__set_schema({root, leaf});
+        t_meta.__set_num_rows(1);
+
+        FileMetaData meta_data;
+        return meta_data.init(t_meta, true);
+    };
+
+    ASSERT_TRUE(init(16).ok());
+    for (int32_t type_length : {0, -1, std::numeric_limits<int32_t>::min(), ParquetUtils::MAX_FLBA_TYPE_LENGTH + 1,
+                                std::numeric_limits<int32_t>::max()}) {
+        Status status = init(type_length);
+        ASSERT_TRUE(status.is_corruption()) << type_length << " " << status.to_string();
+        ASSERT_NE(std::string::npos, status.message().find("flba_col")) << status.message();
+    }
 }
 
 TEST(ApplicationVersion, Basics) {

@@ -527,7 +527,11 @@ Status FileMetaDataParser::_parse_footer(FileMetaDataPtr* file_metadata_ptr, int
 
         *file_metadata_ptr = std::make_shared<FileMetaData>();
         FileMetaData* file_metadata = file_metadata_ptr->get();
-        RETURN_IF_ERROR(file_metadata->init(t_metadata, _scanner_ctx->options.case_sensitive));
+        // The schema errors name the column only, so we add the file to tell which file has the bad footer.
+        Status init_status = file_metadata->init(t_metadata, _scanner_ctx->options.case_sensitive);
+        if (!init_status.ok()) {
+            return init_status.clone_and_append(strings::Substitute("file: $0", _file->filename()));
+        }
         *file_metadata_size = CurrentThread::current().get_consumed_bytes() - before_bytes;
     }
 #if defined(BE_TEST) || defined(__SANITIZE_ADDRESS__) || defined(ADDRESS_SANITIZER)

@@ -171,14 +171,7 @@ public:
             : RawColumnReader(parquet_field, column_chunk_metadata, opts), _col_type(col_type) {}
     ~ScalarColumnReader() override = default;
 
-    Status prepare() override {
-        RETURN_IF_ERROR(ColumnConverterFactory::create_converter(*get_column_parquet_field(), *_col_type,
-                                                                 _opts.timezone, &_converter));
-        if (_can_lazy_dict_decode && _converter->need_convert) {
-            _can_lazy_dict_decode = false;
-        }
-        return RawColumnReader::prepare();
-    }
+    Status prepare() override;
 
     Status read_range(const Range<uint64_t>& range, const Filter* filter, ColumnPtr& dst) override;
 

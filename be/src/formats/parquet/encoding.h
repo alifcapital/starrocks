@@ -68,8 +68,9 @@ public:
         return Status::NotSupported("get_dict_values is not supported");
     }
 
-    // used to set fixed length
-    virtual void set_type_length(int32_t type_length) {}
+    // Used to set the fixed length of FLBA. The decoders of FLBA return Corruption for a length that
+    // a real file cannot have, and the other decoders ignore it.
+    virtual Status set_type_length(int32_t type_length) { return Status::OK(); }
 
     // Set a new page to decode.
     virtual Status set_data(const Slice& data) = 0;

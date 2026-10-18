@@ -149,6 +149,7 @@ Status PageReader::_read_and_deserialize_header(bool need_fill_cache) {
         auto st = deserialize_thrift_msg(page_buf, &_header_length, TProtocolType::COMPACT, &_cur_header);
 
         if (st.ok()) {
+            RETURN_IF_ERROR(_validate_header());
             DCHECK(_header_length > 0);
             page_buffer->resize(_header_length);
             _next_header_pos = _offset + _header_length + _data_length();
@@ -172,6 +173,45 @@ Status PageReader::_read_and_deserialize_header(bool need_fill_cache) {
 
         allowed_page_size *= 2;
     } while (true);
+    return Status::OK();
+}
+
+// The sizes and counts of a page header are signed integers from the file. We use them as sizes of
+// buffers and as the number of values to decode, where a negative number becomes a huge unsigned one,
+// so we reject a negative one before anything uses it.
+Status PageReader::_validate_header() const {
+    if (_cur_header.compressed_page_size < 0 || _cur_header.uncompressed_page_size < 0) {
+        return Status::Corruption(strings::Substitute(
+                "Invalid parquet page header at offset $0, compressed_page_size=$1, uncompressed_page_size=$2", _offset,
+                _cur_header.compressed_page_size, _cur_header.uncompressed_page_size));
+    }
+
+    int32_t num_values = 0;
+    switch (_cur_header.type) {
+    case tparquet::PageType::DATA_PAGE:
+        num_values = _cur_header.data_page_header.num_values;
+        break;
+    case tparquet::PageType::DATA_PAGE_V2: {
+        const auto& page_header = _cur_header.data_page_header_v2;
+        if (page_header.definition_levels_byte_length < 0 || page_header.repetition_levels_byte_length < 0) {
+            return Status::Corruption(strings::Substitute(
+                    "Invalid parquet page header at offset $0, definition_levels_byte_length=$1, "
+                    "repetition_levels_byte_length=$2",
+                    _offset, page_header.definition_levels_byte_length, page_header.repetition_levels_byte_length));
+        }
+        num_values = page_header.num_values;
+        break;
+    }
+    case tparquet::PageType::DICTIONARY_PAGE:
+        num_values = _cur_header.dictionary_page_header.num_values;
+        break;
+    default:
+        break;
+    }
+    if (num_values < 0) {
+        return Status::Corruption(
+                strings::Substitute("Invalid parquet page header at offset $0, num_values=$1", _offset, num_values));
+    }
     return Status::OK();
 }
 
@@ -285,8 +325,17 @@ Status PageReader::_decompress_page(starrocks::Slice& input, starrocks::Slice* o
     if (_cur_header.type == tparquet::PageType::DATA_PAGE_V2) {
         auto uncompressed_size = output->size;
         auto* mark_pointer = output->data;
-        uint32_t bytes_level_size = _cur_header.data_page_header_v2.definition_levels_byte_length +
-                                    _cur_header.data_page_header_v2.repetition_levels_byte_length;
+        // Both lengths come from the header, so we add them in 64 bits and check that the levels fit in
+        // the compressed input and in the output before we copy them: the copy has no other bound.
+        const int64_t bytes_level_size =
+                static_cast<int64_t>(_cur_header.data_page_header_v2.definition_levels_byte_length) +
+                _cur_header.data_page_header_v2.repetition_levels_byte_length;
+        if (bytes_level_size < 0 || static_cast<uint64_t>(bytes_level_size) > input.size ||
+            static_cast<uint64_t>(bytes_level_size) > output->size) {
+            return Status::Corruption(strings::Substitute(
+                    "Invalid levels length $0 in parquet data page v2, compressed size=$1, uncompressed size=$2",
+                    bytes_level_size, input.size, output->size));
+        }
         memcpy(output->data, input.data, bytes_level_size);
         input.remove_prefix(bytes_level_size);
         output->remove_prefix(bytes_level_size);

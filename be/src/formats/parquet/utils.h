@@ -41,6 +41,16 @@ using ColumnIOTypeFlags = int32_t;
 
 class ParquetUtils {
 public:
+    // The byte width of a FIXED_LEN_BYTE_ARRAY column comes from the file footer. We are afraid that a
+    // corrupt footer turns it into a huge offset or allocation, so we accept only widths that a real
+    // file can have. A value lives in one cell of a binary column, which holds at most 1 MB (the
+    // VARCHAR limit), and real columns are much narrower: a UUID is 16 bytes, a decimal at most 32 bytes.
+    static constexpr int32_t MAX_FLBA_TYPE_LENGTH = 1 << 20;
+
+    static bool is_valid_flba_type_length(int32_t type_length) {
+        return type_length > 0 && type_length <= MAX_FLBA_TYPE_LENGTH;
+    }
+
     static CompressionTypePB convert_compression_codec(tparquet::CompressionCodec::type parquet_codec);
 
     static int decimal_precision_to_byte_count(int precision);

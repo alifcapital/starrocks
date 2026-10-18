@@ -1,7 +1,9 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <limits>
 #include <memory>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -12,6 +14,7 @@
 #include "column/type_traits.h"
 #include "formats/parquet/encoding.h"
 #include "formats/parquet/encoding_dict.h"
+#include "formats/parquet/encoding_plain.h"
 #include "formats/parquet/utils.h"
 #include "runtime/mem_pool.h"
 #include "runtime/types.h"
@@ -475,4 +478,214 @@ TEST(DictEncodingReadTest, FilterExcludedRowsAreMarkedNull) {
         EXPECT_EQ(binary->get_bytes().size(), binary->get_offset().back());
     }
 }
+
+// The number of values in a dictionary page comes from its header. A corrupt header can claim far more
+// values than the page holds, and set_dict must then return the error of the decoder of the page without
+// allocating memory for the claim.
+TEST(DictEncodingReadTest, SetDictWithMoreValuesThanThePageHolds) {
+    const std::vector<size_t> claims = {9, size_t(1) << 20, size_t(1) << 40, std::numeric_limits<size_t>::max()};
+
+    {
+        std::vector<int32_t> values(8);
+        std::iota(values.begin(), values.end(), 0);
+        PlainEncoder<int32_t> encoder;
+        ASSERT_OK(encoder.append(reinterpret_cast<const uint8_t*>(values.data()), values.size()));
+        Slice page = encoder.build();
+
+        for (size_t claim : claims) {
+            PlainDecoder<int32_t> plain;
+            ASSERT_OK(plain.set_data(page));
+            DictDecoder<int32_t> decoder;
+            Status st = decoder.set_dict(10, claim, &plain);
+            ASSERT_FALSE(st.ok()) << claim;
+            ASSERT_LE(decoder._dict.capacity(), 2 * DictDecoder<int32_t>::kDictDecodeStep) << claim;
+        }
+    }
+    {
+        std::vector<std::string> strings = {"a", "bc", "def"};
+        std::vector<Slice> slices(strings.begin(), strings.end());
+        PlainEncoder<Slice> encoder;
+        ASSERT_OK(encoder.append(reinterpret_cast<const uint8_t*>(slices.data()), slices.size()));
+        Slice page = encoder.build();
+
+        for (size_t claim : claims) {
+            PlainDecoder<Slice> plain;
+            ASSERT_OK(plain.set_data(page));
+            DictDecoder<Slice> decoder;
+            Status st = decoder.set_dict(10, claim, &plain);
+            ASSERT_FALSE(st.ok()) << claim;
+            ASSERT_LE(decoder._dict_data.capacity(), size_t(1) << 20) << claim;
+        }
+    }
+}
+
+// A dictionary that is longer than one step of set_dict, and an empty one.
+TEST(DictEncodingReadTest, SetDictInSeveralSteps) {
+    {
+        const size_t num_values = 3 * DictDecoder<int32_t>::kDictDecodeStep + 5;
+        std::vector<int32_t> values(num_values);
+        for (size_t i = 0; i < num_values; ++i) {
+            values[i] = static_cast<int32_t>(i * 3);
+        }
+        PlainEncoder<int32_t> encoder;
+        ASSERT_OK(encoder.append(reinterpret_cast<const uint8_t*>(values.data()), values.size()));
+
+        PlainDecoder<int32_t> plain;
+        ASSERT_OK(plain.set_data(encoder.build()));
+        DictDecoder<int32_t> decoder;
+        ASSERT_OK(decoder.set_dict(10, num_values, &plain));
+        ASSERT_EQ(num_values, decoder._dict.size());
+        ASSERT_EQ(0, memcmp(values.data(), decoder._dict.data(), num_values * sizeof(int32_t)));
+    }
+    {
+        const size_t num_values = 2 * DictDecoder<Slice>::kDictDecodeStep + 7;
+        std::vector<std::string> strings;
+        for (size_t i = 0; i < num_values; ++i) {
+            strings.push_back("v" + std::to_string(i));
+        }
+        std::vector<Slice> slices(strings.begin(), strings.end());
+        PlainEncoder<Slice> encoder;
+        ASSERT_OK(encoder.append(reinterpret_cast<const uint8_t*>(slices.data()), slices.size()));
+
+        PlainDecoder<Slice> plain;
+        ASSERT_OK(plain.set_data(encoder.build()));
+        DictDecoder<Slice> decoder;
+        ASSERT_OK(decoder.set_dict(10, num_values, &plain));
+
+        auto column = BinaryColumn::create();
+        ASSERT_OK(decoder.get_dict_values(column.get()));
+        ASSERT_EQ(num_values, column->size());
+        for (size_t i = 0; i < num_values; ++i) {
+            ASSERT_EQ(strings[i], column->get_slice(i).to_string()) << i;
+        }
+    }
+    {
+        PlainEncoder<int32_t> int_encoder;
+        PlainDecoder<int32_t> int_plain;
+        ASSERT_OK(int_plain.set_data(int_encoder.build()));
+        DictDecoder<int32_t> int_decoder;
+        ASSERT_OK(int_decoder.set_dict(10, 0, &int_plain));
+        ASSERT_EQ(0U, int_decoder._dict.size());
+
+        PlainEncoder<Slice> slice_encoder;
+        PlainDecoder<Slice> slice_plain;
+        ASSERT_OK(slice_plain.set_data(slice_encoder.build()));
+        DictDecoder<Slice> slice_decoder;
+        ASSERT_OK(slice_decoder.set_dict(10, 0, &slice_plain));
+        ASSERT_EQ(0U, slice_decoder._dict.size());
+    }
+}
+
+// The consumers of dictionary codes index the dictionary with them. A code that the dictionary does not
+// have must come back as an error when the codes are read, whether they are read with or without NULLs.
+template <typename DecoderType, LogicalType DICT_VALUE_TYPE>
+static void dict_code_out_of_bounds_test() {
+    constexpr size_t kCount = 100;
+    // FakeDictDecoder makes a dictionary of 10 values, so the codes 0..9 are the valid ones.
+    const std::vector<std::pair<uint32_t, bool>> codes = {{0, true}, {9, true}, {10, false}, {0xffffffffU, false}};
+
+    NullInfos infos;
+    infos.reset_with_capacity(kCount);
+    infos.num_nulls = 0;
+    for (size_t i = 0; i < kCount; ++i) {
+        infos.nulls_data()[i] = (i % 4) == 0;
+        infos.num_nulls += infos.nulls_data()[i];
+    }
+    // num_ranges > 2 routes to next_dict_code_batch_with_nulls() rather than the row-by-row fallback.
+    infos.num_ranges = kCount / 2;
+
+    for (const auto& [code, valid] : codes) {
+        faststring page;
+        build_repeated_run_page(&page, code, kCount);
+        {
+            DecoderType decoder;
+            FakeDictDecoder<DICT_VALUE_TYPE> inner_decoder;
+            ASSERT_OK(decoder.set_data(Slice(page.data(), page.length())));
+            ASSERT_OK(decoder.set_dict(10, 10, &inner_decoder));
+            auto dst = ColumnHelper::create_column(TypeDescriptor(TYPE_INT), true);
+            Status st = decoder.next_batch(kCount, ColumnContentType::DICT_CODE, dst.get(), nullptr);
+            ASSERT_EQ(valid, st.ok()) << code << " " << st.to_string();
+            if (!valid) {
+                ASSERT_TRUE(st.is_corruption()) << st.to_string();
+            }
+        }
+        {
+            DecoderType decoder;
+            FakeDictDecoder<DICT_VALUE_TYPE> inner_decoder;
+            ASSERT_OK(decoder.set_data(Slice(page.data(), page.length())));
+            ASSERT_OK(decoder.set_dict(10, 10, &inner_decoder));
+            auto dst = ColumnHelper::create_column(TypeDescriptor(TYPE_INT), true);
+            Status st = decoder.next_batch_with_nulls(kCount, infos, ColumnContentType::DICT_CODE, dst.get(), nullptr);
+            ASSERT_EQ(valid, st.ok()) << code << " " << st.to_string();
+            if (!valid) {
+                ASSERT_TRUE(st.is_corruption()) << st.to_string();
+            }
+        }
+    }
+}
+
+TEST(DictEncodingReadTest, DictCodeOutOfDictionaryBounds) {
+    dict_code_out_of_bounds_test<DictDecoder<int32_t>, TYPE_INT>();
+    dict_code_out_of_bounds_test<DictDecoder<Slice>, TYPE_VARCHAR>();
+}
+
+// get_dict_values looks the dictionary up with the codes it is given. A NULL row has no code (its slot is
+// not set), so it must not be looked up, and it must hold no byte in the column: the bytes of the rows that
+// are not NULL have to start where the previous row ended, as they do when the values are read directly.
+TEST(DictEncodingReadTest, GetDictValuesSkipsNullRows) {
+    DictDecoder<Slice> decoder;
+    FakeDictDecoder<TYPE_VARCHAR> inner_decoder;
+    ASSERT_OK(decoder.set_dict(10, 10, &inner_decoder));
+
+    auto make_nulls = [](const Buffer<int32_t>& codes, const std::vector<uint8_t>& is_null) {
+        auto data = Int32Column::create();
+        auto null_column = NullColumn::create();
+        for (size_t i = 0; i < codes.size(); ++i) {
+            data->append(codes[i]);
+            null_column->append(is_null[i]);
+        }
+        auto nullable = NullableColumn::create(std::move(data), std::move(null_column));
+        nullable->update_has_null();
+        return nullable;
+    };
+
+    // The codes in the slots of the NULL rows (0 and 3) are garbage, and one is not even in the dictionary.
+    {
+        Buffer<int32_t> codes = {7777, 3, 5, -1, 9};
+        auto nulls = make_nulls(codes, {1, 0, 0, 1, 0});
+        auto dst = BinaryColumn::create();
+        ASSERT_OK(decoder.get_dict_values(codes, *nulls, dst.get()));
+        ASSERT_EQ(5U, dst->size());
+        ASSERT_EQ(3U, dst->get_bytes().size());
+        const std::vector<std::string> expected = {"", "3", "5", "", "9"};
+        for (size_t i = 0; i < expected.size(); ++i) {
+            ASSERT_EQ(expected[i], dst->get_slice(i).to_string()) << i;
+        }
+    }
+    // a code of a row that is not NULL must be in the dictionary
+    for (int32_t bad_code : {10, -1, std::numeric_limits<int32_t>::max()}) {
+        Buffer<int32_t> codes = {7777, 3, bad_code, -1, 9};
+        auto nulls = make_nulls(codes, {1, 0, 0, 1, 0});
+        auto dst = BinaryColumn::create();
+        Status st = decoder.get_dict_values(codes, *nulls, dst.get());
+        ASSERT_TRUE(st.is_corruption()) << bad_code << " " << st.to_string();
+
+        // the same without a NULL row
+        Buffer<int32_t> codes_without_null = {3, bad_code};
+        auto nulls_without_null = make_nulls(codes_without_null, {0, 0});
+        st = decoder.get_dict_values(codes_without_null, *nulls_without_null, dst.get());
+        ASSERT_TRUE(st.is_corruption()) << bad_code << " " << st.to_string();
+    }
+    // a dictionary of no value cannot serve a row that is not NULL
+    {
+        DictDecoder<Slice> empty_decoder;
+        FakeDictDecoder<TYPE_VARCHAR> empty_inner;
+        ASSERT_OK(empty_decoder.set_dict(10, 0, &empty_inner));
+        Buffer<int32_t> codes = {0, 0};
+        auto nulls = make_nulls(codes, {1, 0});
+        auto dst = BinaryColumn::create();
+        ASSERT_TRUE(empty_decoder.get_dict_values(codes, *nulls, dst.get()).is_corruption());
+    }
+}
+
 } // namespace starrocks::parquet

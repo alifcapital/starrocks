@@ -23,6 +23,7 @@
 #include "column/vectorized_fwd.h"
 #include "common/status.h"
 #include "formats/parquet/encoding.h"
+#include "formats/parquet/utils.h"
 #include "gutil/strings/substitute.h"
 #include "types/int256.h"
 #include "util/bit_stream_utils.h"
@@ -119,9 +120,15 @@ public:
 
     std::string to_string() const override { return fmt::format("PlainDecoder<{}>", typeid(T).name()); }
 
+    // The buffer is a min/max statistic from the footer or the page index, and its length is not ours to
+    // trust: we copy sizeof(T) bytes, so a shorter buffer would be read past its end.
     static Status decode(const std::string& buffer, T* value) {
-        int byte_size = sizeof(T);
-        memcpy(value, buffer.c_str(), byte_size);
+        if (UNLIKELY(buffer.size() < sizeof(T))) {
+            return Status::Corruption(
+                    strings::Substitute("A statistic value of $0 bytes is shorter than the $1 bytes of its type",
+                                        buffer.size(), sizeof(T)));
+        }
+        memcpy(value, buffer.data(), sizeof(T));
         return Status::OK();
     }
 
@@ -132,11 +139,8 @@ public:
     }
 
     Status next_batch(size_t count, ColumnContentType content_type, Column* dst, const FilterData* filter) override {
-        size_t max_fetch = count * SIZE_OF_TYPE;
-        if (max_fetch + _offset > _data.size) {
-            return Status::InternalError(strings::Substitute(
-                    "going to read out-of-bounds data, offset=$0,count=$1,size=$2", _offset, count, _data.size));
-        }
+        size_t max_fetch = 0;
+        RETURN_IF_ERROR(_get_values_size(count, "read", &max_fetch));
         auto n = dst->append_numbers(_data.data + _offset, max_fetch);
         DCHECK_EQ(count, n);
         _offset += max_fetch;
@@ -144,27 +148,33 @@ public:
     }
 
     Status skip(size_t values_to_skip) override {
-        size_t fetch_size = values_to_skip * SIZE_OF_TYPE;
-        if (fetch_size + _offset > _data.size) {
-            return Status::InternalError(strings::Substitute(
-                    "going to skip out-of-bounds data, offset=$0,skip=$1,size=$2", _offset, fetch_size, _data.size));
-        }
+        size_t fetch_size = 0;
+        RETURN_IF_ERROR(_get_values_size(values_to_skip, "skip", &fetch_size));
         _offset += fetch_size;
         return Status::OK();
     }
 
     Status next_batch(size_t count, uint8_t* dst) override {
-        size_t max_fetch = count * SIZE_OF_TYPE;
-        if (max_fetch + _offset > _data.size) {
-            return Status::InternalError(strings::Substitute(
-                    "going to read out-of-bounds data, offset=$0,count=$1,size=$2", _offset, count, _data.size));
-        }
+        size_t max_fetch = 0;
+        RETURN_IF_ERROR(_get_values_size(count, "read", &max_fetch));
         memcpy(dst, _data.data + _offset, max_fetch);
         _offset += max_fetch;
         return Status::OK();
     }
 
 private:
+    // Returns in `bytes` the size of `count` values, and checks that the rest of the page holds them.
+    // We are afraid that the product wraps when count is large, and then a wrapped size passes the
+    // comparison with the page size and the caller reads outside the page. So we detect the wrap first.
+    Status _get_values_size(size_t count, const char* action, size_t* bytes) const {
+        if (UNLIKELY(__builtin_mul_overflow(count, static_cast<size_t>(SIZE_OF_TYPE), bytes) || *bytes > _data.size ||
+                     _offset > _data.size - *bytes)) {
+            return Status::InternalError(strings::Substitute(
+                    "going to $0 out-of-bounds data, offset=$1,count=$2,size=$3", action, _offset, count, _data.size));
+        }
+        return Status::OK();
+    }
+
     enum { SIZE_OF_TYPE = sizeof(T) };
 
     Slice _data;
@@ -222,10 +232,15 @@ public:
         char** datas = _temp_datas.data();
         size_t i = 0;
         size_t cursor = _offset;
-        //
-        for (i = 0; (i < read_count) & (_offset < _data.size); ++i) {
+        // We fear a corrupt page: a length prefix or a value that does not fit in the page would make us read
+        // and copy memory after the page. So the loop condition checks that the prefix fits, and the value
+        // is checked once its length is known.
+        for (i = 0; (i < read_count) & (cursor + sizeof(uint32_t) <= _data.size); ++i) {
             uint32_t length = decode_fixed32_le(reinterpret_cast<const uint8_t*>(_data.data) + cursor);
             cursor += sizeof(int32_t);
+            if (UNLIKELY(length > _data.size - cursor)) {
+                return _out_of_bounds_error(cursor, count);
+            }
             datas[i] = _data.data + cursor;
             cursor += length;
             lengths[i] = length;
@@ -276,10 +291,9 @@ public:
             down_cast<NullableColumn*>(dst)->null_column_raw_ptr()->append_default(count);
         }
 
-#define CHECK_DECODING_BOUND                                                                                  \
-    if (UNLIKELY(num_decoded < count || _offset > _data.size)) {                                              \
-        return Status::InternalError(strings::Substitute(                                                     \
-                "going to read out-of-bounds data, offset=$0,count=$1,size=$2", _offset, count, _data.size)); \
+#define CHECK_DECODING_BOUND                                     \
+    if (UNLIKELY(num_decoded < count || _offset > _data.size)) { \
+        return _out_of_bounds_error(_offset, count);             \
     }
 
         if (filter) {
@@ -296,9 +310,14 @@ public:
                 dst_nulls = null_data.data() + null_data.size() - count;
             }
             size_t num_dropped = 0;
-            while (num_decoded < count && _offset < _data.size) {
+            // We fear a corrupt page: a length that does not fit in the page would make us copy memory after
+            // it. So the loop condition checks that the prefix fits and the value is checked before the copy.
+            while (num_decoded < count && _offset + sizeof(int32_t) <= _data.size) {
                 uint32_t length = decode_fixed32_le(reinterpret_cast<const uint8_t*>(_data.data) + _offset);
                 _offset += sizeof(int32_t);
+                if (UNLIKELY(length > _data.size - _offset)) {
+                    return _out_of_bounds_error(_offset, count);
+                }
                 if (filter[num_decoded]) {
                     binary_column->append(Slice(_data.data + _offset, length));
                 } else {
@@ -319,7 +338,10 @@ public:
             auto slices_data = std::make_unique_for_overwrite<uint8_t[]>(count * sizeof(Slice));
             Slice* slices = reinterpret_cast<Slice*>(slices_data.get());
             size_t max_size = 0;
-            while (num_decoded < count && _offset < _data.size) {
+            // The slices only point into the page here, and CHECK_DECODING_BOUND runs before they are used. The
+            // loop condition checks that the prefix fits, so a corrupt length ends the loop with _offset
+            // after the page.
+            while (num_decoded < count && _offset + sizeof(int32_t) <= _data.size) {
                 uint32_t length = decode_fixed32_le(reinterpret_cast<const uint8_t*>(_data.data) + _offset);
                 _offset += sizeof(int32_t);
                 slices[num_decoded] = {_data.data + _offset, length};
@@ -328,6 +350,9 @@ public:
                 num_decoded++;
             }
             CHECK_DECODING_BOUND
+            if (num_decoded == 0) {
+                return Status::OK();
+            }
             bool ret = false;
             // when last slices offset + max_size > _data.size, there is overflow on reading
             max_size = std::max(BitUtil::next_power_of_two(max_size), 8L);
@@ -347,7 +372,7 @@ public:
 
     Status skip(size_t values_to_skip) override {
         size_t num_decoded = 0;
-        while (num_decoded < values_to_skip && _offset < _data.size) {
+        while (num_decoded < values_to_skip && _offset + sizeof(int32_t) <= _data.size) {
             uint32_t length = decode_fixed32_le(reinterpret_cast<const uint8_t*>(_data.data) + _offset);
             _offset += sizeof(int32_t);
             _offset += length;
@@ -365,7 +390,7 @@ public:
         auto* slices = reinterpret_cast<Slice*>(dst);
 
         size_t num_decoded = 0;
-        while (num_decoded < count && _offset < _data.size) {
+        while (num_decoded < count && _offset + sizeof(int32_t) <= _data.size) {
             uint32_t length = decode_fixed32_le(reinterpret_cast<const uint8_t*>(_data.data) + _offset);
             _offset += sizeof(int32_t);
             slices[num_decoded] = Slice(_data.data + _offset, length);
@@ -381,6 +406,11 @@ public:
     }
 
 private:
+    Status _out_of_bounds_error(size_t offset, size_t count) const {
+        return Status::InternalError(strings::Substitute("going to read out-of-bounds data, offset=$0,count=$1,size=$2",
+                                                         offset, count, _data.size));
+    }
+
     // We expect a pushed-down filter to keep few rows, so we copy the bytes of the selected rows only.
     // We still read the length prefix of every non-null value, because it is the only way to find where
     // the next value starts. A NULL row and a row that the filter drops both get an empty value. We fear a
@@ -417,14 +447,12 @@ private:
         for (size_t i = 0; i < count; ++i) {
             if (!is_nulls[i]) {
                 if (UNLIKELY(cursor + sizeof(uint32_t) > _data.size)) {
-                    return Status::InternalError(strings::Substitute(
-                            "going to read out-of-bounds data, offset=$0,count=$1,size=$2", cursor, count, _data.size));
+                    return _out_of_bounds_error(cursor, count);
                 }
                 uint32_t length = decode_fixed32_le(reinterpret_cast<const uint8_t*>(_data.data) + cursor);
                 cursor += sizeof(uint32_t);
                 if (UNLIKELY(length > _data.size - cursor)) {
-                    return Status::InternalError(strings::Substitute(
-                            "going to read out-of-bounds data, offset=$0,count=$1,size=$2", cursor, count, _data.size));
+                    return _out_of_bounds_error(cursor, count);
                 }
                 if (filter[i]) {
                     datas[num_selected] = _data.data + cursor;
@@ -482,10 +510,12 @@ public:
     Status set_data(const Slice& data) override {
         _batched_bit_reader.reset(reinterpret_cast<const uint8_t*>(data.data), data.size);
         _decoded_values_buffer.reset();
+        _bits_left = static_cast<uint64_t>(data.size) * 8;
         return Status::OK();
     }
 
     Status next_batch(size_t count, ColumnContentType content_type, Column* dst, const FilterData* filter) override {
+        RETURN_IF_ERROR(_check_values_left(count));
         auto original_size = dst->size();
         dst->resize(original_size + count);
         auto num_unpacked_values = unpack_batch(count, dst->mutable_raw_data() + original_size);
@@ -493,10 +523,12 @@ public:
             return Status::InternalError(strings::Substitute(
                     "going to read out-of-bounds data, count=$0,num_unpacked_values=$1", count, num_unpacked_values));
         }
+        _bits_left -= count;
         return Status::OK();
     }
 
     Status skip(size_t values_to_skip) override {
+        RETURN_IF_ERROR(_check_values_left(values_to_skip));
         //TODO(Smith) still heavy work load
         // resize() — see encoding_bss.h: reserve() leaves storage uninitialised,
         // writing through data() is UB.
@@ -505,15 +537,29 @@ public:
     }
 
     Status next_batch(size_t count, uint8_t* dst) override {
+        RETURN_IF_ERROR(_check_values_left(count));
         auto num_unpacked_values = unpack_batch(count, dst);
         if (num_unpacked_values < count) {
             return Status::InternalError(strings::Substitute(
                     "going to read out-of-bounds data, count=$0,num_unpacked_values=$1", count, num_unpacked_values));
         }
+        _bits_left -= count;
         return Status::OK();
     }
 
 private:
+    // A value takes one bit. The count comes from the page header and the caller, and the caller sizes its
+    // buffer from it, so we stop a count that the page cannot hold before any buffer is sized.
+    Status _check_values_left(size_t count) const {
+        if (UNLIKELY(count > _bits_left)) {
+            return Status::InternalError(strings::Substitute(
+                    "going to read out-of-bounds data, count=$0,values left=$1", count, _bits_left));
+        }
+        return Status::OK();
+    }
+
+    uint64_t _bits_left = 0;
+
     static const int kBitPackedBatchSize = 32;
     static const int kBitPackedDefaultValue = 8;
 
@@ -612,7 +658,16 @@ public:
         return Status::OK();
     }
 
-    void set_type_length(int32_t type_length) override { _type_length = type_length; }
+    Status set_type_length(int32_t type_length) override {
+        if (UNLIKELY(!ParquetUtils::is_valid_flba_type_length(type_length))) {
+            _type_length = 0;
+            return Status::Corruption(
+                    strings::Substitute("Invalid type length $0 of FIXED_LEN_BYTE_ARRAY, expect a value in [1, $1]",
+                                        type_length, ParquetUtils::MAX_FLBA_TYPE_LENGTH));
+        }
+        _type_length = type_length;
+        return Status::OK();
+    }
 
     Status set_data(const Slice& data) override {
         _data = data;
@@ -621,15 +676,13 @@ public:
     }
 
     Status next_batch(size_t count, ColumnContentType content_type, Column* dst, const FilterData* filter) override {
-        if (_offset + _type_length * count > _data.size) {
-            return Status::InternalError(strings::Substitute(
-                    "going to read out-of-bounds data, offset=$0,count=$1,size=$2", _offset, count, _data.size));
-        }
+        size_t bytes = 0;
+        RETURN_IF_ERROR(_get_values_size(count, "read", &bytes));
         auto ret = dst->append_continuous_fixed_length_strings(_data.data + _offset, count, _type_length);
         if (UNLIKELY(!ret)) {
             return Status::InternalError("FLBAPlainDecoder append strings to column failed");
         }
-        _offset += count * _type_length;
+        _offset += bytes;
         return Status::OK();
     }
 
@@ -642,23 +695,21 @@ public:
         const uint8_t* __restrict is_nulls = null_infos.nulls_data();
         DCHECK(dst->is_nullable());
         auto* nullable_column = down_cast<NullableColumn*>(dst);
+        size_t null_cnt = null_infos.num_nulls;
+        size_t read_count = count - null_cnt;
+        // check the page holds the values before we change the column
+        size_t read_bytes_size = 0;
+        RETURN_IF_ERROR(_get_values_size(read_count, "read", &read_bytes_size));
         // fill null columns
         _next_null_column(count, null_infos, nullable_column);
         // fill data columns
         auto* binary_column = down_cast<BinaryColumn*>(nullable_column->data_column_raw_ptr());
-        size_t null_cnt = null_infos.num_nulls;
-        size_t read_count = count - null_cnt;
 
         auto& bytes = binary_column->get_bytes();
         size_t offset = bytes.size();
         {
             // fill byte columns
             size_t prev_bytes_size = bytes.size();
-            size_t read_bytes_size = _type_length * read_count;
-            if (_offset + read_bytes_size > _data.size) {
-                return Status::InternalError(strings::Substitute(
-                        "going to read out-of-bounds data, offset=$0,count=$1,size=$2", _offset, count, _data.size));
-            }
 
             bytes.resize(prev_bytes_size + read_bytes_size);
             memcpy(bytes.data() + prev_bytes_size, _data.data + _offset, read_bytes_size);
@@ -680,20 +731,15 @@ public:
     }
 
     Status skip(size_t values_to_skip) override {
-        if (_offset + _type_length * values_to_skip > _data.size) {
-            return Status::InternalError(
-                    strings::Substitute("going to skip out-of-bounds data, offset=$0,skip=$1,size=$2", _offset,
-                                        _type_length * values_to_skip, _data.size));
-        }
-        _offset += _type_length * values_to_skip;
+        size_t bytes = 0;
+        RETURN_IF_ERROR(_get_values_size(values_to_skip, "skip", &bytes));
+        _offset += bytes;
         return Status::OK();
     }
 
     Status next_batch(size_t count, uint8_t* dst) override {
-        if (_offset + _type_length * count > _data.size) {
-            return Status::InternalError(strings::Substitute(
-                    "going to read out-of-bounds data, offset=$0,count=$1,size=$2", _offset, count, _data.size));
-        }
+        size_t bytes = 0;
+        RETURN_IF_ERROR(_get_values_size(count, "read", &bytes));
 
         auto* slices = reinterpret_cast<Slice*>(dst);
         size_t i = 0;
@@ -731,8 +777,28 @@ public:
     }
 
 private:
+    // Returns in `bytes` the size of `count` values, and checks that the rest of the page holds them.
+    // We are afraid that the product of the type length and count wraps: a wrapped size passes the
+    // comparison with the page size and the caller reads outside the page. So we detect the wrap first,
+    // and compare the size without adding to the offset.
+    Status _get_values_size(size_t count, const char* action, size_t* bytes) const {
+        *bytes = 0;
+        if (count == 0) {
+            return Status::OK();
+        }
+        if (UNLIKELY(_type_length == 0)) {
+            return Status::Corruption("FIXED_LEN_BYTE_ARRAY type length is not set");
+        }
+        if (UNLIKELY(__builtin_mul_overflow(_type_length, count, bytes) || *bytes > _data.size ||
+                     _offset > _data.size - *bytes)) {
+            return Status::InternalError(strings::Substitute(
+                    "going to $0 out-of-bounds data, offset=$1,count=$2,size=$3", action, _offset, count, _data.size));
+        }
+        return Status::OK();
+    }
+
     Slice _data;
-    size_t _type_length;
+    size_t _type_length = 0;
     size_t _offset = 0;
 };
 
