@@ -381,4 +381,130 @@ public class PointRangeEstimateTest {
             Assertions.assertEquals(rows(compare(BinaryType.EQ, D, number(a))), rows(oneDay), 0.0, String.valueOf(a));
         }
     }
+
+    @Test
+    public void testRangesWithNoValueKeepNoRow() {
+        // A column of whole numbers has no value between a and a + 1: the rows are none, which is the one row an
+        // estimate keeps when it finds none, with statistics and without them.
+        for (ColumnRefOperator column : List.of(D, HISTOGRAM, STATUS, BIG, UNKNOWN, STALE)) {
+            ConstantOperator five = column.getType().isBigint() ? ConstantOperator.createBigint(5) : number(5);
+            ConstantOperator six = column.getType().isBigint() ? ConstantOperator.createBigint(6) : number(6);
+            for (ScalarOperator empty : List.of(
+                    Utils.compoundAnd(compare(BinaryType.GT, column, five), compare(BinaryType.LT, column, six)),
+                    Utils.compoundAnd(compare(BinaryType.GE, column, six), compare(BinaryType.LT, column, six)),
+                    Utils.compoundAnd(compare(BinaryType.GT, column, five), compare(BinaryType.LE, column, five)),
+                    Utils.compoundAnd(compare(BinaryType.GE, column, six), compare(BinaryType.LE, column, five)))) {
+                Assertions.assertEquals(1, rows(empty), 1e-6, empty.toString());
+            }
+        }
+        ScalarOperator emptyDays = Utils.compoundAnd(compare(BinaryType.GT, DAY, day(2026, 3, 1)),
+                compare(BinaryType.LT, DAY, day(2026, 3, 2)));
+        Assertions.assertEquals(1, rows(emptyDays), 1e-6);
+        // Next to other conditions, and within an OR with a part that keeps rows.
+        ScalarOperator empty = Utils.compoundAnd(compare(BinaryType.GT, D, number(5)), compare(BinaryType.LT, D, number(6)));
+        Assertions.assertEquals(1, rows(Utils.compoundAnd(empty, compare(BinaryType.GE, STATUS, number(1)))), 1e-6);
+        ScalarOperator status = compare(BinaryType.EQ, STATUS, number(1));
+        Assertions.assertEquals(rows(status), rows(Utils.compoundOr(empty, status)), 1e-6);
+        // The part that keeps no row is no part of the OR: the equalities of one column after it are told apart, and add
+        // their rows, 3 values of 805, as without it.
+        ScalarOperator three = Utils.compoundOr(List.of(compare(BinaryType.EQ, D, number(18000)),
+                compare(BinaryType.EQ, D, number(18001)), compare(BinaryType.EQ, D, number(18002))));
+        Assertions.assertEquals(3 * ROWS / 805, rows(three), 1e-6);
+        Assertions.assertEquals(rows(three), rows(Utils.compoundOr(empty, three)), 1e-6);
+        Assertions.assertEquals(rows(three), rows(Utils.compoundOr(List.of(compare(BinaryType.EQ, D, number(18000)), empty,
+                compare(BinaryType.EQ, D, number(18001)), compare(BinaryType.EQ, D, number(18002))))), 1e-6);
+        // An OR of them alone, and an AND with it, keep the one row an estimate keeps.
+        ScalarOperator emptyStatus = Utils.compoundAnd(compare(BinaryType.GT, STATUS, number(1)),
+                compare(BinaryType.LT, STATUS, number(2)));
+        Assertions.assertEquals(1, rows(Utils.compoundOr(empty, emptyStatus)), 1e-6);
+        Assertions.assertEquals(1, rows(Utils.compoundAnd(status, Utils.compoundOr(empty, emptyStatus))), 1e-6);
+        Assertions.assertEquals(1, rows(Utils.compoundAnd(Utils.compoundOr(empty, emptyStatus), three)), 1e-6);
+        // A range that keeps a value is not empty.
+        Assertions.assertEquals(rows(compare(BinaryType.EQ, D, number(5))), rows(Utils.compoundAnd(
+                compare(BinaryType.GT, D, number(4)), compare(BinaryType.LT, D, number(6)))), 1e-6);
+    }
+
+    private static double listRows(ScalarOperator... predicates) {
+        return PredicateStatisticsCalculator.statisticsCalculate(List.of(predicates), table()).getOutputRowCount();
+    }
+
+    // The predicates estimated in turn, each over the rows that the ones before it keep.
+    private static double inTurnRows(ScalarOperator... predicates) {
+        Statistics result = table();
+        for (ScalarOperator predicate : predicates) {
+            result = PredicateStatisticsCalculator.statisticsCalculate(predicate, result);
+        }
+        return result.getOutputRowCount();
+    }
+
+    @Test
+    public void testSidesOfAPointInSeveralPredicatesOfAListAreTheEquality() {
+        ScalarOperator atLeast = compare(BinaryType.GE, D, number(18000));
+        ScalarOperator atMost = compare(BinaryType.LE, D, number(18000));
+        ScalarOperator equality = compare(BinaryType.EQ, D, number(18000));
+        ScalarOperator status = compare(BinaryType.EQ, STATUS, number(1));
+        // Two cuts of the range in turn are not the equality, which the list now is.
+        Assertions.assertNotEquals(rows(equality), inTurnRows(atLeast, atMost), 1e-6);
+        Assertions.assertEquals(ROWS / 805, listRows(atLeast, atMost), 1e-6);
+        Assertions.assertEquals(ROWS / 805, listRows(atMost, atLeast), 1e-6);
+        // The sides in the same predicate, as before.
+        Assertions.assertEquals(inTurnRows(equality, status), listRows(Utils.compoundAnd(atLeast, atMost), status), 1e-6);
+        // Another predicate between the sides, and the points of two columns.
+        Assertions.assertEquals(listRows(equality, status), listRows(atLeast, status, atMost), 1e-6);
+        Assertions.assertEquals(inTurnRows(equality, status), listRows(atLeast, status, atMost), 1e-6);
+        ScalarOperator statusAtLeast = compare(BinaryType.GE, STATUS, number(2));
+        ScalarOperator statusAtMost = compare(BinaryType.LE, STATUS, number(2));
+        Assertions.assertEquals(inTurnRows(equality, compare(BinaryType.EQ, STATUS, number(2))),
+                listRows(atLeast, statusAtLeast, atMost, statusAtMost), 1e-6);
+        // A side in a conjunction and the other alone: the conjunct that stays is the rest of the conjunction.
+        Assertions.assertEquals(rows(Utils.compoundAnd(equality, status)),
+                listRows(Utils.compoundAnd(atLeast, status), atMost), 1e-6);
+        Assertions.assertEquals(inTurnRows(equality, status),
+                listRows(atMost, Utils.compoundAnd(status, atLeast)), 1e-6);
+        // Three sides, two of them lower.
+        Assertions.assertEquals(ROWS / 805, listRows(compare(BinaryType.GE, D, number(17999)), atLeast, atMost), 1e-6);
+        // A day, and a function of the column.
+        Assertions.assertEquals(rows(compare(BinaryType.EQ, DAY, day(2026, 3, 1))), listRows(
+                compare(BinaryType.GE, DAY, day(2026, 3, 1)), compare(BinaryType.LE, DAY, day(2026, 3, 1))), 1e-6);
+    }
+
+    @Test
+    public void testSidesOfAPointInAListKeepTheirRangesWhereThePointIsNot() {
+        ScalarOperator atLeast = compare(BinaryType.GE, D, number(18000));
+        // Two values: the ranges in turn, as before.
+        ScalarOperator atMost = compare(BinaryType.LE, D, number(18001));
+        Assertions.assertEquals(inTurnRows(atLeast, atMost), listRows(atLeast, atMost), 1e-6);
+        // A column without statistics keeps its ranges, as it does in one predicate.
+        ScalarOperator unknownAtLeast = compare(BinaryType.GE, UNKNOWN, number(5));
+        ScalarOperator unknownAtMost = compare(BinaryType.LE, UNKNOWN, number(5));
+        Assertions.assertEquals(inTurnRows(unknownAtLeast, unknownAtMost), listRows(unknownAtLeast, unknownAtMost), 1e-6);
+        // Sides of two columns that are not one point in each.
+        Assertions.assertEquals(inTurnRows(atLeast, compare(BinaryType.LE, STATUS, number(2))),
+                listRows(atLeast, compare(BinaryType.LE, STATUS, number(2))), 1e-6);
+        // A list of one predicate is that predicate.
+        Assertions.assertEquals(rows(Utils.compoundAnd(atLeast, compare(BinaryType.LE, D, number(18000)))),
+                listRows(Utils.compoundAnd(atLeast, compare(BinaryType.LE, D, number(18000)))), 0.0);
+    }
+
+    @Test
+    public void testRangesWithNoValueInSeveralPredicatesOfAListKeepNoRow() {
+        for (ColumnRefOperator column : List.of(D, HISTOGRAM, STATUS, BIG, UNKNOWN, STALE)) {
+            ConstantOperator five = column.getType().isBigint() ? ConstantOperator.createBigint(5) : number(5);
+            ConstantOperator six = column.getType().isBigint() ? ConstantOperator.createBigint(6) : number(6);
+            Assertions.assertEquals(1, listRows(compare(BinaryType.GT, column, five), compare(BinaryType.LT, column, six)),
+                    1e-6, column.getName());
+            Assertions.assertEquals(1, listRows(compare(BinaryType.GE, column, six), compare(BinaryType.LE, column, five)),
+                    1e-6, column.getName());
+        }
+        // Next to other predicates, in any place.
+        ScalarOperator status = compare(BinaryType.EQ, STATUS, number(1));
+        ScalarOperator above = compare(BinaryType.GT, D, number(5));
+        ScalarOperator below = compare(BinaryType.LT, D, number(6));
+        Assertions.assertEquals(1, listRows(status, above, below), 1e-6);
+        Assertions.assertEquals(1, listRows(above, status, below), 1e-6);
+        Assertions.assertEquals(1, listRows(below, status, above), 1e-6);
+        // A range that keeps a value is not empty.
+        Assertions.assertEquals(inTurnRows(compare(BinaryType.GT, D, number(4)), below),
+                listRows(compare(BinaryType.GT, D, number(4)), below), 1e-6);
+    }
 }

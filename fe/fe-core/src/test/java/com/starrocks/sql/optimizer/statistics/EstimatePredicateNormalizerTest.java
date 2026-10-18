@@ -633,6 +633,251 @@ public class EstimatePredicateNormalizerTest {
     }
 
     @Test
+    public void testSidesThatKeepNoValueAreFalse() {
+        ScalarOperator no = ConstantOperator.FALSE;
+        assertNormalizesTo(no, Utils.compoundAnd(compare(BinaryType.GT, D, number(5)), compare(BinaryType.LT, D, number(6))));
+        assertNormalizesTo(no, Utils.compoundAnd(compare(BinaryType.GE, D, number(6)), compare(BinaryType.LT, D, number(6))));
+        assertNormalizesTo(no, Utils.compoundAnd(compare(BinaryType.GT, D, number(5)), compare(BinaryType.LE, D, number(5))));
+        assertNormalizesTo(no, Utils.compoundAnd(compare(BinaryType.GE, D, number(7)), compare(BinaryType.LE, D, number(6))));
+        assertNormalizesTo(no, Utils.compoundAnd(compare(BinaryType.LT, D, number(6)), compare(BinaryType.GT, D, number(5))));
+        // Whether the column has statistics or not.
+        ScalarOperator unknown = Utils.compoundAnd(compare(BinaryType.GT, UNKNOWN, number(5)),
+                compare(BinaryType.LT, UNKNOWN, number(6)));
+        Assertions.assertEquals(no, normalize(unknown, withUnknown()));
+        // The other conjuncts go with it, and so does a column that is not empty next to one that is.
+        assertNormalizesTo(no, Utils.compoundAnd(List.of(eq(E, number(1)), compare(BinaryType.GT, D, number(5)),
+                compare(BinaryType.LT, D, number(6)), compare(BinaryType.GT, E, number(0)))));
+        assertNormalizesTo(no, Utils.compoundAnd(List.of(compare(BinaryType.GE, E, number(1)),
+                compare(BinaryType.LE, E, number(1)), compare(BinaryType.GT, D, number(5)),
+                compare(BinaryType.LT, D, number(6)))));
+        // Days, and a function of the column.
+        ConstantOperator march = ConstantOperator.createDate(LocalDateTime.of(2026, 3, 1, 0, 0));
+        ConstantOperator april = ConstantOperator.createDate(LocalDateTime.of(2026, 3, 2, 0, 0));
+        assertNormalizesTo(no, Utils.compoundAnd(compare(BinaryType.GT, DAY, march), compare(BinaryType.LT, DAY, april)));
+        ConstantOperator day = ConstantOperator.createDatetime(LocalDate.ofEpochDay(20000).atStartOfDay());
+        ConstantOperator next = ConstantOperator.createDatetime(LocalDate.ofEpochDay(20001).atStartOfDay());
+        assertNormalizesTo(no, Utils.compoundAnd(compare(BinaryType.GT, dayOfD(), day),
+                compare(BinaryType.LT, dayOfD(), next)));
+        // Inside an OR the false part is left out, see testPartsMadeFalseAreLeftOutOfAnOrAndMakeAnAndFalse, and inside
+        // a NOT it stays.
+        ScalarOperator sides = Utils.compoundAnd(compare(BinaryType.GT, D, number(5)), compare(BinaryType.LT, D, number(6)));
+        assertNormalizesTo(eq(E, number(1)), Utils.compoundOr(sides, eq(E, number(1))));
+        assertNormalizesTo(new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.NOT, no),
+                new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.NOT, sides));
+        // The values of the type are not enough to fall short of: a bound at the end of the longs is not read.
+        ColumnRefOperator big = new ColumnRefOperator(7, IntegerType.BIGINT, "big", true);
+        ScalarOperator end = Utils.compoundAnd(compare(BinaryType.GT, big, ConstantOperator.createBigint(Long.MAX_VALUE)),
+                compare(BinaryType.LT, big, ConstantOperator.createBigint(Long.MAX_VALUE)));
+        Assertions.assertSame(end, normalize(end));
+        // Sides that keep a value are not false.
+        Assertions.assertNotEquals(no, normalize(Utils.compoundAnd(compare(BinaryType.GE, D, number(5)),
+                compare(BinaryType.LT, D, number(6)))));
+        assertUnchanged(Utils.compoundAnd(compare(BinaryType.GT, D, number(5)), compare(BinaryType.LT, E, number(6))));
+    }
+
+    private static ScalarOperator emptyOf(ColumnRefOperator column) {
+        return Utils.compoundAnd(compare(BinaryType.GT, column, number(5)), compare(BinaryType.LT, column, number(6)));
+    }
+
+    @Test
+    public void testPartsMadeFalseAreLeftOutOfAnOrAndMakeAnAndFalse() {
+        ScalarOperator no = ConstantOperator.FALSE;
+        ScalarOperator emptyD = emptyOf(D);
+        ScalarOperator emptyE = emptyOf(E);
+        ScalarOperator one = eq(E, number(1));
+        ScalarOperator two = eq(E, number(2));
+        ScalarOperator three = eq(E, number(3));
+        // The part that is made false is no part of the OR, wherever it stands.
+        assertNormalizesTo(one, Utils.compoundOr(emptyD, one));
+        assertNormalizesTo(one, Utils.compoundOr(one, emptyD));
+        assertNormalizesTo(Utils.compoundOr(one, two), Utils.compoundOr(Utils.compoundOr(one, emptyD), two));
+        assertNormalizesTo(Utils.compoundOr(one, two), Utils.compoundOr(one, Utils.compoundOr(emptyD, two)));
+        assertNormalizesTo(Utils.compoundOr(one, Utils.compoundOr(two, three)),
+                Utils.compoundOr(List.of(emptyD, one, two, three)));
+        assertNormalizesTo(Utils.compoundOr(one, two), Utils.compoundOr(List.of(emptyD, one, emptyE, two)));
+        // An OR of such parts alone is false.
+        assertNormalizesTo(no, Utils.compoundOr(emptyD, emptyE));
+        assertNormalizesTo(no, Utils.compoundOr(Utils.compoundOr(emptyD, emptyE), emptyD));
+        // A conjunct that is made false makes the AND false, also when the conjunct is an OR of such parts.
+        assertNormalizesTo(no, Utils.compoundAnd(one, Utils.compoundOr(emptyD, emptyE)));
+        assertNormalizesTo(no, Utils.compoundAnd(Utils.compoundOr(emptyD, emptyE), one));
+        assertNormalizesTo(no, Utils.compoundAnd(List.of(one, two, Utils.compoundOr(emptyD, emptyE), three)));
+        // The OR next to the AND loses its false part, and the conjuncts keep their places.
+        assertNormalizesTo(Utils.compoundAnd(two, one), Utils.compoundAnd(Utils.compoundOr(emptyD, two), one));
+        assertNormalizesTo(Utils.compoundAnd(one, two), Utils.compoundAnd(one, Utils.compoundOr(two, emptyE)));
+        // Under a NOT the condition that became false stays, and so does the OR that is not false.
+        ScalarOperator not = new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.NOT, no);
+        assertNormalizesTo(not, new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.NOT,
+                Utils.compoundOr(emptyD, emptyE)));
+        assertNormalizesTo(new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.NOT, one),
+                new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.NOT, Utils.compoundOr(emptyD, one)));
+        // A part that was false before the rewrite stays, and nothing is rewritten when no part is made false.
+        assertUnchanged(Utils.compoundOr(no, one));
+        assertUnchanged(Utils.compoundAnd(no, one));
+        assertNormalizesTo(no, Utils.compoundOr(no, emptyD));
+        // Next to a part that is rewritten it stays too, in the OR and in the AND.
+        assertNormalizesTo(Utils.compoundOr(no, one), Utils.compoundOr(no, Utils.compoundOr(emptyD, one)));
+        assertNormalizesTo(Utils.compoundAnd(no, one), Utils.compoundAnd(no, Utils.compoundOr(emptyD, one)));
+        // A false condition that replaces a compound one has its flags.
+        CompoundPredicateOperator flagged = (CompoundPredicateOperator) Utils.compoundOr(emptyD, emptyE);
+        flagged.setJoinDerived(true);
+        flagged.setIsPushdown(true);
+        ScalarOperator result = normalize(flagged);
+        Assertions.assertEquals(no, result);
+        Assertions.assertTrue(result.isJoinDerived() && result.isPushdown());
+        CompoundPredicateOperator flaggedAnd = (CompoundPredicateOperator) Utils.compoundAnd(one,
+                Utils.compoundOr(emptyD, emptyE));
+        flaggedAnd.setRedundant(true);
+        Assertions.assertTrue(normalize(flaggedAnd).isRedundant());
+    }
+
+    // The flags that the normalizer copies from a condition to the one in its place.
+    private static List<Boolean> flagsOf(ScalarOperator operator) {
+        return List.of(operator.isNotEvalEstimate(), operator.isFromPredicateRangeDerive(), operator.isRedundant(),
+                operator.isPushdown(), operator.isCorrelated(), operator.isJoinDerived());
+    }
+
+    private static void setFlags(ScalarOperator operator, boolean derive, boolean redundant, boolean pushdown,
+                                 boolean correlated, boolean joinDerived) {
+        operator.setFromPredicateRangeDerive(derive);
+        operator.setRedundant(redundant);
+        operator.setIsPushdown(pushdown);
+        operator.setCorrelated(correlated);
+        operator.setJoinDerived(joinDerived);
+    }
+
+    @Test
+    public void testPartLeftOfAnOrHasTheFlagsOfTheOrAndTheQueryIsNotChanged() {
+        ScalarOperator emptyD = emptyOf(D);
+        ScalarOperator emptyE = emptyOf(E);
+        ScalarOperator conjunction = Utils.compoundAnd(eq(E, number(1)), eq(D, number(2)));
+        for (ScalarOperator part : List.of(eq(E, number(4)), conjunction)) {
+            // The OR is derived, redundant, pushed down, correlated and join derived; the part is none of these.
+            CompoundPredicateOperator or = (CompoundPredicateOperator) Utils.compoundOr(emptyD, part);
+            setFlags(or, true, true, true, true, true);
+            List<Boolean> flagsOfPart = flagsOf(part);
+            List<Boolean> flagsOfChild = part.getChildren().isEmpty() ? null : flagsOf(part.getChild(0));
+            ScalarOperator kept = normalize(or);
+            Assertions.assertEquals(part, kept);
+            Assertions.assertNotSame(part, kept);
+            Assertions.assertEquals(List.of(false, true, true, true, true, true), flagsOf(kept));
+            // The part itself and its own parts are as they were: the condition of the query is not changed.
+            Assertions.assertEquals(flagsOfPart, flagsOf(part));
+            if (flagsOfChild != null) {
+                // The parts of the part keep their own flags, in the query and in the copy.
+                Assertions.assertEquals(flagsOfChild, flagsOf(part.getChild(0)));
+                Assertions.assertEquals(flagsOfChild, flagsOf(kept.getChild(0)));
+            }
+            // The part on the other side of the OR as well, and the flags of the OR replace those of the part.
+            CompoundPredicateOperator reversed = (CompoundPredicateOperator) Utils.compoundOr(part, emptyE);
+            setFlags(reversed, false, true, false, false, true);
+            setFlags(part, true, false, true, true, false);
+            Assertions.assertEquals(List.of(false, false, true, false, false, true), flagsOf(normalize(reversed)));
+            setFlags(part, false, false, false, false, false);
+        }
+        // The part that the estimate skips is skipped in the place of the OR as well.
+        ScalarOperator skipped = eq(E, number(4));
+        skipped.setNotEvalEstimate(true);
+        CompoundPredicateOperator or = (CompoundPredicateOperator) Utils.compoundOr(emptyD, skipped);
+        or.setJoinDerived(true);
+        ScalarOperator kept = normalize(or);
+        Assertions.assertTrue(kept.isNotEvalEstimate());
+        Assertions.assertTrue(kept.isJoinDerived());
+    }
+
+    @Test
+    public void testDerivedOrWithAPartMadeFalseIsSkippedForAnUnknownColumnAsTheOrIs() {
+        // A range derived from other conditions is not estimated while a column of the statistics is unknown. The OR that
+        // loses a part keeps that, or the part that is left would be estimated where the OR was not.
+        ScalarOperator part = eq(E, number(4));
+        CompoundPredicateOperator or = (CompoundPredicateOperator) Utils.compoundOr(emptyOf(D), part);
+        or.setFromPredicateRangeDerive(true);
+        Statistics unknown = withUnknown();
+        Assertions.assertFalse(PredicateStatisticsCalculator.needsEvalEstimate(or, unknown));
+        ScalarOperator kept = normalize(or, unknown);
+        Assertions.assertFalse(PredicateStatisticsCalculator.needsEvalEstimate(kept, unknown));
+        Assertions.assertTrue(PredicateStatisticsCalculator.needsEvalEstimate(part, unknown));
+        Assertions.assertTrue(PredicateStatisticsCalculator.needsEvalEstimate(kept, statistics()));
+    }
+
+    private static List<ScalarOperator> together(ScalarOperator... predicates) {
+        return inScope(() -> EstimatePredicateNormalizer.normalizeTogether(List.of(predicates), statistics()));
+    }
+
+    @Test
+    public void testSidesOfAPointInSeveralPredicatesAreTheEquality() {
+        ScalarOperator atLeast = compare(BinaryType.GE, D, number(5));
+        ScalarOperator atMost = compare(BinaryType.LE, D, number(5));
+        ScalarOperator other = eq(E, number(1));
+        // The equality is in the place of the first side, and the other side is no predicate of the list.
+        Assertions.assertEquals(List.of(eq(D, number(5))), together(atLeast, atMost));
+        Assertions.assertEquals(List.of(eq(D, number(5))), together(atMost, atLeast));
+        Assertions.assertEquals(List.of(eq(D, number(5)), other), together(atLeast, other, atMost));
+        Assertions.assertEquals(List.of(other, eq(D, number(5))), together(other, atMost, atLeast));
+        // A conjunction keeps the rest of it, in its place, and a conjunction of sides alone is the equality.
+        ScalarOperator otherGreater = compare(BinaryType.GT, E, number(0));
+        Assertions.assertEquals(List.of(Utils.compoundAnd(eq(D, number(5)), other)),
+                together(Utils.compoundAnd(atLeast, other), atMost));
+        Assertions.assertEquals(List.of(eq(D, number(5)), other), together(atMost, Utils.compoundAnd(other, atLeast)));
+        Assertions.assertEquals(List.of(Utils.compoundAnd(other, eq(D, number(5)))),
+                together(Utils.compoundAnd(other, atLeast), atMost));
+        Assertions.assertEquals(List.of(eq(D, number(5)), otherGreater), together(Utils.compoundAnd(atLeast, atMost),
+                otherGreater));
+        Assertions.assertEquals(List.of(eq(D, number(5)), eq(E, number(2))), together(atLeast,
+                compare(BinaryType.GE, E, number(2)), atMost, compare(BinaryType.LE, E, number(2))));
+        // The equality has the flags of the first side.
+        atLeast.setJoinDerived(true);
+        Assertions.assertTrue(together(atLeast, atMost).get(0).isJoinDerived());
+        // The conjunction that is built again has the flags of the one it comes from, on every node.
+        CompoundPredicateOperator flagged = (CompoundPredicateOperator) Utils.compoundAnd(List.of(compare(BinaryType.GE,
+                D, number(5)), other, otherGreater));
+        flagged.setIsPushdown(true);
+        List<ScalarOperator> rebuilt = together(flagged, atMost);
+        Assertions.assertEquals(1, rebuilt.size());
+        Assertions.assertEquals(Utils.compoundAnd(List.of(eq(D, number(5)), other, otherGreater)), rebuilt.get(0));
+        Assertions.assertTrue(rebuilt.get(0).isPushdown());
+        Assertions.assertTrue(rebuilt.get(0).getChild(0).isPushdown());
+    }
+
+    @Test
+    public void testSidesThatKeepNoValueInSeveralPredicatesMakeTheListFalse() {
+        ScalarOperator above = compare(BinaryType.GT, D, number(5));
+        ScalarOperator below = compare(BinaryType.LT, D, number(6));
+        ScalarOperator other = eq(E, number(1));
+        Assertions.assertEquals(List.of(ConstantOperator.FALSE), together(above, below));
+        Assertions.assertEquals(List.of(ConstantOperator.FALSE), together(other, above, below));
+        Assertions.assertEquals(List.of(ConstantOperator.FALSE), together(below, other, above));
+        Assertions.assertEquals(List.of(ConstantOperator.FALSE), together(Utils.compoundAnd(above, other), below));
+        // Whether the column has statistics or not.
+        Assertions.assertEquals(List.of(ConstantOperator.FALSE), inScope(() -> EstimatePredicateNormalizer.normalizeTogether(
+                List.of(compare(BinaryType.GT, UNKNOWN, number(5)), compare(BinaryType.LT, UNKNOWN, number(6))),
+                withUnknown())));
+    }
+
+    @Test
+    public void testPredicatesWithNoSidesToReadTogetherAreTheSameList() {
+        ScalarOperator atLeast = compare(BinaryType.GE, D, number(5));
+        ScalarOperator other = eq(E, number(1));
+        // Nothing to rewrite: the same list and the same predicates.
+        List<ScalarOperator> list = List.of(atLeast, other, compare(BinaryType.LE, D, number(8)));
+        Assertions.assertSame(list, inScope(() -> EstimatePredicateNormalizer.normalizeTogether(list, statistics())));
+        List<ScalarOperator> unknown = List.of(compare(BinaryType.GE, UNKNOWN, number(5)),
+                compare(BinaryType.LE, UNKNOWN, number(5)));
+        Assertions.assertSame(unknown, inScope(() -> EstimatePredicateNormalizer.normalizeTogether(unknown,
+                withUnknown())));
+        // The predicates that hold no side stay the same objects when others are rewritten.
+        ScalarOperator keptAnd = Utils.compoundAnd(other, compare(BinaryType.GT, E, number(0)));
+        List<ScalarOperator> rewritten = together(atLeast, keptAnd, compare(BinaryType.LE, D, number(5)));
+        Assertions.assertEquals(2, rewritten.size());
+        Assertions.assertSame(keptAnd, rewritten.get(1));
+        // A single predicate, a NOT and an OR of sides are not sides.
+        ScalarOperator notAtMost = new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.NOT,
+                compare(BinaryType.GT, D, number(5)));
+        List<ScalarOperator> negated = List.of(atLeast, notAtMost);
+        Assertions.assertSame(negated, inScope(() -> EstimatePredicateNormalizer.normalizeTogether(negated, statistics())));
+    }
+
+    @Test
     public void testSidesThatKeepMoreThanAPointStay() {
         assertUnchanged(Utils.compoundAnd(compare(BinaryType.GE, D, number(5)), compare(BinaryType.LE, D, number(6))));
         assertUnchanged(Utils.compoundAnd(compare(BinaryType.GE, D, number(5)), compare(BinaryType.LE, E, number(5))));
@@ -724,6 +969,65 @@ public class EstimatePredicateNormalizerTest {
         ScalarOperator rebuilt = normalize(or);
         Assertions.assertNotSame(or, rebuilt);
         Assertions.assertTrue(rebuilt.isRedundant());
+    }
+
+    private static void assertFlags(boolean expected, ScalarOperator operator) {
+        Assertions.assertEquals(expected, operator.isRedundant(), operator.toString());
+        Assertions.assertEquals(expected, operator.isPushdown(), operator.toString());
+        Assertions.assertEquals(expected, operator.isCorrelated(), operator.toString());
+    }
+
+    private static <T extends ScalarOperator> T flagged(T operator) {
+        operator.setRedundant(true);
+        operator.setIsPushdown(true);
+        operator.setCorrelated(true);
+        return operator;
+    }
+
+    @Test
+    public void testEveryCompoundConditionBuiltAgainHasTheFlagsOfTheOneItComesFrom() {
+        ScalarOperator regexp = regexp(NAME, "^a|^b");
+        ScalarOperator likes = Utils.compoundOr(like(NAME, "a%"), like(NAME, "b%"));
+        ScalarOperator other = eq(E, number(1));
+        // A conjunction with the sides of a point: the equality takes the place of the first side, and the conjunction
+        // that is built again has the flags of the one it comes from, whatever the number of its conjuncts.
+        CompoundPredicateOperator two = flagged((CompoundPredicateOperator) Utils.compoundAnd(List.of(
+                compare(BinaryType.GE, D, number(5)), other, compare(BinaryType.LE, D, number(5)))));
+        ScalarOperator pointAndOther = normalize(two);
+        Assertions.assertEquals(Utils.compoundAnd(eq(D, number(5)), other), pointAndOther);
+        assertFlags(true, pointAndOther);
+        assertFlags(false, other);
+        // Three conjuncts left: both nodes of the tree built are flagged, and the conjuncts keep theirs.
+        ScalarOperator three = flagged((CompoundPredicateOperator) Utils.compoundAnd(List.of(
+                compare(BinaryType.GE, D, number(5)), other, compare(BinaryType.GT, E, number(0)),
+                compare(BinaryType.LE, D, number(5)))));
+        ScalarOperator chain = normalize(three);
+        Assertions.assertEquals(Utils.compoundAnd(List.of(eq(D, number(5)), other, compare(BinaryType.GT, E, number(0)))),
+                chain);
+        assertFlags(true, chain);
+        assertFlags(true, chain.getChild(0));
+        assertFlags(false, other);
+        assertFlags(false, chain.getChild(1));
+        // The sides with no value: the false condition has the flags, and is not the constant that all share.
+        ScalarOperator empty = flagged((CompoundPredicateOperator) Utils.compoundAnd(compare(BinaryType.GT, D, number(5)),
+                compare(BinaryType.LT, D, number(6))));
+        ScalarOperator no = normalize(empty);
+        Assertions.assertEquals(ConstantOperator.FALSE, no);
+        assertFlags(true, no);
+        assertFlags(false, ConstantOperator.FALSE);
+        // The conditions built again because a part is rewritten: AND, OR and NOT.
+        assertFlags(true, normalize(flagged((CompoundPredicateOperator) Utils.compoundAnd(other, regexp))));
+        assertFlags(true, normalize(flagged((CompoundPredicateOperator) Utils.compoundOr(other, regexp))));
+        assertFlags(true, normalize(flagged(new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.NOT,
+                regexp))));
+        Assertions.assertEquals(Utils.compoundAnd(other, likes), normalize(Utils.compoundAnd(other, regexp)));
+        assertFlags(false, normalize(Utils.compoundAnd(other, regexp)));
+        // The nodes of a chain that stay keep their own flags, and the ones built again take the flags of the node they
+        // replace: the inner AND is flagged and the outer one is not.
+        CompoundPredicateOperator inner = flagged((CompoundPredicateOperator) Utils.compoundAnd(other, regexp));
+        ScalarOperator outer = normalize(Utils.compoundAnd(inner, compare(BinaryType.GT, E, number(0))));
+        assertFlags(false, outer);
+        assertFlags(true, outer.getChild(0));
     }
 
     @Test

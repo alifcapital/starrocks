@@ -58,6 +58,8 @@ import java.util.Optional;
  * NOT IN stays: its estimate is the complement of the IN and belongs to the estimate of the IN.</li>
  * <li>The ranges of one column of whole numbers or days in a conjunction that keep one value are the equality of the
  * column with it, when the column has statistics.</li>
+ * <li>The ranges of one column of whole numbers or days in a conjunction that keep no value, as a > 5 AND a < 6, make
+ * the conjunction false, whether the column has statistics or not.</li>
  * </ul>
  * We fear that a rewrite which serves one source of the estimate hides the condition from the others, so only the
  * rewrites that every source reads without losing information are made here. c LIKE 'p%' on a column of dates is not
@@ -93,6 +95,24 @@ final class EstimatePredicateNormalizer {
         } catch (RuntimeException e) {
             LOG.debug("Failed to normalize a predicate for the estimate", e);
             return predicate;
+        }
+    }
+
+    /**
+     * Predicates that hold together, as the conditions of a scan do, with the ranges of a column of whole numbers or
+     * days of all of them read together: sides that keep one value are the equality, in the place of the first side,
+     * and sides that keep no value make the list one false condition. We expect the ranges of one column to be in
+     * several conditions of the list as well as in one, and fear that a point such as d >= 5 and d <= 5 in two
+     * conditions is estimated as two cuts of the range, as it was before we read the sides of one condition together.
+     * The conditions are not joined: each one is a condition of the list, estimated in turn, and the conditions that
+     * hold no sides are the same objects. The same list when nothing is rewritten. A failure returns the list as it is.
+     */
+    static List<ScalarOperator> normalizeTogether(List<ScalarOperator> predicates, Statistics statistics) {
+        try {
+            return new Normalization(statistics).rewriteTogether(predicates);
+        } catch (RuntimeException e) {
+            LOG.debug("Failed to normalize the predicates for the estimate", e);
+            return predicates;
         }
     }
 
@@ -426,14 +446,19 @@ final class EstimatePredicateNormalizer {
         return Utils.compoundOr(likes);
     }
 
-    // The flags of the replaced atom, on the condition that replaces it and on the compound conditions inside it.
-    private static void inheritFlags(ScalarOperator from, ScalarOperator to) {
+    // The flags of a condition on another condition that stands for it.
+    private static void copyFlags(ScalarOperator from, ScalarOperator to) {
         to.setNotEvalEstimate(from.isNotEvalEstimate());
         to.setFromPredicateRangeDerive(from.isFromPredicateRangeDerive());
         to.setRedundant(from.isRedundant());
         to.setIsPushdown(from.isPushdown());
         to.setCorrelated(from.isCorrelated());
         to.setJoinDerived(from.isJoinDerived());
+    }
+
+    // The flags of the replaced atom, on the condition that replaces it and on the compound conditions inside it.
+    private static void inheritFlags(ScalarOperator from, ScalarOperator to) {
+        copyFlags(from, to);
         if (to instanceof CompoundPredicateOperator) {
             for (ScalarOperator child : to.getChildren()) {
                 inheritFlags(from, child);
@@ -441,16 +466,35 @@ final class EstimatePredicateNormalizer {
         }
     }
 
-    private static CompoundPredicateOperator withChildren(CompoundPredicateOperator compound,
-                                                          List<ScalarOperator> children) {
-        CompoundPredicateOperator rebuilt = new CompoundPredicateOperator(compound.getCompoundType(), children);
-        rebuilt.setNotEvalEstimate(compound.isNotEvalEstimate());
-        rebuilt.setFromPredicateRangeDerive(compound.isFromPredicateRangeDerive());
-        rebuilt.setRedundant(compound.isRedundant());
-        rebuilt.setIsPushdown(compound.isPushdown());
-        rebuilt.setCorrelated(compound.isCorrelated());
-        rebuilt.setJoinDerived(compound.isJoinDerived());
-        return rebuilt;
+    /**
+     * The condition of the source's kind over the given parts, with the flags of the source on every node it builds:
+     * the one every compound condition that the normalizer builds again comes from, so that none loses a flag. The
+     * parts of an AND or an OR are paired from the left into a balanced tree, as Utils builds it, and the parts keep
+     * their own flags. One part is that part.
+     */
+    private static ScalarOperator rebuild(CompoundPredicateOperator source, List<ScalarOperator> parts) {
+        if (source.isNot()) {
+            CompoundPredicateOperator negation = new CompoundPredicateOperator(source.getCompoundType(),
+                    new ArrayList<>(parts));
+            copyFlags(source, negation);
+            return negation;
+        }
+        List<ScalarOperator> level = parts;
+        while (level.size() > 1) {
+            List<ScalarOperator> next = new ArrayList<>((level.size() + 1) / 2);
+            int i = 0;
+            for (; i + 1 < level.size(); i += 2) {
+                CompoundPredicateOperator pair = new CompoundPredicateOperator(source.getCompoundType(),
+                        new ArrayList<>(List.of(level.get(i), level.get(i + 1))));
+                copyFlags(source, pair);
+                next.add(pair);
+            }
+            if (i < level.size()) {
+                next.add(level.get(i));
+            }
+            level = next;
+        }
+        return level.get(0);
     }
 
     private static final class Normalization {
@@ -474,15 +518,56 @@ final class EstimatePredicateNormalizer {
             return rewriteAtom(operator);
         }
 
+        /**
+         * The children are rewritten in turn. We expect a part of an OR that the rewrite made false to add no rows, and
+         * fear that it stays a part: it ends the parts that the combinator of the OR tells apart by their form
+         * (DisjointOrParts), and the parts after it are then taken to overlap. So such a part is left out of the OR,
+         * and an OR of such parts alone is false. A part that was false before the rewrite stays as it is.
+         */
         private ScalarOperator rewriteChildren(CompoundPredicateOperator compound) {
             List<ScalarOperator> children = new ArrayList<>(compound.getChildren().size());
             boolean changed = false;
+            boolean madeFalse = false;
             for (ScalarOperator child : compound.getChildren()) {
                 ScalarOperator rewritten = rewrite(child);
                 changed |= rewritten != child;
+                if (compound.isOr() && rewritten != child && isFalse(rewritten)) {
+                    madeFalse = true;
+                    continue;
+                }
                 children.add(rewritten);
             }
-            return changed ? withChildren(compound, children) : compound;
+            if (madeFalse) {
+                // An OR has two parts: the one that is left, or none.
+                return children.isEmpty() ? falseLike(compound) : standingFor(compound, children.get(0));
+            }
+            return changed ? rebuild(compound, children) : compound;
+        }
+
+        /**
+         * The part that is left of an OR, in the place of the OR, with the flags of the OR as every condition that the
+         * normalizer builds in the place of another has: a part that lost the flags of a derived or pushed down OR would
+         * be estimated where the OR was not, see needsEvalEstimate. The part is copied, with its parts, so the condition
+         * of the query is not changed. Only the node that stands for the OR has its flags, as in rebuild: the parts of
+         * the part keep their own. The copy is estimated or not as the part is, since the OR was estimated.
+         */
+        private static ScalarOperator standingFor(CompoundPredicateOperator or, ScalarOperator part) {
+            ScalarOperator copy = part.clone();
+            copyFlags(or, copy);
+            copy.setNotEvalEstimate(part.isNotEvalEstimate());
+            return copy;
+        }
+
+        private static boolean isFalse(ScalarOperator operator) {
+            return operator instanceof ConstantOperator constant && constant.getType() == BooleanType.BOOLEAN
+                    && !constant.isNull() && !constant.getBoolean();
+        }
+
+        // The false condition in place of the one given, with its flags.
+        private static ScalarOperator falseLike(ScalarOperator source) {
+            ScalarOperator no = ConstantOperator.createBoolean(false);
+            copyFlags(source, no);
+            return no;
         }
 
         // The three arguments of IF(condition, then, else) are conditions of the estimate.
@@ -568,9 +653,22 @@ final class EstimatePredicateNormalizer {
                 changed |= conjunctRewritten != conjunct;
                 rewritten.add(conjunctRewritten);
             }
-            List<ScalarOperator> withPoints = withPointEqualities(rewritten);
-            if (withPoints != rewritten) {
-                return Utils.compoundAnd(withPoints);
+            // A conjunct that the rewrite made false makes the conjunction false; one that was false before stays.
+            for (int i = 0; i < conjuncts.size(); i++) {
+                if (rewritten.get(i) != conjuncts.get(i) && isFalse(rewritten.get(i))) {
+                    return falseLike(and);
+                }
+            }
+            Map<ColumnRefOperator, DiscreteInterval> columns = discreteIntervals(rewritten);
+            if (columns != null) {
+                // The values of the ranges are none: no row has them, and the conjunction is false.
+                if (columns.values().stream().anyMatch(DiscreteInterval::isEmpty)) {
+                    return falseLike(and);
+                }
+                List<ScalarOperator> withPoints = withPointEqualities(rewritten, columns);
+                if (withPoints != rewritten) {
+                    return rebuild(and, withPoints);
+                }
             }
             return changed ? rebuildAnd(and, rewritten.iterator()) : and;
         }
@@ -584,7 +682,7 @@ final class EstimatePredicateNormalizer {
                 if (first == and.getChild(0) && second == and.getChild(1)) {
                     return and;
                 }
-                return withChildren(and, new ArrayList<>(List.of(first, second)));
+                return rebuild(and, List.of(first, second));
             }
             return conjuncts.next();
         }
@@ -599,20 +697,27 @@ final class EstimatePredicateNormalizer {
          * value outside of it. A column without statistics keeps its ranges: there the equality takes its default
          * share, and the ranges take the rows of the range. The same list when no sides are replaced.
          */
-        private List<ScalarOperator> withPointEqualities(List<ScalarOperator> conjuncts) {
-            Map<ColumnRefOperator, DiscreteInterval> columns = null;
-            for (int i = 0; i < conjuncts.size(); i++) {
-                DiscreteSide side = discreteSide(conjuncts.get(i));
-                if (side != null) {
-                    if (columns == null) {
-                        columns = new LinkedHashMap<>();
-                    }
-                    columns.computeIfAbsent(side.column(), key -> new DiscreteInterval()).add(side, i);
-                }
-            }
-            if (columns == null) {
+        private List<ScalarOperator> withPointEqualities(List<ScalarOperator> conjuncts,
+                                                         Map<ColumnRefOperator, DiscreteInterval> columns) {
+            Points points = pointSides(conjuncts, columns);
+            if (points == null) {
                 return conjuncts;
             }
+            List<ScalarOperator> result = new ArrayList<>(conjuncts.size());
+            for (int i = 0; i < conjuncts.size(); i++) {
+                if (!points.dropped()[i]) {
+                    result.add(points.equalities()[i] != null ? points.equalities()[i] : conjuncts.get(i));
+                }
+            }
+            return result;
+        }
+
+        // The equality in the place of the first side of a point, and the other sides of it, by the positions of the
+        // conjuncts; null when no sides are replaced.
+        private record Points(ScalarOperator[] equalities, boolean[] dropped) {
+        }
+
+        private Points pointSides(List<ScalarOperator> conjuncts, Map<ColumnRefOperator, DiscreteInterval> columns) {
             ScalarOperator[] equalities = new ScalarOperator[conjuncts.size()];
             boolean[] dropped = new boolean[conjuncts.size()];
             boolean changed = false;
@@ -629,16 +734,80 @@ final class EstimatePredicateNormalizer {
                 }
                 changed = true;
             }
-            if (!changed) {
-                return conjuncts;
+            return changed ? new Points(equalities, dropped) : null;
+        }
+
+        /**
+         * The conjuncts of all the predicates are read together for the ranges of a column; see normalizeTogether.
+         */
+        private List<ScalarOperator> rewriteTogether(List<ScalarOperator> predicates) {
+            List<ScalarOperator> conjuncts = new ArrayList<>();
+            List<Integer> owners = new ArrayList<>();
+            for (int i = 0; i < predicates.size(); i++) {
+                if (predicates.get(i) == null) {
+                    continue;
+                }
+                int before = conjuncts.size();
+                PredicateStatisticsCalculator.ImpliedRanges.collectConjuncts(predicates.get(i), conjuncts);
+                for (int j = before; j < conjuncts.size(); j++) {
+                    owners.add(i);
+                }
             }
-            List<ScalarOperator> result = new ArrayList<>(conjuncts.size());
+            Map<ColumnRefOperator, DiscreteInterval> columns = discreteIntervals(conjuncts);
+            if (columns == null) {
+                return predicates;
+            }
+            if (columns.values().stream().anyMatch(DiscreteInterval::isEmpty)) {
+                return List.of(ConstantOperator.createBoolean(false));
+            }
+            Points points = pointSides(conjuncts, columns);
+            if (points == null) {
+                return predicates;
+            }
+            List<List<ScalarOperator>> kept = new ArrayList<>(predicates.size());
+            for (int i = 0; i < predicates.size(); i++) {
+                kept.add(new ArrayList<>());
+            }
+            boolean[] changed = new boolean[predicates.size()];
             for (int i = 0; i < conjuncts.size(); i++) {
-                if (!dropped[i]) {
-                    result.add(equalities[i] != null ? equalities[i] : conjuncts.get(i));
+                int owner = owners.get(i);
+                if (points.dropped()[i]) {
+                    changed[owner] = true;
+                } else if (points.equalities()[i] != null) {
+                    changed[owner] = true;
+                    kept.get(owner).add(points.equalities()[i]);
+                } else {
+                    kept.get(owner).add(conjuncts.get(i));
+                }
+            }
+            List<ScalarOperator> result = new ArrayList<>(predicates.size());
+            for (int i = 0; i < predicates.size(); i++) {
+                ScalarOperator predicate = predicates.get(i);
+                if (predicate == null || !changed[i]) {
+                    result.add(predicate);
+                } else if (kept.get(i).size() == 1) {
+                    result.add(kept.get(i).get(0));
+                } else if (!kept.get(i).isEmpty()) {
+                    result.add(rebuild((CompoundPredicateOperator) predicate, kept.get(i)));
                 }
             }
             return result;
+        }
+
+        // The ranges of each column of whole numbers or days in the conjuncts, by the positions of their conjuncts; null
+        // when there are none.
+        private Map<ColumnRefOperator, DiscreteInterval> discreteIntervals(List<ScalarOperator> conjuncts) {
+            Map<ColumnRefOperator, DiscreteInterval> columns = null;
+            for (int i = 0; i < conjuncts.size(); i++) {
+                DiscreteSide side = discreteSide(conjuncts.get(i));
+                if (side != null) {
+                    if (columns == null) {
+                        columns = new LinkedHashMap<>();
+                    }
+                    columns.computeIfAbsent(side.column(), key -> new DiscreteInterval()).add(side, i);
+                }
+            }
+            return columns;
         }
 
         // Whether the column has statistics. The statistics can be older than the data, so the equality decides what to
@@ -743,6 +912,11 @@ final class EstimatePredicateNormalizer {
                 } else {
                     last = last == null ? side.value() : Math.min(last, side.value());
                 }
+            }
+
+            // Whether the ranges keep no value: the first value they keep is after the last.
+            private boolean isEmpty() {
+                return first != null && last != null && first > last;
             }
 
             // column = v when the ranges keep the one value v, null otherwise

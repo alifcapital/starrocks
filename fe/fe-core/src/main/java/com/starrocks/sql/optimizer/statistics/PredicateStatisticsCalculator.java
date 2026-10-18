@@ -438,12 +438,17 @@ public class PredicateStatisticsCalculator {
             }
         }
         ImpliedRanges implied = ImpliedRanges.find(conjuncts);
-        Statistics result = statistics;
+        List<ScalarOperator> kept = new ArrayList<>(predicates.size());
         for (ScalarOperator predicate : predicates) {
-            ScalarOperator kept = implied == null || predicate == null ? predicate : implied.without(predicate);
-            if (kept != null) {
-                result = statisticsCalculate(kept, result);
+            ScalarOperator without = implied == null || predicate == null ? predicate : implied.without(predicate);
+            if (without != null) {
+                kept.add(without);
             }
+        }
+        // The ranges of a column in several of the predicates are read together, as in one predicate.
+        Statistics result = statistics;
+        for (ScalarOperator predicate : EstimatePredicateNormalizer.normalizeTogether(kept, statistics)) {
+            result = statisticsCalculate(predicate, result);
         }
         return implied == null ? result : implied.narrow(result, true);
     }
