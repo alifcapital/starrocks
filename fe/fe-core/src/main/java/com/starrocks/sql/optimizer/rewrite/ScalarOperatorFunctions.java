@@ -1542,14 +1542,33 @@ public class ScalarOperatorFunctions {
         /// otherwise, the Constant Evaluation will fail.
         /// Besides, the implementation of `substring` function in starrocks includes beginIndex and length,
         /// and the index is start from 1 and can negative, so we need carefully handle it.
-        int beginIndex = index[0].getInt() >= 0 ? index[0].getInt() - 1 : string.length() + index[0].getInt();
-        int endIndex =
-                (index.length == 2) ? Math.min(beginIndex + index[1].getInt(), string.length()) : string.length();
-
-        if (beginIndex < 0 || beginIndex > endIndex) {
+        // We expect the folded value to equal what the BE returns, and the statistics compare the two. The BE
+        // counts positions in UTF-8 characters, so we count in code points: a character outside the basic
+        // plane is two Java chars but one position. The start is 1-based; a negative start counts from the end,
+        // and a start beyond either end gives an empty string. Without a length the BE takes INT_MAX.
+        long start = index[0].getInt();
+        long length = index.length == 2 ? index[1].getInt() : Integer.MAX_VALUE;
+        if (start == 0 || start == Integer.MIN_VALUE || length <= 0 || string.isEmpty()) {
             return ConstantOperator.createVarchar("");
         }
-        return ConstantOperator.createVarchar(string.substring(beginIndex, endIndex));
+        int codePoints = string.codePointCount(0, string.length());
+        long begin;
+        if (start > 0) {
+            begin = start - 1;
+            if (begin >= codePoints) {
+                return ConstantOperator.createVarchar("");
+            }
+        } else {
+            if (-start > codePoints) {
+                return ConstantOperator.createVarchar("");
+            }
+            begin = codePoints + start;
+        }
+        // A long sum: a length near INT_MAX must take the rest of the string, not overflow.
+        long end = Math.min(begin + length, codePoints);
+        int beginOffset = string.offsetByCodePoints(0, (int) begin);
+        int endOffset = string.offsetByCodePoints(beginOffset, (int) (end - begin));
+        return ConstantOperator.createVarchar(string.substring(beginOffset, endOffset));
     }
 
     @ConstantFunction(name = "lower", argTypes = {VARCHAR}, returnType = VARCHAR)

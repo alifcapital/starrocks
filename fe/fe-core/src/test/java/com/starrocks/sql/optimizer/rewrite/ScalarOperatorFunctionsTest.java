@@ -1471,6 +1471,144 @@ public class ScalarOperatorFunctionsTest {
         assertEquals(expected, ScalarOperatorFunctions.now(new ConstantOperator(6, IntegerType.INT)).getDatetime());
     }
 
+    // The cases of substrConstUtf8Test in be/test/exprs/string_fn_substr_test.cpp: the string holds characters of
+    // 1, 2, 3 and 4 UTF-8 bytes three times, and the BE expectations are given as code point ranges.
+    @Test
+    public void testSubStringMatchesBeOnUtf8() {
+        String unit = "\u007f߿࿿" + new String(Character.toChars(0xFFFFF));
+        String s = unit + unit + unit;
+        int[][] cases = {
+                {1, 1, 0, 1}, {1, 2, 0, 2}, {1, 3, 0, 3}, {1, 4, 0, 4}, {1, 100, 0, 12},
+                {2, 1, 1, 2}, {2, 2, 1, 3}, {2, 3, 1, 4}, {2, 4, 1, 5}, {2, 100, 1, 12},
+                {3, 1, 2, 3}, {3, 2, 2, 4}, {3, 3, 2, 5}, {3, 4, 2, 6}, {3, 100, 2, 12},
+                {4, 2, 3, 5}, {4, 3, 3, 6}, {4, 4, 3, 7}, {4, 100, 3, 12},
+                {5, 1, 4, 5}, {5, 2, 4, 6}, {5, 3, 4, 7}, {5, 4, 4, 8}, {5, 100, 4, 12},
+                {-12, 2, 0, 2}, {-11, 3, 1, 4}, {-10, 4, 2, 6}, {-9, 5, 3, 8}, {-8, 6, 4, 10},
+                {-7, 7, 5, 12}, {-6, 8, 6, 12}, {-5, 9, 7, 12}, {-4, 10, 8, 12}, {-3, 11, 9, 12},
+                {-2, 12, 10, 12}, {-1, 13, 11, 12},
+                {0, 1, 0, 0}, {1, -1, 0, 0}, {-1, -1, 0, 0}, {1, -100, 0, 0}, {-1, -100, 0, 0},
+                {-1, Integer.MIN_VALUE, 0, 0}, {1, Integer.MAX_VALUE, 0, 12}, {1, Integer.MIN_VALUE, 0, 0},
+                {13, 1, 0, 0}, {-13, 2, 0, 0}, {Integer.MIN_VALUE, 1, 0, 0}, {2, Integer.MAX_VALUE, 1, 12},
+        };
+        for (int[] c : cases) {
+            String expected = s.substring(s.offsetByCodePoints(0, c[2]), s.offsetByCodePoints(0, c[3]));
+            assertEquals(expected, ScalarOperatorFunctions.substring(ConstantOperator.createVarchar(s),
+                    ConstantOperator.createInt(c[0]), ConstantOperator.createInt(c[1])).getVarchar(),
+                    "substr(s, " + c[0] + ", " + c[1] + ")");
+        }
+        // Without a length the BE takes the rest of the string.
+        assertEquals(s.substring(s.offsetByCodePoints(0, 1)), ScalarOperatorFunctions.substring(
+                ConstantOperator.createVarchar(s), ConstantOperator.createInt(2)).getVarchar());
+        assertEquals(s.substring(s.offsetByCodePoints(0, 9)), ScalarOperatorFunctions.substring(
+                ConstantOperator.createVarchar(s), ConstantOperator.createInt(-3)).getVarchar());
+        assertEquals("", ScalarOperatorFunctions.substring(ConstantOperator.createVarchar(""),
+                ConstantOperator.createInt(1), ConstantOperator.createInt(2)).getVarchar());
+        // Cyrillic letters are 2 bytes, Han characters 3 and an emoji 4 bytes in UTF-8.
+        assertEquals("рив", ScalarOperatorFunctions.substring(ConstantOperator.createVarchar("привет"),
+                ConstantOperator.createInt(2), ConstantOperator.createInt(3)).getVarchar());
+        assertEquals("界", ScalarOperatorFunctions.substring(ConstantOperator.createVarchar("世界a"),
+                ConstantOperator.createInt(-2), ConstantOperator.createInt(1)).getVarchar());
+        String emoji = new String(Character.toChars(0x1F600));
+        assertEquals(emoji + "b", ScalarOperatorFunctions.substring(ConstantOperator.createVarchar("a" + emoji + "b"),
+                ConstantOperator.createInt(2), ConstantOperator.createInt(2)).getVarchar());
+        assertEquals("b", ScalarOperatorFunctions.substring(ConstantOperator.createVarchar("a" + emoji + "b"),
+                ConstantOperator.createInt(-1)).getVarchar());
+    }
+
+    private static void assertSubstr(String s, int offset, int length, String expected) {
+        assertEquals(expected, ScalarOperatorFunctions.substring(ConstantOperator.createVarchar(s),
+                ConstantOperator.createInt(offset), ConstantOperator.createInt(length)).getVarchar(),
+                "substr('" + s + "', " + offset + ", " + length + ")");
+    }
+
+    // The other substr cases of be/test/exprs/string_fn_substr_test.cpp, by test, and its left cases as
+    // substr(s, 1, n), which is left(s, n) on the BE and in the canonical form. right is not folded for statistics.
+    @Test
+    public void testSubStringMatchesBeTable() {
+        // substringNormalTest, substringConstTest: substr('test' + j, 5, 2).
+        for (int j = 0; j < 20; j++) {
+            assertSubstr("test" + j, 5, 2, Integer.toString(j));
+        }
+        // substringChineseTest, substringleftTest, substringOverleftTest.
+        for (int j = 0; j < 20; j++) {
+            assertSubstr("我是中文字符串！！！" + j, 3, 2, "中文");
+            assertSubstr("我是中文字符串" + j, -100, 2, "");
+        }
+        for (int j = 0; j < 10; j++) {
+            assertSubstr("我是中文字符串" + j, -2, 2, "串" + j);
+        }
+        int max = Integer.MAX_VALUE;
+        int min = Integer.MIN_VALUE;
+        // substrConstASCIITest and substrConstZhTest, each on its string and on the empty string.
+        Object[][] constant = {
+                {1, 2, "12", "壹贰"}, {1, 0, "", ""}, {2, 100, "23456789", "贰叁肆伍陆柒捌玖"}, {9, 1, "9", "玖"},
+                {9, 100, "9", "玖"}, {10, 1, "", ""}, {-9, 1, "1", "壹"}, {-9, 9, "123456789", "壹贰叁肆伍陆柒捌玖"},
+                {-9, 10, "123456789", "壹贰叁肆伍陆柒捌玖"}, {-4, 1, "6", "陆"}, {-4, 4, "6789", "陆柒捌玖"},
+                {-4, 5, "6789", "陆柒捌玖"}, {-1, 1, "9", "玖"}, {-1, 2, "9", "玖"}, {0, 1, "", ""},
+                {1, max, "123456789", "壹贰叁肆伍陆柒捌玖"}, {1, -2, "", ""}, {-3, -2, "", ""}, {-3, min, "", ""},
+                {1, min, "", ""}, {min, 1, "", ""}, {1, -1, "", ""}, {1, -10, "", ""}, {-2, -1, "", ""},
+                {-2, -10, "", ""}, {-2, min, "", ""},
+        };
+        for (Object[] c : constant) {
+            assertSubstr("123456789", (int) c[0], (int) c[1], (String) c[2]);
+            assertSubstr("壹贰叁肆伍陆柒捌玖", (int) c[0], (int) c[1], (String) c[3]);
+            assertSubstr("", (int) c[0], (int) c[1], "");
+        }
+        // substrNotConstASCIITest and substrNotConstUtf8Test: the same table on 123456789 and on the Han digits.
+        Object[][] small = {
+                {"", 0, 1, ""}, {"", 1, 1, ""}, {"", -1, 1, ""}, {"", 1, -1, ""}, {"", max, min, ""},
+                {"", min, max, ""}, {"", max, max, ""}, {"", min, min, ""},
+                {"a", 0, 1, ""}, {"a", 1, 1, "a"}, {"a", 1, 2, "a"}, {"a", 1, max, "a"}, {"a", 1, min, ""},
+                {"a", -1, 0, ""}, {"a", -1, 1, "a"}, {"a", -1, 2, "a"}, {"a", -1, -1, ""}, {"a", -1, min, ""},
+                {"a", -1, max, "a"},
+        };
+        for (Object[] c : small) {
+            assertSubstr((String) c[0], (int) c[1], (int) c[2], (String) c[3]);
+        }
+        String ascii = "123456789";
+        String han = "壹贰叁肆伍陆柒捌玖";
+        int[][] positions = {
+                {-1, min, 0, 0}, {-1, -1, 0, 0}, {-1, 0, 0, 0}, {-1, 1, 8, 9}, {-1, max, 8, 9},
+                {0, min, 0, 0}, {0, -1, 0, 0}, {0, 0, 0, 0}, {0, 1, 0, 0}, {0, max, 0, 0},
+                {1, min, 0, 0}, {1, -1, 0, 0}, {1, 0, 0, 0}, {1, 1, 0, 1}, {1, max, 0, 9},
+                {5, 1, 4, 5}, {5, 5, 4, 9}, {5, 6, 4, 9}, {5, max, 4, 9},
+                {-4, 1, 5, 6}, {-4, 3, 5, 8}, {-4, 4, 5, 9}, {-4, 5, 5, 9}, {-4, max, 5, 9},
+                {-9, min, 0, 0}, {-9, -1, 0, 0}, {-9, 0, 0, 0}, {-9, 1, 0, 1}, {-9, 9, 0, 9}, {-9, max, 0, 9},
+                {-10, min, 0, 0}, {-10, -1, 0, 0}, {-10, 0, 0, 0}, {-10, 1, 0, 0}, {-10, 9, 0, 0}, {-10, max, 0, 0},
+                {9, min, 0, 0}, {9, -1, 0, 0}, {9, 0, 0, 0}, {9, 1, 8, 9}, {9, 9, 8, 9}, {9, max, 8, 9},
+                {10, min, 0, 0}, {10, -1, 0, 0}, {10, 0, 0, 0}, {10, 1, 0, 0}, {10, 9, 0, 0}, {10, max, 0, 0},
+        };
+        for (int[] c : positions) {
+            assertSubstr(ascii, c[0], c[1], ascii.substring(c[2], c[3]));
+            assertSubstr(han, c[0], c[1], han.substring(c[2], c[3]));
+        }
+        // leftTest, leftAndRightNotConst*Test and leftAndRightConst*Test: left(s, n) is substr(s, 1, n).
+        for (int j = 0; j < 20; j++) {
+            String test = j + "TEST";
+            assertSubstr(test, 1, j, test.substring(0, Math.min(j, test.length())));
+        }
+        String thumbs = "All fingers are thumbs";
+        String poem = "三十年众生牛马，六十年诸佛龙象";
+        String mixed = "a三b十c年d众e生f牛g马";
+        String letters = "ABCDEFG_HIJKLMN";
+        Object[][] left = {
+                {"", 0, ""}, {"", 1, ""}, {"", -1, ""}, {"", max, ""}, {"", min, ""},
+                {"a", 0, ""}, {"a", 1, "a"}, {"a", 10, "a"}, {"a", max, "a"}, {"a", -1, ""}, {"a", min, ""},
+                {thumbs, 0, ""}, {thumbs, 1, "A"}, {thumbs, 10, "All finger"}, {thumbs, 22, thumbs}, {thumbs, 23, thumbs},
+                {thumbs, 100, thumbs}, {thumbs, max, thumbs}, {thumbs, -1, ""}, {thumbs, -7, ""}, {thumbs, min, ""},
+                {poem, 0, ""}, {poem, 1, "三"}, {poem, 2, "三十"}, {poem, 7, "三十年众生牛马"}, {poem, 14, "三十年众生牛马，六十年诸佛龙"},
+                {poem, 15, poem}, {poem, 16, poem}, {poem, 20, poem}, {poem, 100, poem}, {poem, max, poem},
+                {poem, -1, ""}, {poem, -11, ""}, {poem, -111, ""}, {poem, min, ""},
+                {mixed, 0, ""}, {mixed, 1, "a"}, {mixed, 2, "a三"}, {mixed, 7, "a三b十c年d"}, {mixed, 14, mixed},
+                {mixed, 100, mixed}, {mixed, max, mixed}, {mixed, -1, ""}, {mixed, -111, ""}, {mixed, min, ""},
+                {letters, 0, ""}, {letters, 1, "A"}, {letters, 2, "AB"}, {letters, 15, letters}, {letters, 16, letters},
+                {letters, max, letters}, {letters, -1, ""}, {letters, -11, ""}, {letters, -111, ""}, {letters, min, ""},
+        };
+        for (Object[] c : left) {
+            assertSubstr((String) c[0], 1, (int) c[1], (String) c[2]);
+        }
+    }
+
     @Test
     public void testSubString() {
         assertEquals("ab", ScalarOperatorFunctions.substring(ConstantOperator.createVarchar("abcd"),
