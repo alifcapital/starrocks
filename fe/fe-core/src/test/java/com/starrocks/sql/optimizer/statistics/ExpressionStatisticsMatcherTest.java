@@ -197,11 +197,81 @@ public class ExpressionStatisticsMatcherTest {
                 ExpressionStatisticsMatcher.match(or, expressions(left(8), false), plain());
         Assertions.assertTrue(result.hasOr());
         Assertions.assertFalse(Utils.extractColumnRef(result.getPredicate()).contains(C));
-        // A part of the condition on another column keeps the whole condition as it is.
-        ScalarOperator mixed = Utils.compoundOr(like(C, "101%"), eq(D, ConstantOperator.createInt(5)));
-        Assertions.assertNull(rewrite(mixed));
         ScalarOperator not = new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.NOT, like(C, "1%"));
         Assertions.assertEquals(X, rewrite(not).getChild(0).getChild(0));
+    }
+
+    @Test
+    public void testPartsOfAnOrThatCannotBeWrittenStayAsTheyAre() {
+        ScalarOperator other = eq(D, ConstantOperator.createInt(5));
+        ScalarOperator number = eq(C, text("26226972800600000205"));
+        ScalarOperator prefix = like(C, "101%");
+        // The part over x is written, the other stays the same object. The part over x goes first whatever the order of
+        // the query is, so the estimate of the OR does not depend on it.
+        ScalarOperator written = rewrite(Utils.compoundOr(prefix, other));
+        Assertions.assertEquals(X, written.getChild(0).getChild(0));
+        Assertions.assertSame(other, written.getChild(1));
+        written = rewrite(Utils.compoundOr(other, prefix));
+        Assertions.assertEquals(X, written.getChild(0).getChild(0));
+        Assertions.assertSame(other, written.getChild(1));
+
+        // The part on c itself stays on c: x does not know how its values relate to the number.
+        written = rewrite(Utils.compoundOr(eq(left(5), text("20202")), number));
+        Assertions.assertEquals(X, Utils.extractColumnRef(written.getChild(0)).get(0));
+        Assertions.assertSame(number, written.getChild(1));
+
+        // Three parts, one over x in the middle: it goes first, the others keep their order.
+        List<ScalarOperator> parts = Utils.extractDisjunctive(rewrite(Utils.compoundOr(Utils.compoundOr(other, prefix),
+                number)));
+        Assertions.assertEquals(3, parts.size());
+        Assertions.assertEquals(X, Utils.extractColumnRef(parts.get(0)).get(0));
+        Assertions.assertSame(other, parts.get(1));
+        Assertions.assertSame(number, parts.get(2));
+
+        // Parts at any depth: an AND under the OR, and a NOT over the OR.
+        ScalarOperator and = Utils.compoundAnd(prefix, other);
+        written = rewrite(Utils.compoundOr(and, number));
+        Assertions.assertEquals(X, Utils.extractColumnRef(written.getChild(0).getChild(0)).get(0));
+        Assertions.assertSame(other, written.getChild(0).getChild(1));
+        Assertions.assertSame(number, written.getChild(1));
+        written = rewrite(new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.NOT,
+                Utils.compoundOr(prefix, number)));
+        Assertions.assertTrue(((CompoundPredicateOperator) written).isNot());
+        Assertions.assertEquals(X, Utils.extractColumnRef(written.getChild(0).getChild(0)).get(0));
+        Assertions.assertSame(number, written.getChild(0).getChild(1));
+
+        // An atom that reads x and another column cannot be written over x alone, so it stays whole.
+        ScalarOperator both = eq(call("concat", VarcharType.VARCHAR, left(3), call("upper", VarcharType.VARCHAR, C)),
+                text("q"));
+        written = rewrite(Utils.compoundOr(eq(left(3), text("103")), both));
+        Assertions.assertSame(both, written.getChild(1));
+
+        // Nothing is written when no part is: the conjunct is estimated as before.
+        Assertions.assertNull(rewrite(Utils.compoundOr(other, number)));
+        Assertions.assertNull(rewrite(Utils.compoundOr(number, both)));
+    }
+
+    @Test
+    public void testFlagsOfAConditionWithAPartOnAColumn() {
+        ScalarOperator other = eq(D, ConstantOperator.createInt(5));
+        ScalarOperator number = eq(C, text("26226972800600000205"));
+        ScalarOperator prefix = like(C, "101%");
+        ExpressionStatisticsMatcher.Result mixed = ExpressionStatisticsMatcher.match(Utils.compoundOr(prefix, other),
+                expressions(left(8), false), plain());
+        // x is read, and it describes the rows: the estimate of the OR merges its statistics of the parts.
+        Assertions.assertEquals(Set.of(X), mixed.getUsedColumns());
+        Assertions.assertEquals(Set.of(X), mixed.getFilteredColumns());
+        // The part on d holds rows of any value of x, so the distribution of x after the OR is rebuilt from the whole one.
+        Assertions.assertTrue(mixed.hasOr());
+        // The part on c leaves its own NULL rows out, so the estimate over x does not leave them out for it.
+        mixed = ExpressionStatisticsMatcher.match(Utils.compoundOr(prefix, number), expressions(left(8), false), plain());
+        Assertions.assertEquals(Set.of(C), mixed.getNonNullColumns());
+        Assertions.assertTrue(mixed.getNullRowsLeftOutColumns().isEmpty());
+        // Over x alone the NULL rows of c are left out of the share of x.
+        ExpressionStatisticsMatcher.Result pure = ExpressionStatisticsMatcher.match(Utils.compoundOr(prefix,
+                like(C, "102%")), expressions(left(8), false), plain());
+        Assertions.assertTrue(pure.hasOr());
+        Assertions.assertEquals(Set.of(C), pure.getNullRowsLeftOutColumns());
     }
 
     @Test

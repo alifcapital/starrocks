@@ -246,6 +246,44 @@ public class ExpressionStatisticsPlanTest extends ConnectorPlanTestBase {
     }
 
     @Test
+    public void testMixedOrIsEstimatedByItsParts() throws Exception {
+        // The scan of a plain query, of a CTE and of a subquery reads its columns from different statistics, so the
+        // part on c_nationkey takes a different share in each; in each of them the prefix keeps its 600 rows of 1000,
+        // and the OR adds the rows of the part less its rows among the 600.
+        List<String> forms = List.of("select c_phone, c_nationkey from hive0.tpch.customer where %s",
+                "with t as (select c_phone, c_nationkey from hive0.tpch.customer where %s) select * from t",
+                "select * from (select c_phone, c_nationkey from hive0.tpch.customer where %s) s");
+        withExpressionStatistics(prefixStatistics(), () -> {
+            for (String form : forms) {
+                double prefix = cardinality(getCostExplain(String.format(form, "left(c_phone, 3) = '103'")),
+                        "HdfsScanNode");
+                double part = cardinality(getCostExplain(String.format(form, "c_nationkey = 5")), "HdfsScanNode");
+                Assertions.assertEquals(600, prefix, 1.0, form);
+                Assertions.assertTrue(part > 0 && part < 1000, form + " " + part);
+                double expected = prefix + part - prefix * part / 1000;
+                Assertions.assertEquals(expected, cardinality(getCostExplain(String.format(form,
+                        "left(c_phone, 3) = '103' or c_nationkey = 5")), "HdfsScanNode"), 1.0, form);
+                // The order of the parts does not change it.
+                Assertions.assertEquals(expected, cardinality(getCostExplain(String.format(form,
+                        "c_nationkey = 5 or left(c_phone, 3) = '103'")), "HdfsScanNode"), 1.0, form);
+            }
+        });
+    }
+
+    @Test
+    public void testGroupByOfThePrefixAfterMixedOrIsBoundedByItsValues() throws Exception {
+        withExpressionStatistics(prefixStatistics(), () -> {
+            // Two prefixes in the table: the groups of the rows that stay are not more than the two.
+            for (String where : List.of("left(c_phone, 3) = '103' or c_nationkey = 5",
+                    "c_nationkey = 5 or left(c_phone, 3) = '103'")) {
+                String plan = getCostExplain("select left(c_phone, 3), count(*) from hive0.tpch.customer where "
+                        + where + " group by left(c_phone, 3)");
+                Assertions.assertTrue(cardinality(plan, "AGGREGATE") <= 2, plan);
+            }
+        });
+    }
+
+    @Test
     public void testWithoutStatisticsOnExpressionsTheEstimateIsAsBefore() throws Exception {
         String sql = "select c_phone from hive0.tpch.customer where left(c_phone, 3) = '103'";
         long before = cardinality(getCostExplain(sql), "HdfsScanNode");

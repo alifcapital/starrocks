@@ -95,7 +95,9 @@ final class ExpressionProjectionStatistics {
     /**
      * x after the scan filter. The estimate of an OR keeps the histogram of its first branch, so with an OR over x
      * the statistics are built again from x before the filter: the head values on which the condition holds and
-     * the buckets that meet at least one branch of it.
+     * the buckets that meet at least one branch of it. An OR with a part on a real column holds rows that have any
+     * value of x, as we cannot tell which values the rows of that part have, so it narrows neither the head nor the
+     * buckets of x; the NDV of x is bounded by the one the estimate of the scan gave.
      */
     private static ColumnStatistic filteredStatistic(ScanExpressionStatistics.Entry entry,
                                                      ScanExpressionStatistics expressions) {
@@ -104,14 +106,19 @@ final class ExpressionProjectionStatistics {
         }
         ColumnRefOperator x = entry.getColumn();
         List<ScalarOperator> conditions = new ArrayList<>();
+        boolean partOnColumn = false;
+        boolean orWithColumn = false;
         for (ScalarOperator conjunct : Utils.extractConjuncts(expressions.getVirtualPredicate())) {
             List<ColumnRefOperator> columns = Utils.extractColumnRef(conjunct);
             if (!columns.isEmpty() && columns.stream().allMatch(x::equals)) {
                 conditions.add(conjunct);
+            } else if (columns.contains(x)) {
+                partOnColumn = true;
+                orWithColumn |= ExpressionStatisticsMatcher.containsOr(conjunct);
             }
         }
         ColumnStatistic unfiltered = entry.getUnfilteredStatistic();
-        if (conditions.isEmpty()) {
+        if (conditions.isEmpty() && !orWithColumn) {
             return entry.getStatistic();
         }
         Histogram histogram = unfiltered.getHistogram();
@@ -153,8 +160,14 @@ final class ExpressionProjectionStatistics {
             }
         }
         Histogram rebuilt = histogram.hasStringValues() ? Histogram.forStrings(buckets, head) : new Histogram(buckets, head);
-        return ColumnStatistic.buildFrom(unfiltered).setHistogram(rebuilt).setNullsFraction(0)
-                .setDistinctValuesCount(Math.max(1, Math.min(distinct, unfiltered.getDistinctValuesCount()))).build();
+        // A condition with a part on a real column also limits x, but the values of x cannot tell which rows that part
+        // keeps. We want the NDV not above the one the estimate of the scan gave after all its conditions.
+        double bound = partOnColumn ? Math.min(unfiltered.getDistinctValuesCount(),
+                entry.getStatistic().getDistinctValuesCount()) : unfiltered.getDistinctValuesCount();
+        // A condition over x alone is never true on a NULL of x. An OR with a part on a column can be true on it.
+        double nulls = conditions.isEmpty() ? entry.getStatistic().getNullsFraction() : 0;
+        return ColumnStatistic.buildFrom(unfiltered).setHistogram(rebuilt).setNullsFraction(nulls)
+                .setDistinctValuesCount(Math.max(1, Math.min(distinct, bound))).build();
     }
 
     // The values of x outside its head.

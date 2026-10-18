@@ -270,7 +270,7 @@ public class PredicateStatisticsCalculator {
                     expressions.withVirtualColumns(statistics, match.getUsedColumns()));
             // The share of x leaves out the NULL rows of a source column with a written condition that is never true
             // on NULL, so a kept condition on that column must not take them out again.
-            for (ColumnRefOperator column : match.getNonNullColumns()) {
+            for (ColumnRefOperator column : match.getNullRowsLeftOutColumns()) {
                 ColumnStatistic statistic = statistics.getColumnStatistics().get(column);
                 if (statistic != null && !statistic.isUnknown()) {
                     virtual.addColumnStatistic(column, ColumnStatistic.buildFrom(statistic).setNullsFraction(0).build());
@@ -1570,6 +1570,12 @@ public class PredicateStatisticsCalculator {
                 List<ScalarOperator> disjunctive = Utils.extractDisjunctive(predicate);
                 Statistics cumulativeStatistics = statisticsCalculate(disjunctive.get(0), statistics, useMcv);
                 double rowCount = cumulativeStatistics.getOutputRowCount();
+                // The MCV distributions follow the OR of the parts so far after each step. We expect an OR of hundreds
+                // of parts, so each step adds its own part to the truths of the earlier ones and does not evaluate the
+                // whole OR on the head again.
+                McvStatisticsPropagation.DisjunctionFilter mcvFilter =
+                        new McvStatisticsPropagation.DisjunctionFilter(statistics);
+                mcvFilter.add(disjunctive.get(0));
 
                 for (int i = 1; i < disjunctive.size(); ++i) {
                     Statistics orItemStatistics = statisticsCalculate(disjunctive.get(i), statistics, useMcv);
@@ -1579,8 +1585,8 @@ public class PredicateStatisticsCalculator {
                     rowCount = Math.min(rowCount, statistics.getOutputRowCount());
                     cumulativeStatistics =
                             computeOrPredicateStatistics(cumulativeStatistics, orItemStatistics, andStatistics, rowCount);
-                    cumulativeStatistics = McvStatisticsPropagation.filter(
-                            Utils.compoundOr(disjunctive.subList(0, i + 1)), statistics, cumulativeStatistics);
+                    mcvFilter.add(disjunctive.get(i));
+                    cumulativeStatistics = mcvFilter.filter(cumulativeStatistics);
                 }
 
                 return StatisticsEstimateUtils.adjustStatisticsByRowCount(cumulativeStatistics, rowCount);

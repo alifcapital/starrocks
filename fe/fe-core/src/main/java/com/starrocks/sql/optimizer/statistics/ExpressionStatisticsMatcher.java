@@ -32,6 +32,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -43,8 +44,9 @@ import java.util.Set;
  * predicate that only the statistics estimate reads.
  *
  * A condition is written over x when its expression can be written as g(f): an exact match of a part of the
- * condition with the canonical form of f, or the prefix rule for f = substr(c, 1, K). A condition is written only
- * when no column of f remains in it.
+ * condition with the canonical form of f, or the prefix rule for f = substr(c, 1, K). An atom is written only when
+ * no column of f remains in it. Inside an AND, an OR or a NOT, the atoms that are written go over x and the others
+ * stay as they are, so a conjunct is written when at least one of its atoms is.
  *
  * We expect the conditions on c and on the columns that share an MCV group with c to be estimated together by one
  * source, so we do not replace a source that counts them together with x unless x counts them together too:
@@ -67,6 +69,7 @@ public final class ExpressionStatisticsMatcher {
         private final boolean hasOr;
         private final Set<ColumnRefOperator> filteredColumns;
         private final Set<ColumnRefOperator> nonNullColumns;
+        private final Set<ColumnRefOperator> nullRowsLeftOutColumns;
         // By the position of a conjunct of the predicate: the condition written for it, null to keep it as it is,
         // and whether the copy drops it.
         private final ScalarOperator[] replacement;
@@ -74,7 +77,7 @@ public final class ExpressionStatisticsMatcher {
 
         Result(List<ScalarOperator> conjuncts, ScalarOperator[] replacement, boolean[] dropped,
                 Set<ColumnRefOperator> usedColumns, boolean hasOr, Set<ColumnRefOperator> filteredColumns,
-                Set<ColumnRefOperator> nonNullColumns) {
+                Set<ColumnRefOperator> nonNullColumns, Set<ColumnRefOperator> nullRowsLeftOutColumns) {
             this.replacement = replacement;
             this.dropped = dropped;
             this.predicate = copy(conjuncts, replacement, dropped);
@@ -82,6 +85,7 @@ public final class ExpressionStatisticsMatcher {
             this.hasOr = hasOr;
             this.filteredColumns = Collections.unmodifiableSet(filteredColumns);
             this.nonNullColumns = Collections.unmodifiableSet(nonNullColumns);
+            this.nullRowsLeftOutColumns = Collections.unmodifiableSet(nullRowsLeftOutColumns);
         }
 
         /**
@@ -89,7 +93,8 @@ public final class ExpressionStatisticsMatcher {
          * flags: the copy keeps the conjunct objects of that predicate and the conditions written here.
          */
         Result forConjuncts(List<ScalarOperator> conjuncts) {
-            return new Result(conjuncts, replacement, dropped, usedColumns, hasOr, filteredColumns, nonNullColumns);
+            return new Result(conjuncts, replacement, dropped, usedColumns, hasOr, filteredColumns, nonNullColumns,
+                    nullRowsLeftOutColumns);
         }
 
         private static ScalarOperator copy(List<ScalarOperator> conjuncts, ScalarOperator[] replacement,
@@ -112,7 +117,10 @@ public final class ExpressionStatisticsMatcher {
             return usedColumns;
         }
 
-        /** Whether a condition written over a virtual column has an OR. */
+        /**
+         * Whether a condition written over a virtual column has an OR, over it alone or with a part on a real
+         * column.
+         */
         public boolean hasOr() {
             return hasOr;
         }
@@ -131,6 +139,16 @@ public final class ExpressionStatisticsMatcher {
          */
         public Set<ColumnRefOperator> getNonNullColumns() {
             return nonNullColumns;
+        }
+
+        /**
+         * The source columns whose NULL rows the estimate over x already leaves out: those with a condition that
+         * reads only x and is never true when the column is NULL, so a kept condition on the column must not leave
+         * them out again. A condition with a part kept on the column is not among them: we expect that part to leave
+         * the NULL rows out in its own estimate, and a NULL fraction of 0 would raise its share.
+         */
+        public Set<ColumnRefOperator> getNullRowsLeftOutColumns() {
+            return nullRowsLeftOutColumns;
         }
     }
 
@@ -180,7 +198,7 @@ public final class ExpressionStatisticsMatcher {
                 if (!estimated[i] || conjunct.isFromPredicateRangeDerive() || Collections.disjoint(columns.get(i), sources)) {
                     continue;
                 }
-                ScalarOperator rewritten = rewriteTree(conjunct, entry, rule, sources, cache);
+                ScalarOperator rewritten = rewriteTree(conjunct, entry, rule, cache);
                 if (rewritten != null) {
                     written.put(i, rewritten);
                 }
@@ -206,6 +224,7 @@ public final class ExpressionStatisticsMatcher {
         Set<ColumnRefOperator> handledSources = new HashSet<>();
         Set<ColumnRefOperator> used = new HashSet<>();
         Set<ColumnRefOperator> nonNull = new HashSet<>();
+        Set<ColumnRefOperator> nullRowsLeftOut = new HashSet<>();
         boolean hasOr = false;
         boolean changed = false;
         for (ScanExpressionStatistics.Entry entry : order) {
@@ -257,14 +276,22 @@ public final class ExpressionStatisticsMatcher {
             }
             for (Map.Entry<Integer, ScalarOperator> item : written.entrySet()) {
                 replacement[item.getKey()] = item.getValue();
+                // A condition with a part kept on a real column is not over x only. We do not narrow the
+                // distribution of x by it, as the values of x cannot tell which rows the kept part takes, and the
+                // NULL rows of the column are left out by the whole condition, not by the estimate over x.
+                boolean overXOnly = Utils.extractColumnRef(item.getValue()).stream().allMatch(entry.getColumn()::equals);
                 hasOr |= containsOr(item.getValue());
                 // A prefix no value can have is written as a constant, which does not read x.
                 if (Utils.extractColumnRef(item.getValue()).contains(entry.getColumn())) {
                     used.add(entry.getColumn());
                 }
                 for (ColumnRefOperator sourceColumn : sources) {
-                    if (!nonNull.contains(sourceColumn) && rejectsNull(sourceColumn, conjuncts.get(item.getKey()))) {
+                    boolean known = overXOnly ? nullRowsLeftOut.contains(sourceColumn) : nonNull.contains(sourceColumn);
+                    if (!known && rejectsNull(sourceColumn, conjuncts.get(item.getKey()))) {
                         nonNull.add(sourceColumn);
+                        if (overXOnly) {
+                            nullRowsLeftOut.add(sourceColumn);
+                        }
                     }
                 }
             }
@@ -294,7 +321,7 @@ public final class ExpressionStatisticsMatcher {
                 filtered.add(entry.getColumn());
             }
         }
-        return new Result(conjuncts, replacement, dropped, used, hasOr, filtered, nonNull);
+        return new Result(conjuncts, replacement, dropped, used, hasOr, filtered, nonNull, nullRowsLeftOut);
     }
 
     /**
@@ -464,7 +491,7 @@ public final class ExpressionStatisticsMatcher {
         return Utils.canEliminateNull(Set.of(column), condition);
     }
 
-    private static boolean containsOr(ScalarOperator operator) {
+    static boolean containsOr(ScalarOperator operator) {
         if (operator instanceof CompoundPredicateOperator && ((CompoundPredicateOperator) operator).isOr()) {
             return true;
         }
@@ -477,22 +504,38 @@ public final class ExpressionStatisticsMatcher {
     }
 
     /**
-     * The condition over x, or null when a part of it cannot be written over x alone. The written condition reads
-     * only x and constants: the estimate over x knows nothing of how x relates to another column, as in
-     * concat(lower(c), d) = 'q' with the statistic of lower(c).
+     * The condition with every atom that can be written over x replaced by its form over x, or null when no atom
+     * can. An atom is written only when no column of f remains in it: the estimate over x knows nothing of how x
+     * relates to another column, as in concat(lower(c), d) = 'q' with the statistic of lower(c).
+     *
+     * We want an OR such as left(c, 5) = 'a' OR c = 'b' estimated by x for the part that x knows and by the
+     * ordinary estimate for the rest, and not by the ordinary estimate for the whole. So an atom that cannot be
+     * written stays as it is inside its AND, OR or NOT, and the estimate of the compound predicate adds up the
+     * parts as it does for any other columns.
      */
     private static ScalarOperator rewriteTree(ScalarOperator operator, ScanExpressionStatistics.Entry entry,
-                                              PrefixDerivationRule rule, Set<ColumnRefOperator> sources,
-                                              ExpressionStatisticsCache cache) {
+                                              PrefixDerivationRule rule, ExpressionStatisticsCache cache) {
+        ScalarOperator rewritten = rewritePart(operator, entry, rule, cache);
+        return rewritten == operator ? null : rewritten;
+    }
+
+    // The same object when no atom of the operator is written.
+    private static ScalarOperator rewritePart(ScalarOperator operator, ScanExpressionStatistics.Entry entry,
+                                              PrefixDerivationRule rule, ExpressionStatisticsCache cache) {
+        if (operator instanceof CompoundPredicateOperator && ((CompoundPredicateOperator) operator).isOr()) {
+            return rewriteOr(operator, entry, rule, cache);
+        }
         if (operator instanceof CompoundPredicateOperator) {
             CompoundPredicateOperator compound = (CompoundPredicateOperator) operator;
             List<ScalarOperator> children = new ArrayList<>(operator.getChildren().size());
+            boolean changed = false;
             for (ScalarOperator child : operator.getChildren()) {
-                ScalarOperator rewritten = rewriteTree(child, entry, rule, sources, cache);
-                if (rewritten == null) {
-                    return null;
-                }
+                ScalarOperator rewritten = rewritePart(child, entry, rule, cache);
+                changed |= rewritten != child;
                 children.add(rewritten);
+            }
+            if (!changed) {
+                return operator;
             }
             if (compound.isNot() && ConstantOperator.FALSE.equals(children.get(0))) {
                 // A prefix no value can have is false on every value of x and NULL on NULL, so its negation is
@@ -503,9 +546,57 @@ public final class ExpressionStatisticsMatcher {
         }
         ScalarOperator rewritten = rewriteAtom(operator, entry, rule, cache);
         if (rewritten == null || !Utils.extractColumnRef(rewritten).stream().allMatch(entry.getColumn()::equals)) {
-            return null;
+            return operator;
         }
         return rewritten;
+    }
+
+    /**
+     * An OR with its parts written. The estimate of an OR adds up its parts in their order, and it keeps the
+     * statistics of x after the first part. We want the same estimate whatever order the query lists the parts in,
+     * and the statistics of x to be those of the parts over x, so when some parts read x and some do not, the parts
+     * over x go first, each group in the order of the query.
+     */
+    private static ScalarOperator rewriteOr(ScalarOperator operator, ScanExpressionStatistics.Entry entry,
+                                            PrefixDerivationRule rule, ExpressionStatisticsCache cache) {
+        List<ScalarOperator> parts = Utils.extractDisjunctive(operator);
+        List<ScalarOperator> rewritten = new ArrayList<>(parts.size());
+        boolean changed = false;
+        int readX = 0;
+        for (ScalarOperator part : parts) {
+            ScalarOperator written = rewritePart(part, entry, rule, cache);
+            changed |= written != part;
+            readX += Utils.extractColumnRef(written).contains(entry.getColumn()) ? 1 : 0;
+            rewritten.add(written);
+        }
+        if (!changed) {
+            return operator;
+        }
+        if (readX == 0 || readX == parts.size()) {
+            return rebuildOr(operator, rewritten.iterator());
+        }
+        List<ScalarOperator> ordered = new ArrayList<>(rewritten.size());
+        for (ScalarOperator part : rewritten) {
+            if (Utils.extractColumnRef(part).contains(entry.getColumn())) {
+                ordered.add(part);
+            }
+        }
+        for (ScalarOperator part : rewritten) {
+            if (!Utils.extractColumnRef(part).contains(entry.getColumn())) {
+                ordered.add(part);
+            }
+        }
+        return Utils.compoundOr(ordered);
+    }
+
+    // The tree of ORs of the original with its parts taken in turn from the written ones.
+    private static ScalarOperator rebuildOr(ScalarOperator original, Iterator<ScalarOperator> parts) {
+        if (original instanceof CompoundPredicateOperator && ((CompoundPredicateOperator) original).isOr()) {
+            ScalarOperator first = rebuildOr(original.getChild(0), parts);
+            ScalarOperator second = rebuildOr(original.getChild(1), parts);
+            return new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.OR, first, second);
+        }
+        return parts.next();
     }
 
     private static ScalarOperator rewriteAtom(ScalarOperator atom, ScanExpressionStatistics.Entry entry,

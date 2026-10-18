@@ -27,6 +27,7 @@ import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -151,7 +152,116 @@ final class McvStatisticsPropagation {
         return OptionalDouble.of(statistics.getOutputRowCount() * matching / best.getRowCount());
     }
 
+    /**
+     * The filter by an OR whose parts arrive one by one. The estimate of an OR filters the distributions by the OR of
+     * its first i parts for every i. We fear that evaluating that whole OR on every tuple of the head at each step
+     * makes the work grow with the square of the number of parts: some hundred parts cost seconds of planning. So
+     * for each tuple we keep the truth of the OR of the parts so far, and a new part adds only its own truth to it.
+     * The result of filter is the same as of McvStatisticsPropagation#filter on the OR of the parts.
+     */
+    static final class DisjunctionFilter {
+        private final Statistics input;
+        private final McvPredicateEvaluator evaluator = new McvPredicateEvaluator();
+        private final List<ScalarOperator> parts = new ArrayList<>();
+        private final Set<ColumnRefOperator> columns = new HashSet<>();
+        private final Map<MultiColumnCombinedStats, GroupTruths> groups = new IdentityHashMap<>();
+        // The OR of the parts as a chain, which the filter reads only as a predicate that is an OR; it is not walked.
+        private ScalarOperator disjunction;
+
+        DisjunctionFilter(Statistics input) {
+            this.input = input;
+        }
+
+        void add(ScalarOperator part) {
+            parts.add(part);
+            columns.addAll(Utils.extractColumnRef(part));
+            disjunction = disjunction == null ? part : new CompoundPredicateOperator(
+                    CompoundPredicateOperator.CompoundType.OR, disjunction, part);
+        }
+
+        /** The filter of the rows by the OR of the parts added so far. */
+        Statistics filter(Statistics output) {
+            return McvStatisticsPropagation.filter(disjunction, input, output, parts.size() < 2 ? null : this);
+        }
+
+        // The truth of the OR of the parts so far on each head tuple of a group and on its NULL tuple. A part that
+        // cannot be evaluated on a tuple leaves the OR not evaluable, as in the OR evaluated whole.
+        private final class GroupTruths {
+            private final Truth[] tuples;
+            private int evaluated;
+            private boolean unsupported;
+            private Truth nullTuple;
+            private int nullEvaluated;
+            private boolean nullUnsupported;
+
+            private GroupTruths(int size) {
+                tuples = new Truth[size];
+            }
+
+            private void evaluate(MultiColumnCombinedStats group) {
+                while (evaluated < parts.size() && !unsupported) {
+                    ScalarOperator part = parts.get(evaluated++);
+                    int position = 0;
+                    for (MultiColumnCombinedStats.McvEntry entry : group.getMcv()) {
+                        Optional<Truth> truth = McvStatisticsPropagation.evaluate(part, group.getColumns(),
+                                entry.getValues(), group.getMcvDistribution(), evaluator);
+                        if (truth.isEmpty()) {
+                            unsupported = true;
+                            return;
+                        }
+                        tuples[position] = or(tuples[position], truth.get());
+                        position++;
+                    }
+                }
+            }
+
+            private void evaluateNull(MultiColumnCombinedStats group) {
+                while (nullEvaluated < parts.size() && !nullUnsupported) {
+                    Optional<Truth> truth = McvStatisticsPropagation.evaluate(parts.get(nullEvaluated++),
+                            group.getColumns(), java.util.Collections.singletonList(null), null, evaluator);
+                    if (truth.isEmpty()) {
+                        nullUnsupported = true;
+                        return;
+                    }
+                    nullTuple = or(nullTuple, truth.get());
+                }
+            }
+        }
+
+        private static Truth or(Truth left, Truth right) {
+            if (left == null) {
+                return right;
+            }
+            return left == Truth.TRUE || right == Truth.TRUE ? Truth.TRUE
+                    : left == Truth.UNKNOWN || right == Truth.UNKNOWN ? Truth.UNKNOWN : Truth.FALSE;
+        }
+
+        private GroupTruths truthsOf(MultiColumnCombinedStats group) {
+            return groups.computeIfAbsent(group, key -> new GroupTruths(key.getMcv().size()));
+        }
+
+        // The truth of the OR on the tuple at a position of the head, empty when it cannot be evaluated.
+        private Optional<Truth> truth(MultiColumnCombinedStats group, int position) {
+            GroupTruths truths = truthsOf(group);
+            truths.evaluate(group);
+            return truths.unsupported ? Optional.empty() : Optional.of(truths.tuples[position]);
+        }
+
+        // The truth of the OR on the tuple of NULLs, empty when it cannot be evaluated.
+        private Optional<Truth> truthOfNull(MultiColumnCombinedStats group) {
+            GroupTruths truths = truthsOf(group);
+            truths.evaluateNull(group);
+            return truths.nullUnsupported ? Optional.empty() : Optional.of(truths.nullTuple);
+        }
+    }
+
     static Statistics filter(ScalarOperator predicate, Statistics input, Statistics output) {
+        return filter(predicate, input, output, null);
+    }
+
+    // disjunction: the parts of the predicate, which is their OR, with the truths of the OR kept; null otherwise
+    private static Statistics filter(ScalarOperator predicate, Statistics input, Statistics output,
+                                     DisjunctionFilter disjunction) {
         if (input.getMultiColumnCombinedStats().isEmpty() || input.getOutputRowCount() <= 0) {
             return output;
         }
@@ -176,7 +286,8 @@ final class McvStatisticsPropagation {
                 unchangedGroups.add(item.getKey());
                 continue;
             }
-            Set<ColumnRefOperator> used = new HashSet<>(Utils.extractColumnRef(groupPredicate));
+            Set<ColumnRefOperator> used = disjunction == null ? new HashSet<>(Utils.extractColumnRef(groupPredicate))
+                    : disjunction.columns;
             if (!group.hasDistribution() || java.util.Collections.disjoint(used, item.getKey())) {
                 // No evidence of a change in this group's distribution. The row-count bound is
                 // applied by consumers, independently of the units of its stored counts.
@@ -207,9 +318,12 @@ final class McvStatisticsPropagation {
             double oldHead = group.getMcvDistribution().getSequentialTotalRows();
             double head = 0;
             boolean supported = true;
+            int position = 0;
             for (MultiColumnCombinedStats.McvEntry entry : group.getMcv()) {
-                Optional<Truth> match = evaluate(groupPredicate, group.getColumns(), entry.getValues(),
-                        group.getMcvDistribution(), evaluator);
+                Optional<Truth> match = disjunction == null
+                        ? evaluate(groupPredicate, group.getColumns(), entry.getValues(), group.getMcvDistribution(),
+                        evaluator)
+                        : disjunction.truth(group, position++);
                 if (match.isEmpty()) {
                     supported = false;
                     break;
@@ -234,8 +348,9 @@ final class McvStatisticsPropagation {
             if (group.getColumns().size() == 1 && !group.getNullCounts().isEmpty()
                     && group.getNullCounts().get(0) > 0
                     && !group.getMcvDistribution().hasNull(0)
-                    && evaluate(groupPredicate, group.getColumns(), java.util.Collections.singletonList(null), null,
-                            evaluator).filter(truth -> truth == Truth.TRUE).isEmpty()) {
+                    && (disjunction == null
+                    ? evaluate(groupPredicate, group.getColumns(), java.util.Collections.singletonList(null), null,
+                    evaluator) : disjunction.truthOfNull(group)).filter(truth -> truth == Truth.TRUE).isEmpty()) {
                 // Global NDV includes NULL even when it was outside the retained head.
                 tailNdv = Math.max(0, tailNdv - 1);
             }
