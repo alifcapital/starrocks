@@ -33,7 +33,10 @@ public class CollectCTEProduceRule extends TransformationRule {
     @Override
     public List<OptExpression> transform(OptExpression input, OptimizerContext context) {
         LogicalCTEProduceOperator produce = (LogicalCTEProduceOperator) input.getOp();
-        context.getCteContext().addCTEProduce(produce.getCteId());
+        // This rule sees one produce at a time and cannot tell whether a user CTE sits inside a synthetic producer.
+        // The produce count it collects is replaced by CTEUtils.collectCteOperators before the optimizer reads
+        // cbo_cte_max_limit decisions from it.
+        context.getCteContext().addCTEProduce(produce.getCteId(), produce.isSynthetic(), false);
         return Collections.emptyList();
     }
 }

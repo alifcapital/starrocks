@@ -38,9 +38,19 @@ import java.util.Objects;
 public class LogicalCTEProduceOperator extends LogicalOperator {
     private int cteId;
 
+    // True when the planner made this CTE from identical FROM subqueries and the user did not write it. The
+    // query had one copy of the subquery per reference, so we let the cost model alone choose between reuse and
+    // inline for it, and we do not count it against cbo_cte_max_limit.
+    private boolean synthetic;
+
     public LogicalCTEProduceOperator(int cteId) {
+        this(cteId, false);
+    }
+
+    public LogicalCTEProduceOperator(int cteId, boolean synthetic) {
         super(OperatorType.LOGICAL_CTE_PRODUCE);
         this.cteId = cteId;
+        this.synthetic = synthetic;
     }
 
     @Override
@@ -65,6 +75,10 @@ public class LogicalCTEProduceOperator extends LogicalOperator {
         return cteId;
     }
 
+    public boolean isSynthetic() {
+        return synthetic;
+    }
+
     @Override
     public <R, C> R accept(OperatorVisitor<R, C> visitor, C context) {
         return visitor.visitLogicalCTEProduce(this, context);
@@ -85,7 +99,7 @@ public class LogicalCTEProduceOperator extends LogicalOperator {
             return false;
         }
         LogicalCTEProduceOperator that = (LogicalCTEProduceOperator) o;
-        return Objects.equals(cteId, that.cteId);
+        return Objects.equals(cteId, that.cteId) && synthetic == that.synthetic;
     }
 
     @Override
@@ -97,6 +111,7 @@ public class LogicalCTEProduceOperator extends LogicalOperator {
     public String toString() {
         return "LogicalCTEProduceOperator{" +
                 "cteId='" + cteId + '\'' +
+                (synthetic ? ", synthetic" : "") +
                 '}';
     }
 
@@ -115,6 +130,7 @@ public class LogicalCTEProduceOperator extends LogicalOperator {
         @Override
         public LogicalCTEProduceOperator.Builder withOperator(LogicalCTEProduceOperator operator) {
             builder.cteId = operator.cteId;
+            builder.synthetic = operator.synthetic;
             return super.withOperator(operator);
         }
     }

@@ -1,0 +1,165 @@
+-- name: test_identical_subquery_reuse
+CREATE TABLE t_isr (
+  k int NULL,
+  g int NULL,
+  v int NULL
+) ENGINE=OLAP
+DUPLICATE KEY(k)
+DISTRIBUTED BY HASH(k) BUCKETS 3
+PROPERTIES ("replication_num" = "1");
+-- result:
+-- !result
+INSERT INTO t_isr VALUES (1, 1, 10), (2, 1, 20), (3, 2, 30), (4, 2, 40), (5, 3, 50);
+-- result:
+-- !result
+set cbo_cte_reuse_identical_subqueries = false;
+-- result:
+-- !result
+select a.g, a.s, b.s from (select g, sum(v) as s from t_isr where k > 1 group by g) a join (select g, sum(v) as s from t_isr where k > 1 group by g) b on a.g = b.g where a.s > 25 order by a.g;
+-- result:
+2	70	70
+3	50	50
+-- !result
+select x.g, x.s, y.c from (select g, sum(s) as s from (with w as (select g, v from t_isr where k > 1) select w.g, sum(w.v) as s, count(*) as c from w where w.g in (select g from w where v > 25) group by w.g) q group by g) x join (select g, max(c) as c from (with w as (select g, v from t_isr where k > 1) select w.g, sum(w.v) as s, count(*) as c from w where w.g in (select g from w where v > 25) group by w.g) q where s > 0 group by g) y on x.g = y.g order by x.g;
+-- result:
+2	70	2
+3	50	1
+-- !result
+select g, sum(s) from (select * from (select g, sum(v) as s from t_isr where k > 1 group by g) a union all select * from (select g, sum(v) as s from t_isr where k > 1 group by g) b) u group by g order by g;
+-- result:
+1	40
+2	140
+3	100
+-- !result
+select count(*) from (select g, sum(v) as s from t_isr where k > 1 group by g) a join (select g, sum(v) as s from t_isr where k > 1 group by g) b on a.g = b.g join (select g, sum(v) as s from t_isr where k > 1 group by g) c on b.g = c.g where c.s < 60;
+-- result:
+2
+-- !result
+set cbo_cte_reuse_identical_subqueries = true;
+-- result:
+-- !result
+set cbo_cte_reuse_rate = -1;
+-- result:
+-- !result
+select a.g, a.s, b.s from (select g, sum(v) as s from t_isr where k > 1 group by g) a join (select g, sum(v) as s from t_isr where k > 1 group by g) b on a.g = b.g where a.s > 25 order by a.g;
+-- result:
+2	70	70
+3	50	50
+-- !result
+select x.g, x.s, y.c from (select g, sum(s) as s from (with w as (select g, v from t_isr where k > 1) select w.g, sum(w.v) as s, count(*) as c from w where w.g in (select g from w where v > 25) group by w.g) q group by g) x join (select g, max(c) as c from (with w as (select g, v from t_isr where k > 1) select w.g, sum(w.v) as s, count(*) as c from w where w.g in (select g from w where v > 25) group by w.g) q where s > 0 group by g) y on x.g = y.g order by x.g;
+-- result:
+2	70	2
+3	50	1
+-- !result
+select g, sum(s) from (select * from (select g, sum(v) as s from t_isr where k > 1 group by g) a union all select * from (select g, sum(v) as s from t_isr where k > 1 group by g) b) u group by g order by g;
+-- result:
+1	40
+2	140
+3	100
+-- !result
+select count(*) from (select g, sum(v) as s from t_isr where k > 1 group by g) a join (select g, sum(v) as s from t_isr where k > 1 group by g) b on a.g = b.g join (select g, sum(v) as s from t_isr where k > 1 group by g) c on b.g = c.g where c.s < 60;
+-- result:
+2
+-- !result
+set cbo_cte_reuse_rate = 0;
+-- result:
+-- !result
+select a.g, a.s, b.s from (select g, sum(v) as s from t_isr where k > 1 group by g) a join (select g, sum(v) as s from t_isr where k > 1 group by g) b on a.g = b.g where a.s > 25 order by a.g;
+-- result:
+2	70	70
+3	50	50
+-- !result
+select x.g, x.s, y.c from (select g, sum(s) as s from (with w as (select g, v from t_isr where k > 1) select w.g, sum(w.v) as s, count(*) as c from w where w.g in (select g from w where v > 25) group by w.g) q group by g) x join (select g, max(c) as c from (with w as (select g, v from t_isr where k > 1) select w.g, sum(w.v) as s, count(*) as c from w where w.g in (select g from w where v > 25) group by w.g) q where s > 0 group by g) y on x.g = y.g order by x.g;
+-- result:
+2	70	2
+3	50	1
+-- !result
+select g, sum(s) from (select * from (select g, sum(v) as s from t_isr where k > 1 group by g) a union all select * from (select g, sum(v) as s from t_isr where k > 1 group by g) b) u group by g order by g;
+-- result:
+1	40
+2	140
+3	100
+-- !result
+select count(*) from (select g, sum(v) as s from t_isr where k > 1 group by g) a join (select g, sum(v) as s from t_isr where k > 1 group by g) b on a.g = b.g join (select g, sum(v) as s from t_isr where k > 1 group by g) c on b.g = c.g where c.s < 60;
+-- result:
+2
+-- !result
+set cbo_cte_reuse_rate = 1.15;
+-- result:
+-- !result
+select a.g, a.s, b.s from (select g, sum(v) as s from t_isr where k > 1 group by g) a join (select g, sum(v) as s from t_isr where k > 1 group by g) b on a.g = b.g where a.s > 25 order by a.g;
+-- result:
+2	70	70
+3	50	50
+-- !result
+select x.g, x.s, y.c from (select g, sum(s) as s from (with w as (select g, v from t_isr where k > 1) select w.g, sum(w.v) as s, count(*) as c from w where w.g in (select g from w where v > 25) group by w.g) q group by g) x join (select g, max(c) as c from (with w as (select g, v from t_isr where k > 1) select w.g, sum(w.v) as s, count(*) as c from w where w.g in (select g from w where v > 25) group by w.g) q where s > 0 group by g) y on x.g = y.g order by x.g;
+-- result:
+2	70	2
+3	50	1
+-- !result
+select g, sum(s) from (select * from (select g, sum(v) as s from t_isr where k > 1 group by g) a union all select * from (select g, sum(v) as s from t_isr where k > 1 group by g) b) u group by g order by g;
+-- result:
+1	40
+2	140
+3	100
+-- !result
+select count(*) from (select g, sum(v) as s from t_isr where k > 1 group by g) a join (select g, sum(v) as s from t_isr where k > 1 group by g) b on a.g = b.g join (select g, sum(v) as s from t_isr where k > 1 group by g) c on b.g = c.g where c.s < 60;
+-- result:
+2
+-- !result
+CREATE TABLE t_isr_sink (
+  g int NULL,
+  s1 bigint NULL,
+  s2 bigint NULL
+) ENGINE=OLAP
+DUPLICATE KEY(g)
+DISTRIBUTED BY HASH(g) BUCKETS 3
+PROPERTIES ("replication_num" = "1");
+-- result:
+-- !result
+set cbo_cte_reuse_identical_subqueries = true;
+-- result:
+-- !result
+set cbo_cte_reuse_rate = -1;
+-- result:
+-- !result
+insert into t_isr_sink select a.g, a.s, b.s from (select g, sum(v) as s from t_isr where k > 1 group by g) a join (select g, sum(v) as s from t_isr where k > 1 group by g) b on a.g = b.g;
+-- result:
+-- !result
+set cbo_cte_reuse_rate = 0;
+-- result:
+-- !result
+insert into t_isr_sink select a.g, a.s, b.s from (select g, sum(v) as s from t_isr where k > 1 group by g) a join (select g, sum(v) as s from t_isr where k > 1 group by g) b on a.g = b.g;
+-- result:
+-- !result
+set cbo_cte_reuse_rate = 1.15;
+-- result:
+-- !result
+insert into t_isr_sink select a.g, a.s, b.s from (select g, sum(v) as s from t_isr where k > 1 group by g) a join (select g, sum(v) as s from t_isr where k > 1 group by g) b on a.g = b.g;
+-- result:
+-- !result
+select g, s1, s2, count(*) from t_isr_sink group by g, s1, s2 order by g;
+-- result:
+1	20	20	3
+2	70	70	3
+3	50	50	3
+-- !result
+set cbo_cte_reuse_rate = 0;
+-- result:
+-- !result
+create table t_isr_ctas distributed by hash(g) buckets 3 properties('replication_num' = '1') as select a.g, a.s as s1, b.s as s2 from (select g, sum(v) as s from t_isr where k > 1 group by g) a join (select g, sum(v) as s from t_isr where k > 1 group by g) b on a.g = b.g;
+-- result:
+-- !result
+select * from t_isr_ctas order by g;
+-- result:
+1	20	20
+2	70	70
+3	50	50
+-- !result
+set cbo_cte_reuse_rate = 0;
+-- result:
+-- !result
+function: assert_explain_contains('select a.g, a.s, b.s from (select g, sum(v) as s from t_isr where k > 1 group by g) a join (select g, sum(v) as s from t_isr where k > 1 group by g) b on a.g = b.g where a.s > 25 order by a.g', 'MultiCastDataSinks')
+-- result:
+None
+-- !result

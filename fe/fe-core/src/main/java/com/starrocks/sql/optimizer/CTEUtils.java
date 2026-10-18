@@ -27,25 +27,30 @@ import java.util.BitSet;
 public class CTEUtils {
     public static void collectCteOperators(OptExpression anchor, OptimizerContext context) {
         context.getCteContext().reset();
-        collectCteOperatorsImpl(anchor, context, new BitSet());
+        collectCteOperatorsImpl(anchor, context, new BitSet(), false);
     }
 
     public static void collectCteOperatorsImpl(OptExpression root, OptimizerContext context, BitSet searchConsume) {
+        collectCteOperatorsImpl(root, context, searchConsume, false);
+    }
+
+    private static void collectCteOperatorsImpl(OptExpression root, OptimizerContext context, BitSet searchConsume,
+                                                boolean insideSyntheticProducer) {
         if (OperatorType.LOGICAL_CTE_ANCHOR.equals(root.getOp().getOpType())) {
             // produce
             LogicalCTEAnchorOperator anchor = (LogicalCTEAnchorOperator) root.getOp();
-            context.getCteContext().addCTEProduce(anchor.getCteId());
 
             Preconditions.checkState(root.getInputs().get(0).getOp() instanceof LogicalCTEProduceOperator);
             LogicalCTEProduceOperator produce = (LogicalCTEProduceOperator) root.getInputs().get(0).getOp();
             Preconditions.checkState(produce.getCteId() == anchor.getCteId());
+            context.getCteContext().addCTEProduce(anchor.getCteId(), produce.isSynthetic(), insideSyntheticProducer);
 
             BitSet left = (BitSet) searchConsume.clone();
-            collectCteOperatorsImpl(root.inputAt(0), context, left);
+            collectCteOperatorsImpl(root.inputAt(0), context, left, insideSyntheticProducer || produce.isSynthetic());
 
             BitSet right = (BitSet) searchConsume.clone();
             right.set(anchor.getCteId());
-            collectCteOperatorsImpl(root.inputAt(1), context, right);
+            collectCteOperatorsImpl(root.inputAt(1), context, right, insideSyntheticProducer);
             return;
         }
 
@@ -59,7 +64,7 @@ public class CTEUtils {
             }
 
             if (root.arity() > 0) {
-                collectCteOperatorsImpl(root.inputAt(0), context, searchConsume);
+                collectCteOperatorsImpl(root.inputAt(0), context, searchConsume, insideSyntheticProducer);
             } else {
                 context.getCteContext().addForceCTE(consume.getCteId());
             }
@@ -68,7 +73,7 @@ public class CTEUtils {
         }
 
         for (OptExpression child : root.getInputs()) {
-            collectCteOperatorsImpl(child, context, searchConsume);
+            collectCteOperatorsImpl(child, context, searchConsume, insideSyntheticProducer);
         }
     }
 

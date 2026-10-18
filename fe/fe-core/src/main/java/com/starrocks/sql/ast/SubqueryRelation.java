@@ -26,6 +26,10 @@ public class SubqueryRelation extends QueryRelation {
 
     private final boolean assertRows;
 
+    // True when the analyzer made this relation to apply the row access and column masking policies of a table or
+    // view, so the user did not write it
+    private boolean securityPolicyView = false;
+
     public SubqueryRelation(QueryStatement queryStatement) {
         this(queryStatement, false, queryStatement.getPos());
     }
@@ -43,6 +47,14 @@ public class SubqueryRelation extends QueryRelation {
 
     public boolean isAssertRows() {
         return assertRows;
+    }
+
+    public boolean isSecurityPolicyView() {
+        return securityPolicyView;
+    }
+
+    public void setSecurityPolicyView(boolean securityPolicyView) {
+        this.securityPolicyView = securityPolicyView;
     }
 
     @Override

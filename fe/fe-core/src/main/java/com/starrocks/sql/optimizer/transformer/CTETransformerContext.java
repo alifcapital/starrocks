@@ -16,8 +16,11 @@
 package com.starrocks.sql.optimizer.transformer;
 
 import com.google.common.base.Preconditions;
+import com.starrocks.sql.ast.SubqueryRelation;
 
 import java.util.HashMap;
+import java.util.IdentityHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -33,6 +36,12 @@ public class CTETransformerContext {
     private final Map<Integer, Integer> cteIdToNodeCount;
     
     private final AtomicInteger uniqueId;
+
+    // FROM subquery -> id of the synthetic CTE that reads the same rows, see IdenticalSubqueryCollector. We keep
+    // these apart from cteRefIdMapping, so they do not count against cbo_cte_max_limit in isForceInline().
+    private final Map<SubqueryRelation, Integer> syntheticCteIds = new IdentityHashMap<>();
+
+    private boolean statementStarted = false;
 
     private final int cteMaxLimit;
 
@@ -104,6 +113,26 @@ public class CTETransformerContext {
     public int getCurrentCteRef(int cteMouldId) {
         Preconditions.checkState(cteRefIdMapping.containsKey(cteMouldId));
         return cteRefIdMapping.get(cteMouldId);
+    }
+
+    // Returns true only for the first call, which is the transform of the root of the statement
+    public boolean beginStatement() {
+        boolean first = !statementStarted;
+        statementStarted = true;
+        return first;
+    }
+
+    public int registerSyntheticCte(List<SubqueryRelation> members) {
+        int cteId = uniqueId.incrementAndGet();
+        for (SubqueryRelation member : members) {
+            syntheticCteIds.put(member, cteId);
+        }
+        return cteId;
+    }
+
+    // Returns null when the subquery has no synthetic CTE
+    public Integer getSyntheticCteId(SubqueryRelation subquery) {
+        return syntheticCteIds.get(subquery);
     }
 
     public boolean isForceInline() {

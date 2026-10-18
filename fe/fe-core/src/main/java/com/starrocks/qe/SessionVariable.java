@@ -515,6 +515,7 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     public static final String CBO_CTE_FORCE_REUSE_NODE_COUNT = "cbo_cte_force_reuse_node_count";
     public static final String CBO_CTE_FORCE_REUSE_LIMIT_WITHOUT_ORDER_BY =
             "cbo_cte_force_reuse_limit_without_order_by";
+    public static final String CBO_CTE_REUSE_IDENTICAL_SUBQUERIES = "cbo_cte_reuse_identical_subqueries";
     public static final String ENABLE_SQL_DIGEST = "enable_sql_digest";
     public static final String CBO_MAX_REORDER_NODE = "cbo_max_reorder_node";
     public static final String CBO_PRUNE_SHUFFLE_COLUMN_RATE = "cbo_prune_shuffle_column_rate";
@@ -1628,6 +1629,12 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     // When false, allow inline even if CTE has LIMIT without ORDER BY (may cause inconsistent results).
     @VarAttr(name = CBO_CTE_FORCE_REUSE_LIMIT_WITHOUT_ORDER_BY, flag = VariableMgr.INVISIBLE)
     private boolean cboCTEForceReuseLimitWithoutOrderBy = true;
+
+    // BI tools such as Tableau repeat the same FROM subquery several times in one statement. When this is true,
+    // the planner turns identical uncorrelated FROM subqueries into one CTE, so the cost model can choose to
+    // compute the subquery once. Works only when cbo_cte_reuse is on.
+    @VarAttr(name = CBO_CTE_REUSE_IDENTICAL_SUBQUERIES)
+    private boolean cboCTEReuseIdenticalSubqueries = false;
 
     @VarAttr(name = PREFER_CTE_REWRITE, flag = VariableMgr.INVISIBLE)
     private boolean preferCTERewrite = false;
@@ -3823,6 +3830,14 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     public boolean isCboCTEForceReuseLimitWithoutOrderBy() {
         return cboCTEForceReuseLimitWithoutOrderBy;
+    }
+
+    public boolean isCboCTEReuseIdenticalSubqueries() {
+        return cboCTEReuseIdenticalSubqueries;
+    }
+
+    public void setCboCTEReuseIdenticalSubqueries(boolean cboCTEReuseIdenticalSubqueries) {
+        this.cboCTEReuseIdenticalSubqueries = cboCTEReuseIdenticalSubqueries;
     }
 
     public void setCboCTEForceReuseLimitWithoutOrderBy(boolean cboCTEForceReuseLimitWithoutOrderBy) {

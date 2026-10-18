@@ -114,6 +114,14 @@ public class MaterializedViewOptimizer {
             connectContext.getSessionVariable().setEnableLocalShuffleAgg(false);
         }
 
+        // The plan of the mv is a template that rewrite matches query plans against, and only an SPJG plan is a valid
+        // template. A CTE anchor would make the plan invalid, so we keep identical subqueries of the mv as they are.
+        final boolean originalReuseIdenticalSubqueries =
+                connectContext.getSessionVariable().isCboCTEReuseIdenticalSubqueries();
+        if (originalReuseIdenticalSubqueries) {
+            connectContext.getSessionVariable().setCboCTEReuseIdenticalSubqueries(false);
+        }
+
         MVTransformerContext mvTransformerContext = new MVTransformerContext(connectContext, inlineView);
         try {
             // get optimized plan of mv's defined query
@@ -137,6 +145,7 @@ public class MaterializedViewOptimizer {
             connectContext.getSessionVariable().setEnableInnerJoinToSemi(originalEnableInnerToSemi);
             connectContext.getSessionVariable().setSemiJoinDeduplicateMode(originalSemiJoinDeduplicateMode);
             connectContext.getSessionVariable().setEnableLocalShuffleAgg(originalEnableLocalShuffleAgg);
+            connectContext.getSessionVariable().setCboCTEReuseIdenticalSubqueries(originalReuseIdenticalSubqueries);
         }
     }
 }

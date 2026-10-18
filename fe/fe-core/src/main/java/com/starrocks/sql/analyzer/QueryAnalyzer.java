@@ -772,6 +772,7 @@ public class QueryAnalyzer {
                 } else {
                     r.setNeedRewrittenByPolicy(false);
                     SubqueryRelation subqueryRelation = new SubqueryRelation(policyRewriteQuery);
+                    subqueryRelation.setSecurityPolicyView(true);
 
                     // If an alias exists, rewrite the alias into subquery to ensure
                     // that the original expression can be resolved correctly.

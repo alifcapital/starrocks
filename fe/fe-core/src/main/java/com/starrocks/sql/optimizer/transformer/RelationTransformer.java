@@ -97,7 +97,6 @@ import com.starrocks.sql.optimizer.base.Ordering;
 import com.starrocks.sql.optimizer.base.RangeDistributionSpec;
 import com.starrocks.sql.optimizer.operator.AggType;
 import com.starrocks.sql.optimizer.operator.Operator;
-import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.sql.optimizer.operator.Projection;
 import com.starrocks.sql.optimizer.operator.logical.LogicalAggregationOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalApplyOperator;
@@ -215,25 +214,45 @@ public class RelationTransformer implements AstVisitorExtendInterface<LogicalPla
 
     // transform relation without considering the sql_select_limit
     public LogicalPlan transform(Relation relation) {
-        if (relation instanceof QueryRelation && !((QueryRelation) relation).getCteRelations().isEmpty()) {
-            QueryRelation queryRelation = (QueryRelation) relation;
-            if (queryRelation.getCteRelations().stream().noneMatch(c -> c.getRefs() > 1)) {
-                // all cte is only referenced once, no need to reuse
-                return visit(relation);
-            }
+        // The first transform on a CTE context plans the root of a statement; the nested transformers share
+        // the context. Identical FROM subqueries are found once, for the whole statement.
+        List<List<SubqueryRelation>> identicalSubqueries = List.of();
+        if (cteContext.beginStatement() && relation instanceof QueryRelation query) {
+            identicalSubqueries = IdenticalSubqueryCollector.collect(query, session);
+        }
 
-            OptExprBuilder optExprBuilder;
+        OptExprBuilder root = null;
+        OptExprBuilder mostDeepAnchor = null;
+        // a cte that is only referenced once is inlined, no need to reuse
+        if (relation instanceof QueryRelation queryRelation
+                && queryRelation.getCteRelations().stream().anyMatch(c -> c.getRefs() > 1)) {
             Pair<OptExprBuilder, OptExprBuilder> cteRootAndMostDeepAnchor = buildCTEAnchorAndProducer(queryRelation);
-            if (cteRootAndMostDeepAnchor.first == null || cteRootAndMostDeepAnchor.second == null) {
-                return visit(relation);
+            if (cteRootAndMostDeepAnchor.first != null && cteRootAndMostDeepAnchor.second != null) {
+                root = cteRootAndMostDeepAnchor.first;
+                mostDeepAnchor = cteRootAndMostDeepAnchor.second;
             }
-            optExprBuilder = cteRootAndMostDeepAnchor.first;
-            LogicalPlan logicalPlan = visit(relation);
-            cteRootAndMostDeepAnchor.second.addChild(logicalPlan.getRootBuilder());
-            return new LogicalPlan(optExprBuilder, logicalPlan.getOutputColumn(), logicalPlan.getCorrelation());
-        } else {
+        }
+
+        // The synthetic anchors go below the user anchors of the root, so their producers consume the root CTE
+        // like the subqueries do. The collector leaves out subqueries in the root CTE definitions, which are
+        // planned above these anchors.
+        if (!identicalSubqueries.isEmpty()) {
+            Pair<OptExprBuilder, OptExprBuilder> syntheticRootAndMostDeepAnchor =
+                    buildSyntheticCTEAnchorAndProducer(identicalSubqueries);
+            if (mostDeepAnchor == null) {
+                root = syntheticRootAndMostDeepAnchor.first;
+            } else {
+                mostDeepAnchor.addChild(syntheticRootAndMostDeepAnchor.first);
+            }
+            mostDeepAnchor = syntheticRootAndMostDeepAnchor.second;
+        }
+
+        if (root == null) {
             return visit(relation);
         }
+        LogicalPlan logicalPlan = visit(relation);
+        mostDeepAnchor.addChild(logicalPlan.getRootBuilder());
+        return new LogicalPlan(root, logicalPlan.getOutputColumn(), logicalPlan.getCorrelation());
     }
 
     Pair<OptExprBuilder, OptExprBuilder> buildCTEAnchorAndProducer(QueryRelation node) {
@@ -291,6 +310,105 @@ public class RelationTransformer implements AstVisitorExtendInterface<LogicalPla
         }
 
         return new Pair<>(root, anchorOptBuilder);
+    }
+
+    /**
+     * Builds one anchor and producer per group of identical subqueries. The producer computes the first subquery
+     * of the group. visitSubqueryRelation turns every member of a group into a consumer whose child is the member
+     * itself, so the optimizer can inline it by cost.
+     *
+     * <p>We register all groups before we plan any producer, so every member becomes a consumer wherever it is
+     * planned below these anchors. A later group can contain an earlier group but not the other way round, see
+     * IdenticalSubqueryCollector.collect, so a producer consumes only groups whose anchors are above it.
+     */
+    private Pair<OptExprBuilder, OptExprBuilder> buildSyntheticCTEAnchorAndProducer(
+            List<List<SubqueryRelation>> identicalSubqueries) {
+        List<Integer> cteIds = new ArrayList<>();
+        for (List<SubqueryRelation> members : identicalSubqueries) {
+            cteIds.add(cteContext.registerSyntheticCte(members));
+        }
+
+        OptExprBuilder root = null;
+        OptExprBuilder anchorOptBuilder = null;
+        for (int i = 0; i < identicalSubqueries.size(); i++) {
+            int cteId = cteIds.get(i);
+            SubqueryRelation representative = identicalSubqueries.get(i).get(0);
+            LogicalPlan producerPlan = new RelationTransformer(columnRefFactory, session,
+                    new ExpressionMapping(new Scope(RelationId.anonymous(), new RelationFields())),
+                    cteContext, mvTransformerContext)
+                    .transform(representative.getQueryStatement().getQueryRelation());
+            // The collector takes only subqueries that see no outer columns
+            if (!producerPlan.getCorrelation().isEmpty()) {
+                throw new StarRocksPlannerException(INTERNAL_ERROR,
+                        "Identical subquery %s reads outer columns %s", representative,
+                        producerPlan.getCorrelation());
+            }
+
+            OptExprBuilder produceOptBuilder = new OptExprBuilder(new LogicalCTEProduceOperator(cteId, true),
+                    Lists.newArrayList(producerPlan.getRootBuilder()),
+                    producerPlan.getRootBuilder().getExpressionMapping());
+            OptExprBuilder newAnchorOptBuilder = new OptExprBuilder(new LogicalCTEAnchorOperator(cteId),
+                    Lists.newArrayList(produceOptBuilder), null);
+            if (anchorOptBuilder != null) {
+                anchorOptBuilder.addChild(newAnchorOptBuilder);
+            } else {
+                root = newAnchorOptBuilder;
+            }
+            anchorOptBuilder = newAnchorOptBuilder;
+
+            cteContext.getCteExpressions().put(cteId,
+                    new ExpressionMapping(representative.getScope(), producerPlan.getOutputColumn()));
+            registerSubqueryAST(producerPlan.getRootBuilder().getRootOperator(), representative);
+        }
+        return new Pair<>(root, anchorOptBuilder);
+    }
+
+    // Returns a consumer of the synthetic CTE of the subquery, or null when the subquery has none
+    private OptExprBuilder buildSyntheticCTEConsume(SubqueryRelation node, LogicalPlan subqueryPlan) {
+        Integer cteId = cteContext.getSyntheticCteId(node);
+        if (cteId == null) {
+            return null;
+        }
+        // The members of a group have equal text over the same objects and see no outer columns, so they plan to
+        // the same output as the producer. Anything else is a bug in the collector.
+        ExpressionMapping producerMapping = cteContext.getCteExpressions().get(cteId);
+        if (producerMapping == null || !subqueryPlan.getCorrelation().isEmpty()) {
+            throw new StarRocksPlannerException(INTERNAL_ERROR,
+                    "Identical subquery %s has no producer or reads outer columns %s", node,
+                    subqueryPlan.getCorrelation());
+        }
+        List<ColumnRefOperator> producerColumns = producerMapping.getFieldMappings();
+        List<ColumnRefOperator> outputColumns = subqueryPlan.getOutputColumn();
+        if (producerColumns.size() != outputColumns.size()) {
+            throw new StarRocksPlannerException(INTERNAL_ERROR,
+                    "Identical subquery %s output %s does not match its producer %s", node, outputColumns,
+                    producerColumns);
+        }
+        Map<ColumnRefOperator, ColumnRefOperator> cteOutputColumnRefMap = Maps.newHashMap();
+        for (int i = 0; i < outputColumns.size(); i++) {
+            ColumnRefOperator column = outputColumns.get(i);
+            ColumnRefOperator producerColumn = producerColumns.get(i);
+            ColumnRefOperator mapped = cteOutputColumnRefMap.putIfAbsent(column, producerColumn);
+            if (!column.getType().equals(producerColumn.getType())
+                    || column.isNullable() != producerColumn.isNullable()
+                    || (mapped != null && !mapped.equals(producerColumn))) {
+                throw new StarRocksPlannerException(INTERNAL_ERROR,
+                        "Identical subquery %s output %s does not match its producer %s", node, outputColumns,
+                        producerColumns);
+            }
+        }
+        LogicalCTEConsumeOperator consume = new LogicalCTEConsumeOperator(cteId, cteOutputColumnRefMap);
+        return new OptExprBuilder(consume, Lists.newArrayList(subqueryPlan.getRootBuilder()),
+                new ExpressionMapping(node.getScope(), outputColumns,
+                        subqueryPlan.getRootBuilder().getColumnRefToConstOperators()));
+    }
+
+    private void registerSubqueryAST(Operator subQueryOperator, SubqueryRelation node) {
+        // store opt expression to ast map if sub-query's type is supported.
+        if (this.mvTransformerContext != null
+                && TextMatchBasedRewriteRule.SUPPORTED_REWRITE_OPERATOR_TYPES.contains(subQueryOperator.getOpType())) {
+            this.mvTransformerContext.registerOpAST(subQueryOperator, node.getQueryStatement());
+        }
     }
 
     @Override
@@ -867,11 +985,14 @@ public class RelationTransformer implements AstVisitorExtendInterface<LogicalPla
         LogicalPlan logicalPlan = transform(node.getQueryStatement().getQueryRelation());
         Operator subQueryOperator = logicalPlan.getRootBuilder().getRootOperator();
 
-        OptExprBuilder builder = new OptExprBuilder(
-                subQueryOperator,
-                logicalPlan.getRootBuilder().getInputs(),
-                new ExpressionMapping(node.getScope(), logicalPlan.getOutputColumn(),
-                        logicalPlan.getRootBuilder().getColumnRefToConstOperators()));
+        OptExprBuilder builder = buildSyntheticCTEConsume(node, logicalPlan);
+        if (builder == null) {
+            builder = new OptExprBuilder(
+                    subQueryOperator,
+                    logicalPlan.getRootBuilder().getInputs(),
+                    new ExpressionMapping(node.getScope(), logicalPlan.getOutputColumn(),
+                            logicalPlan.getRootBuilder().getColumnRefToConstOperators()));
+        }
 
         builder = addOrderByLimit(builder, node);
 
@@ -879,12 +1000,7 @@ public class RelationTransformer implements AstVisitorExtendInterface<LogicalPla
             LogicalAssertOneRowOperator assertOneRowOperator = LogicalAssertOneRowOperator.createLessEqOne("");
             builder = builder.withNewRoot(assertOneRowOperator);
         }
-        // store opt expression to ast map if sub-query's type is supported.
-        OperatorType operatorType = subQueryOperator.getOpType();
-        if (this.mvTransformerContext != null
-                && TextMatchBasedRewriteRule.SUPPORTED_REWRITE_OPERATOR_TYPES.contains(operatorType)) {
-            this.mvTransformerContext.registerOpAST(subQueryOperator, node.getQueryStatement());
-        }
+        registerSubqueryAST(subQueryOperator, node);
 
         return new LogicalPlan(builder, logicalPlan.getOutputColumn(), logicalPlan.getCorrelation());
     }

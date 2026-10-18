@@ -40,6 +40,13 @@ public class ForceCTEReuseRule extends TransformationRule {
 
     @Override
     public List<OptExpression> transform(OptExpression input, OptimizerContext context) {
+        // A synthetic CTE stands for identical subqueries that the query computes once per copy. Inline keeps that
+        // meaning, so we do not force reuse for it. The planner makes no synthetic CTE from a subquery with a
+        // non-deterministic function; a time function such as now() is folded to one constant for the whole query.
+        if (((LogicalCTEProduceOperator) input.getOp()).isSynthetic()) {
+            return Collections.emptyList();
+        }
+
         boolean shouldForceReuse = false;
 
         // Always force reuse for non-deterministic functions

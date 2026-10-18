@@ -17,12 +17,14 @@ package com.starrocks.sql.optimizer;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import com.google.common.collect.Sets;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.statistics.Statistics;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 /*
  * Recorder CTE node info, contains:
@@ -40,6 +42,14 @@ public class CTEContext {
 
     // All CTE produce
     private List<Integer> produces;
+
+    // CTE that the planner made from identical FROM subqueries, see LogicalCTEProduceOperator.isSynthetic()
+    private Set<Integer> syntheticProduces;
+
+    // Number of user CTE produces inside the producer of a synthetic CTE. Each consumer of the synthetic CTE keeps
+    // its own copy of these produces, as the query without synthetic CTE does, so the copies in the producer are
+    // extra.
+    private int userProducesInSyntheticProducer;
 
     private Map<Integer, Statistics> produceStatistics;
 
@@ -66,6 +76,8 @@ public class CTEContext {
 
     public void reset() {
         produces = Lists.newArrayList();
+        syntheticProduces = Sets.newHashSet();
+        userProducesInSyntheticProducer = 0;
         consumeNums = Maps.newHashMap();
         consumePredicates = Maps.newHashMap();
         consumeLimits = Maps.newHashMap();
@@ -83,8 +95,27 @@ public class CTEContext {
     }
 
     public void addCTEProduce(int cteId) {
+        addCTEProduce(cteId, false, false);
+    }
+
+    public void addCTEProduce(int cteId, boolean synthetic, boolean insideSyntheticProducer) {
         this.produces.add(cteId);
         cteIdSequence = Math.max(cteId, cteIdSequence);
+        if (synthetic) {
+            syntheticProduces.add(cteId);
+        } else if (insideSyntheticProducer) {
+            userProducesInSyntheticProducer++;
+        }
+    }
+
+    public boolean isSyntheticCTE(int cteId) {
+        return syntheticProduces.contains(cteId);
+    }
+
+    // We want cbo_cte_max_limit to give the same decisions with and without synthetic CTE, so we count only the
+    // user CTE that the query would have without them.
+    private int userProduceCount() {
+        return produces.size() - syntheticProduces.size() - userProducesInSyntheticProducer;
     }
 
     public void setMaxCTELimit(int maxCTELimit) {
@@ -179,11 +210,16 @@ public class CTEContext {
             return false;
         }
 
+        // A synthetic CTE has no user intent behind it, so only the cost decides
+        if (syntheticProduces.contains(cteId)) {
+            return false;
+        }
+
         // 4. limit cte num strategy
         // when actual CTE > maxCTELimit
         // actual CTE refs > every CTE refs: force CTE
         // actual CTE refs < every CTE refs: force inline
-        if (produces.size() > maxCTELimit) {
+        if (userProduceCount() > maxCTELimit) {
             return consumeNums.get(cteId) < MIN_EVERY_CTE_REFS;
         }
         return false;
@@ -222,11 +258,15 @@ public class CTEContext {
             return false;
         }
 
+        if (syntheticProduces.contains(cteId)) {
+            return false;
+        }
+
         // 3. limit cte num strategy
         // when actual CTE > maxCTELimit
         // actual CTE refs > CTE num * every CTE refs: force CTE
         // actual CTE refs < CTE num * every CTE refs: force inline
-        if (produces.size() > maxCTELimit) {
+        if (userProduceCount() > maxCTELimit) {
             return consumeNums.get(cteId) >= MIN_EVERY_CTE_REFS;
         }
 
