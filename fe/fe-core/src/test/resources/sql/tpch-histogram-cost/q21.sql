@@ -10,7 +10,7 @@ limit: 100
 cardinality: 100
 column statistics:
 * S_NAME-->[-Infinity, Infinity, 0.0, 25.0, 40000.0] ESTIMATE
-* count-->[0.0, 2334116.9317591335, 0.0, 8.0, 40000.0] ESTIMATE
+* count-->[0.0, 2917652.0, 0.0, 8.0, 40000.0] ESTIMATE
 
 PLAN FRAGMENT 1(F09)
 
@@ -25,7 +25,7 @@ OutPut Exchange Id: 27
 |  cardinality: 100
 |  column statistics:
 |  * S_NAME-->[-Infinity, Infinity, 0.0, 25.0, 40000.0] ESTIMATE
-|  * count-->[0.0, 2334116.9317591335, 0.0, 8.0, 40000.0] ESTIMATE
+|  * count-->[0.0, 2917652.0, 0.0, 8.0, 40000.0] ESTIMATE
 |
 25:AGGREGATE (merge finalize)
 |  aggregate: count[([77: count, BIGINT, false]); args: ; result: BIGINT; args nullable: false; result nullable: false]
@@ -33,7 +33,7 @@ OutPut Exchange Id: 27
 |  cardinality: 40000
 |  column statistics:
 |  * S_NAME-->[-Infinity, Infinity, 0.0, 25.0, 40000.0] ESTIMATE
-|  * count-->[0.0, 2334116.9317591335, 0.0, 8.0, 40000.0] ESTIMATE
+|  * count-->[0.0, 2917652.0, 0.0, 8.0, 40000.0] ESTIMATE
 |
 24:EXCHANGE
 distribution type: SHUFFLE
@@ -53,12 +53,12 @@ OutPut Exchange Id: 24
 |  cardinality: 40000
 |  column statistics:
 |  * S_NAME-->[-Infinity, Infinity, 0.0, 25.0, 40000.0] ESTIMATE
-|  * count-->[0.0, 2334116.9317591335, 0.0, 8.0, 40000.0] ESTIMATE
+|  * count-->[0.0, 2917652.0, 0.0, 8.0, 40000.0] ESTIMATE
 |
 22:Project
 |  output columns:
 |  2 <-> [2: S_NAME, VARCHAR, false]
-|  cardinality: 2334117
+|  cardinality: 2917652
 |  column statistics:
 |  * S_NAME-->[-Infinity, Infinity, 0.0, 25.0, 40000.0] ESTIMATE
 |
@@ -68,7 +68,7 @@ OutPut Exchange Id: 24
 |  build runtime filters:
 |  - filter_id = 4, build_expr = (9: L_ORDERKEY), remote = false
 |  output columns: 2
-|  cardinality: 2334117
+|  cardinality: 2917652
 |  column statistics:
 |  * S_SUPPKEY-->[1.0, 1000000.0, 0.0, 4.0, 40000.0] ESTIMATE
 |  * S_NAME-->[-Infinity, Infinity, 0.0, 25.0, 40000.0] ESTIMATE

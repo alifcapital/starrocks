@@ -51,6 +51,7 @@ import com.starrocks.sql.optimizer.operator.logical.LogicalJoinOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalKuduScanOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalOlapScanOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalUnionOperator;
+import com.starrocks.sql.optimizer.operator.logical.LogicalValuesOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalWindowOperator;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
@@ -1024,6 +1025,80 @@ public class StatisticsCalculatorTest {
         // THEN — inner-side null fraction should be positive (some outer rows unmatched)
         Assertions.assertTrue(valStat.getNullsFraction() > 0,
                 "Inner-side column should have non-zero null fraction due to unmatched outer rows");
+    }
+
+    private Statistics estimateAntiJoin(JoinOperator joinType, double keptRows, double keptKeyNdv,
+                                        double keptOtherNdv, double probedRows, double probedKeyNdv,
+                                        ColumnRefOperator keptKey, ColumnRefOperator keptOther) {
+        final var probedKey = columnRefFactory.create("probed_key", IntegerType.BIGINT, true);
+
+        final var keptBuilder = Statistics.builder();
+        keptBuilder.setOutputRowCount(keptRows);
+        keptBuilder.addColumnStatistics(ImmutableMap.of(
+                keptKey, new ColumnStatistic(1, 1e9, 0, 8, keptKeyNdv),
+                keptOther, new ColumnStatistic(1, 1e9, 0, 8, keptOtherNdv)));
+        // The join reads the operators below it to recognize an IN that became a join with its values.
+        final var keptGroup = new Group(0);
+        keptGroup.addExpression(new GroupExpression(new LogicalValuesOperator(List.of(keptKey, keptOther)),
+                List.of()));
+        keptGroup.setStatistics(keptBuilder.build());
+        keptGroup.setLogicalProperty(new LogicalProperty(new ColumnRefSet(Lists.newArrayList(keptKey, keptOther))));
+
+        final var probedBuilder = Statistics.builder();
+        probedBuilder.setOutputRowCount(probedRows);
+        probedBuilder.addColumnStatistics(ImmutableMap.of(
+                probedKey, new ColumnStatistic(1, 1e9, 0, 8, probedKeyNdv)));
+        final var probedGroup = new Group(1);
+        probedGroup.addExpression(new GroupExpression(new LogicalValuesOperator(List.of(probedKey)), List.of()));
+        probedGroup.setStatistics(probedBuilder.build());
+        probedGroup.setLogicalProperty(new LogicalProperty(new ColumnRefSet(Lists.newArrayList(probedKey))));
+
+        final var joinPred = new BinaryPredicateOperator(BinaryType.EQ, keptKey, probedKey);
+        final var groupExpr = joinType == JoinOperator.RIGHT_ANTI_JOIN
+                ? new GroupExpression(new LogicalJoinOperator(joinType, joinPred),
+                        Lists.newArrayList(probedGroup, keptGroup))
+                : new GroupExpression(new LogicalJoinOperator(joinType, joinPred),
+                        Lists.newArrayList(keptGroup, probedGroup));
+        groupExpr.setGroup(new Group(2));
+        final var ctx = new ExpressionContext(groupExpr);
+        new StatisticsCalculator(ctx, columnRefFactory, optimizerContext).estimatorStats();
+        return ctx.getStatistics();
+    }
+
+    /**
+     * A NOT IN against a few keys drops a few rows. The rows that remain keep the distinct values of the kept side,
+     * not the distinct values of the few matched rows.
+     */
+    @ParameterizedTest
+    @EnumSource(value = JoinOperator.class, names = {"LEFT_ANTI_JOIN", "NULL_AWARE_LEFT_ANTI_JOIN", "RIGHT_ANTI_JOIN"})
+    public void testAntiJoinKeepsDistinctValuesOfKeptSide(JoinOperator joinType) {
+        final var keptKey = columnRefFactory.create("kept_key", IntegerType.BIGINT, true);
+        final var keptOther = columnRefFactory.create("kept_other", IntegerType.BIGINT, true);
+
+        // 906M rows, 39.4M keys, 40.5M values of another column; 9 keys on the other side match about 207 rows.
+        final var statistics = estimateAntiJoin(joinType, 906e6, 39.4e6, 40.5e6, 9, 9, keptKey, keptOther);
+
+        Assertions.assertTrue(statistics.getOutputRowCount() > 905e6);
+        Assertions.assertEquals(40.5e6, statistics.getColumnStatistic(keptOther).getDistinctValuesCount(), 1);
+        Assertions.assertEquals(39.4e6, statistics.getColumnStatistic(keptKey).getDistinctValuesCount(), 1);
+    }
+
+    /**
+     * When the anti join drops most rows, the rows that remain cap the distinct values of the kept side.
+     */
+    @Test
+    public void testAntiJoinCapsDistinctValuesByRemainingRows() {
+        final var keptKey = columnRefFactory.create("kept_key", IntegerType.BIGINT, true);
+        final var keptOther = columnRefFactory.create("kept_other", IntegerType.BIGINT, true);
+
+        // 1M rows, 1000 keys; the other side holds 990 of the keys. The estimate keeps at least 40% of the rows,
+        // 400k, which is below the 500k distinct values of the other column.
+        final var statistics =
+                estimateAntiJoin(JoinOperator.LEFT_ANTI_JOIN, 1e6, 1000, 500e3, 990, 990, keptKey, keptOther);
+
+        double rows = statistics.getOutputRowCount();
+        Assertions.assertTrue(rows < 1e6 / 2, "rows " + rows);
+        Assertions.assertEquals(rows, statistics.getColumnStatistic(keptOther).getDistinctValuesCount(), 1);
     }
 
     /**

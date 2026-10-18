@@ -1638,8 +1638,7 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
                 break;
             case LEFT_ANTI_JOIN:
             case NULL_AWARE_LEFT_ANTI_JOIN:
-                joinStatsBuilder = Statistics.buildFrom(innerJoinStats);
-                joinStatsBuilder.setOutputRowCount(max(
+                joinStats = estimateAntiJoinStatistics(innerJoinStats, leftStatistics, max(
                         leftRowCount * StatisticsEstimateCoefficient.DEFAULT_ANTI_JOIN_SELECTIVITY_COEFFICIENT,
                         leftRowCount - innerRowCount));
                 break;
@@ -1653,8 +1652,7 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
                         rightStatistics, leftStatistics, eqOnPredicates, hasUnknownColumnStatistics, joinStatsBuilder);
                 break;
             case RIGHT_ANTI_JOIN:
-                joinStatsBuilder = Statistics.buildFrom(innerJoinStats);
-                joinStatsBuilder.setOutputRowCount(max(
+                joinStats = estimateAntiJoinStatistics(innerJoinStats, rightStatistics, max(
                         rightRowCount * StatisticsEstimateCoefficient.DEFAULT_ANTI_JOIN_SELECTIVITY_COEFFICIENT,
                         rightRowCount - innerRowCount));
                 break;
@@ -1707,6 +1705,20 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
 
         context.setStatistics(estimateStatistics);
         return visitOperator(context.getOp(), context);
+    }
+
+    /**
+     * An anti join keeps the rows of one side that have no match. The inner join statistics describe the matched
+     * rows: their row count caps the distinct values of every column. We want the distinct values of the rows that
+     * remain, so the columns of the kept side take the statistics of that side, and only the rows that remain cap
+     * them. Example: a NOT IN that drops 200 of 900M rows keeps a column with 40M distinct values at 40M, not at the
+     * 200 distinct values of the dropped rows.
+     */
+    private static Statistics estimateAntiJoinStatistics(Statistics innerJoinStats, Statistics keptSide,
+                                                         double rowCount) {
+        Statistics.Builder builder = Statistics.buildFrom(innerJoinStats).setOutputRowCount(rowCount);
+        keptSide.getColumnStatistics().forEach(builder::addColumnStatistic);
+        return StatisticsEstimateUtils.adjustStatisticsByRowCount(builder.build(), rowCount);
     }
 
     private void addColumnStatisticsFromOtherStatisticByRefs(Statistics.Builder builder, Statistics statistics,

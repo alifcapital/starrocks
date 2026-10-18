@@ -74,10 +74,11 @@ OutPut Exchange Id: 15
 |  output columns: 5, 6
 |  cardinality: 1500000
 |  column statistics:
-|  * C_CUSTKEY-->[1.0, 1.49999E7, 0.0, 8.0, 3750000.0] ESTIMATE
+|  * C_CUSTKEY-->[1.0, 1.5E7, 0.0, 8.0, 1500000.0] ESTIMATE
 |  * C_PHONE-->[-Infinity, Infinity, 0.0, 15.0, 150000.0] ESTIMATE
 |  * C_ACCTBAL-->[-999.99, 9999.99, 0.0, 8.0, 137439.0] MCV: [[3863.78:400][5610.32:400][-101.79:400][1237.93:400][5209.06:400]] ESTIMATE
-|  * O_CUSTKEY-->[1.0, 1.49999E7, 0.0, 8.0, 3750000.0] ESTIMATE
+|  * avg-->[0.0, 9999.99, 0.0, 8.0, 1.0] ESTIMATE
+|  * O_CUSTKEY-->[1.0, 1.49999E7, 0.0, 8.0, 1500000.0] ESTIMATE
 |  * substring-->[-Infinity, Infinity, 0.0, 15.0, 150000.0] ESTIMATE
 |
 |----11:EXCHANGE
