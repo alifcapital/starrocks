@@ -450,13 +450,12 @@ public class StatisticsEstimateUtils {
             return StatisticsEstimateUtils.adjustStatisticsByRowCount(equalityFilteredStats, filteredRowCount);
         }
 
-        // Apply remaining non-equality predicates sequentially
-        Statistics combinedFilteredStats = equalityFilteredStats;
-
-        for (ScalarOperator nonEqualityPredicate : nonEqualityPredicates) {
-            combinedFilteredStats = PredicateStatisticsCalculator.statisticsCalculate(
-                    nonEqualityPredicate, combinedFilteredStats, useMcv);
-        }
+        // We want the remaining predicates estimated as one conjunction, not one after another: the two sides of an
+        // interval on an expression, such as CAST(created_at AS DATETIME) >= a AND CAST(created_at AS DATETIME) < b,
+        // make an interval only when the estimate sees them together, and each side alone takes the share of the
+        // whole range.
+        Statistics combinedFilteredStats = PredicateStatisticsCalculator.statisticsCalculate(
+                Utils.compoundAnd(nonEqualityPredicates), equalityFilteredStats, useMcv);
 
         return StatisticsEstimateUtils.adjustStatisticsByRowCount(
                 combinedFilteredStats,

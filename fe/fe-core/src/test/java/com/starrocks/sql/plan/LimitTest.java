@@ -600,12 +600,13 @@ public class LimitTest extends PlanTestBase {
                 "on a.v3 = t1.v4 join t2 on v4 = v7 join t2 as b" +
                 " on a.v1 = b.v7 where b.v8 > t1.v5 limit 10";
         String plan = getFragmentPlan(sql);
-        assertContains(plan, "14:HASH JOIN\n" +
+        assertContains(plan, "15:HASH JOIN\n" +
                 "  |  join op: INNER JOIN (BROADCAST)\n" +
                 "  |  colocate: false, reason: \n" +
-                "  |  equal join conjunct: 1: v1 = 4: v4\n" +
-                "  |  other join predicates: 11: v8 > 5: v5\n" +
+                "  |  equal join conjunct: 7: v7 = 4: v4\n" +
                 "  |  limit: 10");
+        assertContains(plan, "  |  equal join conjunct: 4: v4 = 1: v1\n" +
+                "  |  other join predicates: 11: v8 > 5: v5");
         // check join on predicate which has expression with limit operator
         sql = "select t2.v8 from (select v1, v2, v1 as v3 from t0 where v2<> v3 limit 15) as a join t1 " +
                 "on a.v3 + 1 = t1.v4 join t2 on v4 = v7 join t2 as b" +
@@ -614,9 +615,10 @@ public class LimitTest extends PlanTestBase {
         assertContains(plan, "15:HASH JOIN\n" +
                 "  |  join op: INNER JOIN (BROADCAST)\n" +
                 "  |  colocate: false, reason: \n" +
-                "  |  equal join conjunct: 14: add = 4: v4\n" +
-                "  |  other join predicates: 11: v8 > 5: v5\n" +
+                "  |  equal join conjunct: 7: v7 = 4: v4\n" +
                 "  |  limit: 10");
+        assertContains(plan, "  |  equal join conjunct: 4: v4 = 14: add\n" +
+                "  |  other join predicates: 11: v8 > 5: v5");
     }
 
     @Test

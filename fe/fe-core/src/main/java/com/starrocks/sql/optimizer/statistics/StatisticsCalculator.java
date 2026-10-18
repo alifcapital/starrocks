@@ -2683,8 +2683,11 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
     private Void computeFilterNode(Operator node, ExpressionContext context) {
         Statistics inputStatistics = context.getChildStatistics(0);
 
+        // We want the condition over a filter estimated as over its input: the columns keep their MCV groups, since
+        // the filter passes them on, as a consumer of a CTE does.
         Statistics.Builder builder = Statistics.builder();
         builder.addColumnStatistics(inputStatistics.getColumnStatistics());
+        builder.addMultiColumnStatistics(inputStatistics.getMultiColumnCombinedStats());
         builder.setOutputRowCount(inputStatistics.getOutputRowCount());
 
         context.setStatistics(builder.build());
@@ -2712,6 +2715,8 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
         Statistics.Builder builder = Statistics.builder();
         Statistics inputStatistics = context.getChildStatistics(0);
         builder.addColumnStatistics(inputStatistics.getColumnStatistics());
+        // The columns of the input stay, so do their MCV groups.
+        builder.addMultiColumnStatistics(inputStatistics.getMultiColumnCombinedStats());
 
         analyticCall.forEach((key, value) -> builder.addColumnStatistic(
                 key, estimateWindowCall(value, inputStatistics, partitionExpressions)));
@@ -2791,13 +2796,20 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
         return result;
     }
 
+    // A limit keeps no more rows than its input has: a filter over LIMIT 1000000000 of a table of 394M rows works on 394M.
+    private static double limitedRowCount(long limit, double inputRowCount) {
+        return limit < 0 || Double.isNaN(inputRowCount) ? limit : Math.min(limit, inputRowCount);
+    }
+
     @Override
     public Void visitLogicalLimit(LogicalLimitOperator node, ExpressionContext context) {
         Statistics inputStatistics = context.getChildStatistics(0);
 
+        // The columns of the input stay, so do their MCV groups.
         Statistics.Builder builder = Statistics.builder();
         builder.addColumnStatistics(inputStatistics.getColumnStatistics());
-        builder.setOutputRowCount(node.getLimit());
+        builder.addMultiColumnStatistics(inputStatistics.getMultiColumnCombinedStats());
+        builder.setOutputRowCount(limitedRowCount(node.getLimit(), inputStatistics.getOutputRowCount()));
 
         context.setStatistics(builder.build());
         return visitOperator(node, context);
@@ -2807,9 +2819,11 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
     public Void visitPhysicalLimit(PhysicalLimitOperator node, ExpressionContext context) {
         Statistics inputStatistics = context.getChildStatistics(0);
 
+        // The columns of the input stay, so do their MCV groups.
         Statistics.Builder builder = Statistics.builder();
         builder.addColumnStatistics(inputStatistics.getColumnStatistics());
-        builder.setOutputRowCount(node.getLimit());
+        builder.addMultiColumnStatistics(inputStatistics.getMultiColumnCombinedStats());
+        builder.setOutputRowCount(limitedRowCount(node.getLimit(), inputStatistics.getOutputRowCount()));
 
         context.setStatistics(builder.build());
         return visitOperator(node, context);
