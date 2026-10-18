@@ -2927,6 +2927,20 @@ public class Config extends ConfigBase {
     @ConfField(comment = "Load join statistics into the FE cache after FE start. Read once at FE start")
     public static boolean statistic_preload_on_start_join = true;
 
+    @ConfField(comment = "Seconds the statistics cache preload waits before it retries the entries it could not "
+            + "load, for example because no compute node was alive yet. The wait doubles after every retry round "
+            + "up to statistic_preload_on_start_retry_backoff_max_sec. Read once at FE start")
+    public static long statistic_preload_on_start_retry_backoff_start_sec = 5;
+
+    @ConfField(comment = "Upper limit in seconds of the wait between two retry rounds of the statistics cache "
+            + "preload. Read once at FE start")
+    public static long statistic_preload_on_start_retry_backoff_max_sec = 300;
+
+    @ConfField(comment = "Seconds after the first pass of the statistics cache preload during which entries that "
+            + "failed to load are retried. After that the preload gives up and logs what stayed unloaded. "
+            + "0 disables the retries. Read once at FE start")
+    public static long statistic_preload_on_start_retry_window_sec = 1800;
+
     @ConfField(mutable = true)
     public static int statistic_join_optimizer_budget_ms = 60;
 

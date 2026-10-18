@@ -21,7 +21,10 @@ import com.starrocks.catalog.Partition;
 import com.starrocks.catalog.Table;
 import com.starrocks.common.Config;
 import com.starrocks.qe.ConnectContext;
+import com.starrocks.qe.scheduler.DefaultWorkerProvider;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.server.RunMode;
+import com.starrocks.server.WarehouseManager;
 import com.starrocks.statistic.AnalyzeMgr;
 import com.starrocks.statistic.BasicStatsMeta;
 import com.starrocks.statistic.ExternalBasicStatsMeta;
@@ -33,13 +36,16 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.time.LocalDateTime;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -50,7 +56,10 @@ import java.util.function.BooleanSupplier;
  * with unknown statistics while the lazy loads run. Every cache is filled through its own loader and
  * stops at its first eviction: a full cache would only lose entries for the ones loaded after that.
  * Batches are small and awaited one by one, so the shared loader executors stay free for queries.
- * A failure is logged and never reaches FE start or queries.
+ * We expect the compute nodes to restart together with the FE, and the statistics queries fail while none is
+ * alive. So the preload starts only when a worker that can run them is alive. A batch that fails is retried:
+ * after one pass over all caches we run rounds over the failed batches with a growing pause, until a time
+ * window ends, and then log what stays unloaded. A failure is logged and never reaches FE start or queries.
  */
 public final class StatisticsCachePreloader implements Runnable {
     private static final Logger LOG = LogManager.getLogger(StatisticsCachePreloader.class);
@@ -64,6 +73,7 @@ public final class StatisticsCachePreloader implements Runnable {
 
     static final String STOP_EVICTION = "eviction";
     static final String STOP_BACKOFF = "load backoff";
+    static final String STOP_NOT_READY = "statistics not ready";
     static final String STOP_INTERRUPTED = "interrupted";
 
     private static final long BATCH_TIMEOUT_SECONDS = 300;
@@ -73,6 +83,10 @@ public final class StatisticsCachePreloader implements Runnable {
 
     /** What the preloader needs to know about the catalog and the statistics tables. */
     interface Source {
+        /**
+         * True when the catalog and the statistics tables are usable and a compute node or backend that can run
+         * the statistics queries is alive.
+         */
         boolean ready();
 
         List<String> externalTableUuids();
@@ -93,7 +107,21 @@ public final class StatisticsCachePreloader implements Runnable {
     record InternalTable(long tableId, List<String> columns, List<Long> partitionIds) {
     }
 
-    record Result(long loaded, int failedBatches, String stopReason) {
+    /**
+     * What one pass over a list of batches did. The unloaded batches are the failed ones and, when the pass
+     * stopped for a reason that goes away by itself, the ones it did not reach.
+     */
+    record Result<K>(long loaded, int failedBatches, String stopReason, List<List<K>> unloaded) {
+    }
+
+    /** All waits of the preloader. The retry waits start at retryStartMillis and double up to retryMaxMillis. */
+    record Timing(long readyTimeoutMillis, long readyPollMillis, long retryStartMillis, long retryMaxMillis,
+                  long retryWindowMillis) {
+        Timing {
+            // A start of zero stays zero when doubled and would make the retries spin.
+            retryStartMillis = Math.max(1, retryStartMillis);
+            retryMaxMillis = Math.max(retryStartMillis, retryMaxMillis);
+        }
     }
 
     @FunctionalInterface
@@ -110,15 +138,14 @@ public final class StatisticsCachePreloader implements Runnable {
 
     private final CachedStatisticStorage storage;
     private final Source source;
-    private final long readyTimeoutMillis;
-    private final long readyPollMillis;
+    private final Timing timing;
+    // The caches that still have entries to retry after their first pass.
+    private final List<CacheLoad<?>> unfinished = new ArrayList<>();
 
-    StatisticsCachePreloader(CachedStatisticStorage storage, Source source, long readyTimeoutMillis,
-                             long readyPollMillis) {
+    StatisticsCachePreloader(CachedStatisticStorage storage, Source source, Timing timing) {
         this.storage = storage;
         this.source = source;
-        this.readyTimeoutMillis = readyTimeoutMillis;
-        this.readyPollMillis = readyPollMillis;
+        this.timing = timing;
     }
 
     /** Starts the worker once per process. A storage other than the cached one has nothing to fill. */
@@ -134,8 +161,12 @@ public final class StatisticsCachePreloader implements Runnable {
             return;
         }
         try {
-            Thread worker = new Thread(new StatisticsCachePreloader(cached, new CatalogSource(),
-                    READY_TIMEOUT_MILLIS, READY_POLL_MILLIS), "statistics-cache-preloader");
+            Timing timing = new Timing(READY_TIMEOUT_MILLIS, READY_POLL_MILLIS,
+                    TimeUnit.SECONDS.toMillis(Config.statistic_preload_on_start_retry_backoff_start_sec),
+                    TimeUnit.SECONDS.toMillis(Config.statistic_preload_on_start_retry_backoff_max_sec),
+                    TimeUnit.SECONDS.toMillis(Config.statistic_preload_on_start_retry_window_sec));
+            Thread worker = new Thread(new StatisticsCachePreloader(cached, new CatalogSource(), timing),
+                    "statistics-cache-preloader");
             worker.setDaemon(true);
             worker.start();
         } catch (Throwable e) {
@@ -146,7 +177,8 @@ public final class StatisticsCachePreloader implements Runnable {
     @Override
     public void run() {
         try {
-            if (!awaitReady()) {
+            if (!awaitReady(timing.readyTimeoutMillis())) {
+                LOG.warn("Gave up waiting for the statistics tables, the statistics caches are not preloaded");
                 return;
             }
             if (Config.statistic_preload_on_start_basic) {
@@ -161,6 +193,7 @@ public final class StatisticsCachePreloader implements Runnable {
             if (Config.statistic_preload_on_start_join) {
                 runSection("join statistics", this::preloadJoin);
             }
+            retryUnfinished();
         } catch (Throwable e) {
             LOG.warn("The statistics cache preloader stopped on an error", e);
         }
@@ -181,92 +214,213 @@ public final class StatisticsCachePreloader implements Runnable {
         }
     }
 
-    boolean awaitReady() {
-        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(readyTimeoutMillis);
+    /** Waits until the source is ready, for at most timeoutMillis. It checks once even when the timeout is 0. */
+    boolean awaitReady(long timeoutMillis) {
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
         while (true) {
-            try {
-                if (source.ready()) {
-                    return true;
-                }
-            } catch (Exception e) {
-                LOG.debug("Statistics are not ready for the cache preload", e);
+            if (sourceReady()) {
+                return true;
             }
-            if (System.nanoTime() >= deadline) {
-                LOG.warn("Gave up waiting for the statistics tables, the statistics caches are not preloaded");
-                return false;
-            }
-            try {
-                Thread.sleep(readyPollMillis);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+            if (System.nanoTime() >= deadline || !pause(timing.readyPollMillis())) {
                 return false;
             }
         }
     }
 
-    private void preloadExternal() throws Exception {
+    private boolean sourceReady() {
+        try {
+            return source.ready();
+        } catch (Exception e) {
+            LOG.debug("Statistics are not ready for the cache preload", e);
+            return false;
+        }
+    }
+
+    /** Sleeps, and returns false when the thread is interrupted. */
+    private static boolean pause(long millis) {
+        try {
+            Thread.sleep(millis);
+            return true;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+
+    private void preloadExternal() {
         // Table rows and partition rows share one cache, so one check covers both.
         StopCheck stop = weightedCacheStop(storage.externalStatisticsCache);
 
-        long start = System.nanoTime();
         List<String> uuids = source.externalTableUuids();
         List<ExternalStatisticsCacheKey> tableKeys = new ArrayList<>();
         uuids.forEach(uuid -> tableKeys.add(ExternalStatisticsCacheKey.tableRow(uuid)));
         // One table that cannot be loaded (dropped, or its UUID changed) must not cost its batch mates.
-        Result tables = loadBatches(chunk(tableKeys, EXTERNAL_TABLE_BATCH_SIZE),
+        load("external table rows", () -> chunk(tableKeys, EXTERNAL_TABLE_BATCH_SIZE),
                 batch -> await(storage.externalStatisticsCache.getAll(batch)), stop, true);
-        logResult("external table rows", tables, start);
 
-        start = System.nanoTime();
-        Map<String, List<String>> partitions = source.externalPartitions(uuids);
+        // Listing the partitions is a statistics query too, so a failure of it is retried like a failed batch.
+        load("external partition rows", () -> partitionBatches(uuids),
+                batch -> await(storage.loadExternalPartitionBatch(batch)), stop, false);
+    }
+
+    private List<List<ExternalStatisticsCacheKey>> partitionBatches(List<String> uuids) throws Exception {
         List<List<ExternalStatisticsCacheKey>> batches = new ArrayList<>();
-        partitions.forEach((uuid, names) -> {
+        source.externalPartitions(uuids).forEach((uuid, names) -> {
             List<ExternalStatisticsCacheKey> keys = new ArrayList<>();
             names.forEach(name -> keys.add(ExternalStatisticsCacheKey.partitionRow(uuid, name)));
             batches.addAll(chunk(keys, EXTERNAL_PARTITION_BATCH_SIZE));
         });
-        Result rows = loadBatches(batches, batch -> await(storage.loadExternalPartitionBatch(batch)), stop, false);
-        logResult("external partition rows", rows, start);
+        return batches;
     }
 
     private void preloadMcv() {
         StopCheck full = weightedCacheStop(storage.externalMcvStats);
-        // A failed MCV load starts a retry pause. Loading on would only repeat the failure.
+        // A failed MCV load starts a retry pause. We stop the pass, because loading on would only repeat the
+        // failure, and the next round runs after the pause.
         StopCheck stop = size -> storage.externalMcvBackoffActive() ? STOP_BACKOFF : full.reason(size);
 
-        long start = System.nanoTime();
-        List<List<String>> batches = chunk(source.mcvTableUuids(), 1);
-        Result result = loadBatches(batches,
+        load("external MCV statistics", () -> chunk(source.mcvTableUuids(), 1),
                 batch -> storage.externalMcvStats.get(batch.get(0)).get(BATCH_TIMEOUT_SECONDS, TimeUnit.SECONDS)
                         .isPresent() ? 1 : 0, stop, false);
-        logResult("external MCV statistics", result, start);
     }
 
     private void preloadInternal() {
         List<InternalTable> tables = source.internalTables();
 
-        long start = System.nanoTime();
-        Result columns = loadBatches(columnBatches(tables),
+        load("internal column statistics", () -> columnBatches(tables),
                 batch -> await(storage.columnStatistics.getAll(batch)), sizeCacheStop(storage.columnStatistics), false);
-        logResult("internal column statistics", columns, start);
-
-        start = System.nanoTime();
-        Result rowCounts = loadBatches(rowCountBatches(tables),
+        load("internal row counts", () -> rowCountBatches(tables),
                 batch -> await(storage.tableStatsCache.getAll(batch)), sizeCacheStop(storage.tableStatsCache), false);
-        logResult("internal row counts", rowCounts, start);
     }
 
     private void preloadJoin() {
-        long start = System.nanoTime();
         List<BooleanSupplier> loads = source.joinLoads();
         if (loads.isEmpty()) {
-            logResult("join statistics", new Result(0, 0, null), start);
+            LOG.info("Statistics preload of join statistics: nothing to load");
             return;
         }
         long evictionsAtStart = source.joinEvictions();
-        Result result = loadBatches(chunk(loads, 1), batch -> batch.get(0).getAsBoolean() ? 1 : 0,
-                size -> source.joinEvictions() > evictionsAtStart ? STOP_EVICTION : null, false);
-        logResult("join statistics", result, start);
+        // A load that returns false left nothing in the cache: its read failed, timed out, or is paused after an
+        // earlier failure. We count it as failed so that it is retried.
+        load("join statistics", () -> chunk(loads, 1), batch -> {
+            if (!batch.get(0).getAsBoolean()) {
+                throw new IllegalStateException("The join statistics are not in the cache");
+            }
+            return 1;
+        }, size -> source.joinEvictions() > evictionsAtStart ? STOP_EVICTION : null, false);
+    }
+
+    /** Runs the first pass over one cache and keeps it for the retry rounds when something is left. */
+    private <K> void load(String name, Callable<List<List<K>>> plan, BatchLoader<K> loader, StopCheck stop,
+                          boolean splitOnFailure) {
+        CacheLoad<K> load = new CacheLoad<>(name, plan, loader, stop, splitOnFailure);
+        if (!load.runRound()) {
+            unfinished.add(load);
+        }
+    }
+
+    /**
+     * We fear that the first pass met an outage, for example no alive compute node, and that other failures have
+     * a cause that does not go away. So we run rounds over what is left with a pause that doubles up to a cap,
+     * and wait for the source to be ready before each round, because a node may be down again. The window bounds
+     * the rounds, so a key that never loads costs only the rounds until the window ends.
+     */
+    private void retryUnfinished() {
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timing.retryWindowMillis());
+        long pauseMillis = timing.retryStartMillis();
+        String why = null;
+        while (!unfinished.isEmpty()) {
+            long left = millisUntil(deadline);
+            if (Thread.currentThread().isInterrupted()) {
+                why = STOP_INTERRUPTED;
+                break;
+            }
+            if (left <= 0) {
+                why = "the retry window of " + TimeUnit.MILLISECONDS.toSeconds(timing.retryWindowMillis())
+                        + " s ended";
+                break;
+            }
+            // The last pause is cut at the window end, so the last round runs there.
+            if (!pause(Math.min(pauseMillis, left))) {
+                continue;
+            }
+            pauseMillis = Math.min(pauseMillis * 2, timing.retryMaxMillis());
+            if (!awaitReady(Math.min(timing.readyTimeoutMillis(), Math.max(0, millisUntil(deadline))))) {
+                continue;
+            }
+            unfinished.removeIf(CacheLoad::runRound);
+        }
+        for (CacheLoad<?> load : unfinished) {
+            load.giveUp(why);
+        }
+    }
+
+    private static long millisUntil(long deadlineNanos) {
+        return TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime());
+    }
+
+    /**
+     * One cache that is filled in rounds. Round 0 loads everything, and each later round loads what the rounds
+     * before did not load. The plan lists the batches on the first round, and runs again on the next one when
+     * it fails.
+     */
+    private final class CacheLoad<K> {
+        private final String name;
+        private final Callable<List<List<K>>> plan;
+        private final BatchLoader<K> loader;
+        private final StopCheck stop;
+        private final boolean splitOnFailure;
+        private List<List<K>> pending;
+        private int round;
+
+        private CacheLoad(String name, Callable<List<List<K>>> plan, BatchLoader<K> loader, StopCheck stop,
+                          boolean splitOnFailure) {
+            this.name = name;
+            this.plan = plan;
+            this.loader = loader;
+            this.stop = stop;
+            this.splitOnFailure = splitOnFailure;
+        }
+
+        /** Runs one round and returns true when nothing is left to retry. */
+        private boolean runRound() {
+            long start = System.nanoTime();
+            int current = round++;
+            if (pending == null) {
+                try {
+                    pending = plan.call();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return false;
+                } catch (Exception e) {
+                    LOG.warn("Failed to list the batches of {} in round {}", name, current, e);
+                    return false;
+                }
+            }
+            int retried = current == 0 ? 0 : pending.size();
+            Result<K> result = loadBatches(pending, loader, stop, splitOnFailure,
+                    StatisticsCachePreloader.this::sourceReady);
+            // A full cache is not an error. We load nothing more into it, so nothing is left to retry.
+            pending = STOP_EVICTION.equals(result.stopReason()) ? List.of() : result.unloaded();
+            LOG.info("Statistics preload of {}, round {}: retried {} batches, loaded {} entries in {} ms, "
+                            + "{} failed batches, {} batches left to retry, stopped on {}",
+                    name, current, retried, result.loaded(),
+                    TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start), result.failedBatches(),
+                    pending.size(), result.stopReason() == null ? "nothing left to load" : result.stopReason());
+            return pending.isEmpty();
+        }
+
+        private void giveUp(String why) {
+            if (pending == null) {
+                LOG.warn("Statistics preload of {} gave up after {} rounds because {}: the batches were never listed",
+                        name, round, why);
+                return;
+            }
+            long keys = pending.stream().mapToLong(List::size).sum();
+            LOG.warn("Statistics preload of {} gave up after {} rounds because {}: {} batches with {} entries stay "
+                            + "unloaded, the first one starts at {}",
+                    name, round, why, pending.size(), keys, pending.get(0).get(0));
+        }
     }
 
     /** Every batch holds the keys of one table, because the loaders of these caches expect that. */
@@ -300,22 +454,29 @@ public final class StatisticsCachePreloader implements Runnable {
 
     /**
      * Loads the batches one after another and stops when the check says so. A failed batch is logged and
-     * skipped. With splitOnFailure the keys of a failed batch are retried one by one.
+     * returned in unloaded, so the caller can retry it. With splitOnFailure the keys of a failed batch are
+     * loaded one by one, so one bad key does not cost the others.
+     * We fear that a failure comes from an outage, and then every other batch would fail and fill the log. So
+     * after a failure we ask whether the source is still ready, and if not, we stop and leave the rest unloaded.
      */
-    static <K> Result loadBatches(List<List<K>> batches, BatchLoader<K> loader, StopCheck stop,
-                                  boolean splitOnFailure) {
+    static <K> Result<K> loadBatches(List<List<K>> batches, BatchLoader<K> loader, StopCheck stop,
+                                     boolean splitOnFailure, BooleanSupplier ready) {
         long loaded = 0;
         int failed = 0;
         String reason = null;
-        for (List<K> batch : batches) {
+        List<List<K>> unloaded = new ArrayList<>();
+        Deque<List<K>> queue = new ArrayDeque<>(batches);
+        while (!queue.isEmpty()) {
             if (Thread.currentThread().isInterrupted()) {
                 reason = STOP_INTERRUPTED;
                 break;
             }
+            List<K> batch = queue.peekFirst();
             reason = stop.reason(batch.size());
             if (reason != null) {
                 break;
             }
+            queue.removeFirst();
             try {
                 loaded += loader.load(batch);
             } catch (InterruptedException e) {
@@ -326,22 +487,17 @@ public final class StatisticsCachePreloader implements Runnable {
                 failed++;
                 LOG.warn("Failed to preload a batch of {} statistics entries starting at {}",
                         batch.size(), batch.get(0), e);
+                if (!ready.getAsBoolean()) {
+                    unloaded.add(batch);
+                    reason = STOP_NOT_READY;
+                    break;
+                }
                 if (splitOnFailure && batch.size() > 1) {
-                    for (K key : batch) {
-                        try {
-                            loaded += loader.load(List.of(key));
-                        } catch (InterruptedException interrupted) {
-                            Thread.currentThread().interrupt();
-                            reason = STOP_INTERRUPTED;
-                            break;
-                        } catch (Exception single) {
-                            failed++;
-                            LOG.warn("Failed to preload the statistics entry {}", key, single);
-                        }
+                    for (int i = batch.size() - 1; i >= 0; i--) {
+                        queue.addFirst(List.of(batch.get(i)));
                     }
-                    if (reason != null) {
-                        break;
-                    }
+                } else {
+                    unloaded.add(batch);
                 }
             }
         }
@@ -349,7 +505,15 @@ public final class StatisticsCachePreloader implements Runnable {
             // The last batch may have been the one that filled the cache.
             reason = stop.reason(0);
         }
-        return new Result(loaded, failed, reason);
+        if (endsByItself(reason)) {
+            unloaded.addAll(queue);
+        }
+        return new Result<>(loaded, failed, reason, unloaded);
+    }
+
+    /** A load backoff and an outage end by themselves, so the batches they kept us from loading are worth a retry. */
+    private static boolean endsByItself(String reason) {
+        return STOP_BACKOFF.equals(reason) || STOP_NOT_READY.equals(reason);
     }
 
     /**
@@ -393,16 +557,28 @@ public final class StatisticsCachePreloader implements Runnable {
         return future.get(BATCH_TIMEOUT_SECONDS, TimeUnit.SECONDS).size();
     }
 
-    private static void logResult(String cache, Result result, long startNanos) {
-        LOG.info("Statistics preload of {}: loaded {} entries in {} ms, {} failed batches, stopped on {}",
-                cache, result.loaded(), TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos),
-                result.failedBatches(), result.stopReason() == null ? "nothing left to load" : result.stopReason());
-    }
-
     private static final class CatalogSource implements Source {
         @Override
         public boolean ready() {
-            return GlobalStateMgr.getCurrentState().isReady() && StatisticUtils.checkStatisticTableStateNormal();
+            return GlobalStateMgr.getCurrentState().isReady() && statisticsWorkerAvailable()
+                    && StatisticUtils.checkStatisticTableStateNormal();
+        }
+
+        /**
+         * The statistics queries fail while planning when no worker can run them. We expect them to run in the
+         * background warehouse in shared-data mode (StatisticUtils.buildConnectContext picks it) and on any
+         * backend or compute node otherwise. The scheduler takes only a worker that is alive and not blocklisted,
+         * so we wait for such a worker.
+         */
+        private static boolean statisticsWorkerAvailable() {
+            GlobalStateMgr state = GlobalStateMgr.getCurrentState();
+            if (RunMode.isSharedDataMode()) {
+                WarehouseManager warehouses = state.getWarehouseMgr();
+                return warehouses.getAliveWarehouseComputeNodes(warehouses.getBackgroundComputeResource()).stream()
+                        .anyMatch(DefaultWorkerProvider::isWorkerAvailable);
+            }
+            return state.getNodeMgr().getClusterInfo().backendAndComputeNodeStream()
+                    .anyMatch(DefaultWorkerProvider::isWorkerAvailable);
         }
 
         @Override
