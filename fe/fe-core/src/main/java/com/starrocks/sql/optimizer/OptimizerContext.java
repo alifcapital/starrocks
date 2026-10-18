@@ -17,7 +17,10 @@ package com.starrocks.sql.optimizer;
 import com.google.common.base.Stopwatch;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import com.starrocks.catalog.IcebergTable;
 import com.starrocks.catalog.OlapTable;
+import com.starrocks.catalog.Table;
+import com.starrocks.common.util.StringDateFormat;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.ConnectProcessor;
 import com.starrocks.qe.SessionVariable;
@@ -27,6 +30,7 @@ import com.starrocks.sql.common.StarRocksPlannerException;
 import com.starrocks.sql.optimizer.base.ColumnRefFactory;
 import com.starrocks.sql.optimizer.dump.DumpInfo;
 import com.starrocks.sql.optimizer.operator.scalar.IsNullPredicateOperator;
+import com.starrocks.sql.optimizer.rewrite.StringDateFormatProperty;
 import com.starrocks.sql.optimizer.rule.RuleSet;
 import com.starrocks.sql.optimizer.rule.RuleType;
 import com.starrocks.sql.optimizer.rule.tvr.common.TvrOptContext;
@@ -42,6 +46,7 @@ import com.starrocks.sql.optimizer.transformer.MVTransformerContext;
 import org.apache.spark.util.SizeEstimator;
 import oshi.util.FormatUtil;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -149,6 +154,21 @@ public class OptimizerContext {
     private final java.util.concurrent.atomic.AtomicInteger expressionStatisticsColumnIds =
             new java.util.concurrent.atomic.AtomicInteger();
     private final ExpressionStatisticsCache expressionStatisticsCache = new ExpressionStatisticsCache();
+    // The estimates of predicates ask for the format of a column many times, and reading it walks the properties of
+    // the table, which do not change during the query. The key names the table without its metadata: reading the
+    // metadata of a table can fail, and the estimate must not.
+    private final Map<List<String>, Optional<StringDateFormat>> stringDateFormats = new ConcurrentHashMap<>();
+
+    /** The format a table declares for the dates of a column, see StringDateFormatProperty, read once per query. */
+    public StringDateFormat getStringDateFormat(Table table, String column) {
+        if (!(table instanceof IcebergTable)) {
+            return null;
+        }
+        List<String> key = Arrays.asList(table.getCatalogName(), table.getCatalogDBName(),
+                table.getCatalogTableName(), column);
+        return stringDateFormats.computeIfAbsent(key,
+                ignored -> Optional.ofNullable(StringDateFormatProperty.of(table, column))).orElse(null);
+    }
 
     public Statistics getExternalStatisticsFallback(ExternalStatisticsScanKey key) {
         // Hashing the key walks the whole predicate. A query whose scans use ANALYZE statistics never stores a

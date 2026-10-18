@@ -153,6 +153,11 @@ public final class StringDateFormat {
         return FIELDS[texts.length - 1].unit;
     }
 
+    /** Whether the strings hold a day: the BE casts a string without one to NULL. */
+    public boolean hasDay() {
+        return texts.length > Field.DAY.ordinal();
+    }
+
     public boolean hasUtcSuffix() {
         return texts[texts.length - 1].endsWith("Z");
     }
@@ -231,10 +236,9 @@ public final class StringDateFormat {
      * @param backend the DATETIME the BE casts a string to, or null when the BE gives NULL
      */
     public boolean isReadAsWrittenBy(Function<String, LocalDateTime> backend) {
-        boolean hasDay = texts.length > Field.DAY.ordinal();
         for (LocalDateTime probe : PROBES) {
             LocalDateTime read = backend.apply(format(probe));
-            if (hasDay ? !truncate(probe, getPrecision()).equals(read) : read != null) {
+            if (hasDay() ? !truncate(probe, getPrecision()).equals(read) : read != null) {
                 return false;
             }
         }

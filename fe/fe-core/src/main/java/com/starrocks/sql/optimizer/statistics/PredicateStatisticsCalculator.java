@@ -20,6 +20,7 @@ import com.google.common.cache.CacheBuilder;
 import com.google.common.collect.Sets;
 import com.starrocks.catalog.FunctionSet;
 import com.starrocks.common.Pair;
+import com.starrocks.common.util.StringDateFormat;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.optimizer.ConstantOperatorUtils;
@@ -40,10 +41,13 @@ import com.starrocks.sql.optimizer.rewrite.MonotonicFilterDerivation;
 import com.starrocks.sql.optimizer.rewrite.ScalarRangePredicateExtractor;
 import com.starrocks.sql.spm.SPMFunctions;
 import com.starrocks.type.BooleanType;
+import com.starrocks.type.DateType;
 import org.apache.commons.math3.util.Precision;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.time.LocalDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -56,6 +60,8 @@ import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 
@@ -64,6 +70,165 @@ import static com.starrocks.sql.optimizer.statistics.StatisticsEstimateUtils.com
 
 public class PredicateStatisticsCalculator {
     private static final Logger LOG = LogManager.getLogger(PredicateStatisticsCalculator.class);
+
+    // We want one comparison of a VARCHAR column whose table declares the format of its dates estimated the same way
+    // on every path of the estimate, as one of CAST(column AS DATETIME), see asDatetimeComparison. The format of a
+    // column comes from the table the column factory of the query maps it to, which the estimate does not see, so the
+    // statistics calculator of an operator sets it here for the time it derives the statistics.
+    private static final ThreadLocal<Function<ColumnRefOperator, StringDateFormat>> STRING_DATE_FORMATS =
+            new ThreadLocal<>();
+
+    /**
+     * Runs an action whose estimates of predicates read the format of the dates of a VARCHAR column, or null for a
+     * column without one, from the given function.
+     */
+    public static <T> T withStringDateFormats(Function<ColumnRefOperator, StringDateFormat> formats,
+                                              Supplier<T> action) {
+        Function<ColumnRefOperator, StringDateFormat> outer = STRING_DATE_FORMATS.get();
+        STRING_DATE_FORMATS.set(formats);
+        try {
+            return action.get();
+        } finally {
+            if (outer == null) {
+                STRING_DATE_FORMATS.remove();
+            } else {
+                STRING_DATE_FORMATS.set(outer);
+            }
+        }
+    }
+
+    private static StringDateFormat stringDateFormat(ColumnRefOperator column) {
+        Function<ColumnRefOperator, StringDateFormat> formats = STRING_DATE_FORMATS.get();
+        return formats == null ? null : formats.apply(column);
+    }
+
+    /**
+     * A comparison of a VARCHAR column with a constant, when the table of the column declares the format of its dates,
+     * see StringDateFormatProperty, as a comparison of CAST(column AS DATETIME) that keeps the same rows, which the
+     * statistics of the cast estimate. Strings of the format sort as the times they hold, so the strings above a
+     * constant are those of the times from the first time whose string is above it: '2026-08-15 12:00:00' is below
+     * every time of 2026-08-15 written with a 'T'. A ray that holds no time is a comparison below the first DATETIME,
+     * and one that holds every time is a comparison from it. An equality keeps rows only for a constant of the format,
+     * which is the string of one time and compares as that time.
+     * A format without a day casts to NULL. Null for these and other comparisons, and when the conversion fails.
+     */
+    static BinaryPredicateOperator asDatetimeComparison(BinaryPredicateOperator predicate) {
+        // We fear a constant or a format that the conversion does not expect. A lost estimate falls back to the
+        // estimate of the strings, while an exception would fail the planning of the query, so we return null.
+        try {
+            return datetimeComparison(predicate);
+        } catch (RuntimeException e) {
+            LOG.debug("Failed to estimate a comparison of a column with a format of dates as one of its cast", e);
+            return null;
+        }
+    }
+
+    private static BinaryPredicateOperator datetimeComparison(BinaryPredicateOperator predicate) {
+        BinaryType type = predicate.getBinaryType();
+        if ((type != BinaryType.EQ && !type.isRange()) || !(predicate.getChild(0) instanceof ColumnRefOperator column)
+                || !column.getType().isStringType()
+                || !(predicate.getChild(1) instanceof ConstantOperator constant) || constant.isNull()
+                || !constant.getType().isStringType()) {
+            return null;
+        }
+        StringDateFormat format = stringDateFormat(column);
+        if (format == null || !format.hasDay()) {
+            return null;
+        }
+        CastOperator cast = new CastOperator(DateType.DATETIME, column);
+        String text = constant.getVarchar();
+        // A constant of the format is the string of one time: the comparison of the cast with that time keeps the
+        // same rows, and keeps them also where the statistics hold whole seconds and the next time would be the same
+        if (format.matches(text)) {
+            ConstantOperator time = StatisticsCastEvaluator.cast(constant, DateType.DATETIME).orElse(null);
+            return time == null || time.isNull() ? null : castComparison(type, cast, time.getDatetime());
+        }
+        if (type == BinaryType.EQ) {
+            return null;
+        }
+        boolean above = type == BinaryType.GE || type == BinaryType.GT;
+        // The first time whose string is >= the constant, or > it: the strings above the constant start there, and
+        // the strings below end there
+        LocalDateTime first = firstTimeAbove(format, text, type == BinaryType.GT || type == BinaryType.LE);
+        if (first == null) {
+            return new BinaryPredicateOperator(above ? BinaryType.LT : BinaryType.GE, cast,
+                    datetime(ConstantOperator.MIN_DATETIME));
+        }
+        return castComparison(above ? BinaryType.GE : BinaryType.LT, cast, first);
+    }
+
+    // The statistics of a DATETIME hold whole seconds, so a time with a fraction of a second would compare as its
+    // second and keep the rows of that second on the wrong side. Past the start of a second, a range starts after it.
+    private static BinaryPredicateOperator castComparison(BinaryType type, CastOperator cast, LocalDateTime time) {
+        if (time.getNano() == 0 || type == BinaryType.EQ) {
+            return new BinaryPredicateOperator(type, cast, datetime(time));
+        }
+        boolean above = type == BinaryType.GE || type == BinaryType.GT;
+        return new BinaryPredicateOperator(above ? BinaryType.GT : BinaryType.LE, cast, datetime(time.withNano(0)));
+    }
+
+    // A string of the format can hold microseconds up to 9999-12-31 23:59:59.999999, as the BE does, which is past the
+    // range the FE checks for a DATETIME constant, so we build the constant without that check.
+    private static ConstantOperator datetime(LocalDateTime time) {
+        return ConstantOperator.createDatetime(time, DateType.DATETIME);
+    }
+
+    private record FirstTimeKey(String pattern, String constant, boolean strict) {
+    }
+
+    // We expect few constants per query, each compared many times by the paths of the estimate; the first time of a
+    // constant depends on the format and the start of the constant alone, see comparableStart. A constant is the key
+    // only by that start, so a long constant does not stay in memory with its entry.
+    private static final Cache<FirstTimeKey, Optional<LocalDateTime>> FIRST_TIMES =
+            CacheBuilder.newBuilder().maximumSize(10_000).build();
+
+    private static final LocalDateTime LAST_TIME = LocalDateTime.of(9999, 12, 31, 23, 59, 59, 999_999_000);
+
+    /**
+     * The start of a constant that orders it against every string of the format. The strings have one length of L
+     * code points: a constant that differs from a string within its first L code points is ordered by the first
+     * difference, and one that starts with the string is above it, as it is longer. So the first L + 1 code points
+     * order the constant as the whole one does.
+     */
+    static String comparableStart(StringDateFormat format, String constant) {
+        String sample = format.format(ConstantOperator.MIN_DATETIME);
+        int limit = sample.codePointCount(0, sample.length()) + 1;
+        int end = 0;
+        for (int i = 0; i < limit && end < constant.length(); i++) {
+            end += Character.charCount(constant.codePointAt(end));
+        }
+        return end < constant.length() ? constant.substring(0, end) : constant;
+    }
+
+    /**
+     * The first time from 0000-01-01 to 9999-12-31 whose string of the format is above a constant, or at least it
+     * when not strict; null when there is none. The strings of the format grow with the time, so we search the
+     * microseconds by halves.
+     */
+    static LocalDateTime firstTimeAbove(StringDateFormat format, String text, boolean strict) {
+        String constant = comparableStart(format, text);
+        return FIRST_TIMES.asMap().computeIfAbsent(new FirstTimeKey(format.getPattern(), constant, strict), key -> {
+            long high = ChronoUnit.MICROS.between(ConstantOperator.MIN_DATETIME, LAST_TIME);
+            if (!isAbove(format, LAST_TIME, constant, strict)) {
+                return Optional.empty();
+            }
+            long low = 0;
+            while (low < high) {
+                long middle = low + (high - low) / 2;
+                if (isAbove(format, ConstantOperator.MIN_DATETIME.plus(middle, ChronoUnit.MICROS), constant, strict)) {
+                    high = middle;
+                } else {
+                    low = middle + 1;
+                }
+            }
+            return Optional.of(ConstantOperator.MIN_DATETIME.plus(low, ChronoUnit.MICROS));
+        }).orElse(null);
+    }
+
+    private static boolean isAbove(StringDateFormat format, LocalDateTime time, String constant, boolean strict) {
+        int order = StringBucket.compare(format.format(time), constant);
+        return strict ? order > 0 : order >= 0;
+    }
 
     public static Statistics statisticsCalculate(ScalarOperator predicate, Statistics statistics) {
         return statisticsCalculate(predicate, statistics, true);
@@ -995,7 +1160,9 @@ public class PredicateStatisticsCalculator {
          * one would take its share of the whole range again and multiply two halves. A comparison of a monotonic
          * function takes the exact bound on its argument, see MonotonicFilterDerivation.columnBoundsForEstimate, so
          * hours_add(CAST(c AS DATETIME), 5) between two times is an interval of CAST(c AS DATETIME). The other
-         * conjuncts are estimated after the intervals. Empty when the conjunction has no interval.
+         * conjuncts are estimated after the intervals. A comparison of a column whose table declares the format of its
+         * dates is one of CAST(column AS DATETIME), see asDatetimeComparison. Empty when the conjunction has no
+         * interval.
          */
         protected Optional<Statistics> estimateIntervals(CompoundPredicateOperator predicate) {
             // We expect a conjunction of comparisons of columns almost always: count the candidates first, without
@@ -1024,7 +1191,7 @@ public class PredicateStatisticsCalculator {
                 if (intervals == null) {
                     intervals = new LinkedHashMap<>();
                 }
-                intervals.computeIfAbsent(side.expression(), key -> new Interval()).add(side, conjunct);
+                intervals.computeIfAbsent(intervalKey(side.expression()), key -> new Interval()).add(side, conjunct);
             }
             if (intervals == null) {
                 return Optional.empty();
@@ -1037,6 +1204,7 @@ public class PredicateStatisticsCalculator {
                 if (next == null) {
                     rest.addAll(entry.getValue().conjuncts);
                 } else {
+                    next = narrowedByStrings(entry.getValue().conjuncts, current, next);
                     // The MCV statistics follow the conjuncts of the interval, as they follow each conjunct of an AND
                     current = finishEstimate(Utils.compoundAnd(entry.getValue().conjuncts), current, next, useMcv);
                     estimated = true;
@@ -1048,19 +1216,54 @@ public class PredicateStatisticsCalculator {
             return Optional.of(rest.isEmpty() ? current : statisticsCalculate(Utils.compoundAnd(rest), current, useMcv));
         }
 
+        // A cast the analyzer adds and the same cast written in the query cast the same values
+        private static ScalarOperator intervalKey(ScalarOperator expression) {
+            return expression instanceof CastOperator cast && cast.isImplicit()
+                    ? new CastOperator(cast.getType(), cast.getChild(0)) : expression;
+        }
+
+        /**
+         * The estimate by the cast of the comparisons of a column with a format of dates, see asDatetimeComparison,
+         * with the statistics of the column narrowed as the comparisons of strings narrow them. A constant of the
+         * format filters the strings exactly, while the estimate of the cast keeps the statistics of the column as
+         * they were. The row count stays that of the cast.
+         */
+        private Statistics narrowedByStrings(List<ScalarOperator> conjuncts, Statistics from, Statistics byCast) {
+            Statistics strings = from;
+            ColumnRefOperator column = null;
+            for (ScalarOperator conjunct : conjuncts) {
+                if (conjunct instanceof BinaryPredicateOperator binary && asDatetimeComparison(binary) != null) {
+                    strings = new BaseCalculatingVisitor(strings, useMcv).estimateBinaryPredicate(binary, null);
+                    column = (ColumnRefOperator) binary.getChild(0);
+                }
+            }
+            ColumnStatistic narrowed = column == null ? null : strings.getColumnStatistics().get(column);
+            if (narrowed == null) {
+                return byCast;
+            }
+            double rows = byCast.getOutputRowCount();
+            return StatisticsEstimateUtils.adjustStatisticsByRowCount(
+                    Statistics.buildFrom(byCast).addColumnStatistic(column, narrowed).build(), rows);
+        }
+
         private static int countIntervalCandidates(ScalarOperator predicate) {
             if (predicate instanceof CompoundPredicateOperator compound && compound.isAnd()) {
                 return countIntervalCandidates(compound.getChild(0)) + countIntervalCandidates(compound.getChild(1));
             }
             return predicate instanceof BinaryPredicateOperator binary && binary.getBinaryType().isRange()
-                    && !binary.getChild(0).isColumnRef() && binary.getChild(1).isConstantRef() ? 1 : 0;
+                    && binary.getChild(1).isConstantRef()
+                    && (!binary.getChild(0).isColumnRef() || asDatetimeComparison(binary) != null) ? 1 : 0;
         }
 
         // The expression a range comparison bounds and the bound; null when the comparison is not part of an
         // interval: a comparison of a column narrows the statistics of the column itself.
         private IntervalSide intervalSide(ScalarOperator conjunct) {
-            if (!(conjunct instanceof BinaryPredicateOperator binary) || !checkNeedEvalEstimate(conjunct)
-                    || !binary.getBinaryType().isRange() || !(binary.getChild(1) instanceof ConstantOperator constant)
+            if (!(conjunct instanceof BinaryPredicateOperator written) || !checkNeedEvalEstimate(conjunct)) {
+                return null;
+            }
+            BinaryPredicateOperator asCast = asDatetimeComparison(written);
+            BinaryPredicateOperator binary = asCast != null ? asCast : written;
+            if (!binary.getBinaryType().isRange() || !(binary.getChild(1) instanceof ConstantOperator constant)
                     || constant.isNull()) {
                 return null;
             }
@@ -1220,6 +1423,10 @@ public class PredicateStatisticsCalculator {
         public Statistics visitBinaryPredicate(BinaryPredicateOperator predicate, Void context) {
             if (!checkNeedEvalEstimate(predicate)) {
                 return statistics;
+            }
+            BinaryPredicateOperator asCast = asDatetimeComparison(predicate);
+            if (asCast != null) {
+                return narrowedByStrings(List.of(predicate), statistics, visitBinaryPredicate(asCast, context));
             }
             // A comparison of a function of a column with a constant is estimated by the bounds on the column that
             // follow from it, see columnBoundsForEstimate. The check of the shape comes first, because it rejects most

@@ -40,6 +40,7 @@ import com.starrocks.common.FeConstants;
 import com.starrocks.common.Pair;
 import com.starrocks.common.tvr.TvrTableSnapshot;
 import com.starrocks.common.tvr.TvrVersionRange;
+import com.starrocks.common.util.StringDateFormat;
 import com.starrocks.connector.PartitionUtil;
 import com.starrocks.connector.RemoteFileDesc;
 import com.starrocks.connector.hive.HiveStorageFormat;
@@ -161,6 +162,7 @@ import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.operator.scalar.SubfieldOperator;
 import com.starrocks.sql.optimizer.operator.stream.LogicalBinlogScanOperator;
 import com.starrocks.sql.optimizer.operator.stream.PhysicalStreamScanOperator;
+import com.starrocks.sql.optimizer.rewrite.StringDateFormatProperty;
 import com.starrocks.sql.optimizer.rule.transformation.ListPartitionPruner;
 import com.starrocks.statistic.StatisticUtils;
 import com.starrocks.statistic.columns.PredicateColumnsMgr;
@@ -257,7 +259,8 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
     }
 
     public void estimatorStats() {
-        expressionContext.getOp().accept(this, expressionContext);
+        PredicateStatisticsCalculator.withStringDateFormats(this::stringDateFormat,
+                () -> expressionContext.getOp().accept(this, expressionContext));
         if (optimizerContext != null && expressionContext.getStatistics() != null) {
             Statistics statistics = expressionContext.getStatistics();
             JoinStatisticsPlanner planner = optimizerContext.getJoinStatisticsPlanner();
@@ -2759,6 +2762,18 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
             return result.withOutputRowCount(1);
         }
         return result;
+    }
+
+    // The format the table of a VARCHAR column declares for its dates, see StringDateFormatProperty, or null: a
+    // comparison of the column with a constant of the format is then estimated as a comparison of
+    // CAST(column AS DATETIME).
+    private StringDateFormat stringDateFormat(ColumnRefOperator column) {
+        Pair<Table, Column> source = columnRefFactory == null ? null : columnRefFactory.getTableAndColumn(column);
+        if (source == null) {
+            return null;
+        }
+        return optimizerContext == null ? StringDateFormatProperty.of(source.first, source.second.getName())
+                : optimizerContext.getStringDateFormat(source.first, source.second.getName());
     }
 
     public Statistics estimateStatistics(List<ScalarOperator> predicateList, Statistics statistics) {

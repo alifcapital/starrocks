@@ -3423,8 +3423,9 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     private boolean enableMonotonicPredicateMoveAround = true;
 
     // The Iceberg table property string-date-format.<column> declares how a VARCHAR column writes dates; the scan
-    // and the JOIN derivation take bounds on such strings from it. The property is the consent of the owner of the
-    // table, so this is only a switch to turn all such properties off.
+    // and the JOIN derivation take bounds on such strings from it, and the estimate reads a comparison of the column
+    // as one of its cast to DATETIME. The property is the consent of the owner of the table, so this is only a switch
+    // to turn all such properties off.
     @VarAttr(name = ENABLE_STRING_DATE_FORMAT_PROPERTY)
     private boolean enableStringDateFormatProperty = true;
 
