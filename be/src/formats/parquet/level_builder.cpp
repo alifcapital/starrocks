@@ -60,6 +60,81 @@ inline const RunTimeCppType<lt>* get_raw_data_column(const ColumnPtr& col) {
     return raw_column;
 }
 
+namespace {
+
+bool is_group_with_fields(const ::parquet::schema::NodePtr& node, size_t num_fields) {
+    return node->is_group() &&
+           static_cast<size_t>(std::static_pointer_cast<::parquet::schema::GroupNode>(node)->field_count()) ==
+                   num_fields;
+}
+
+// We expect the parquet node of a column to have the shape that ParquetBuildHelper::make_schema_node builds for the type
+// of the column. We fear a node that is not a group or has fewer children than the type needs, because the writers
+// below cast the node to a group and index its children without bounds checks. So we return an error before we go
+// down into the node.
+Status check_node_shape(const TypeDescriptor& type_desc, const ::parquet::schema::NodePtr& node) {
+    bool matched = false;
+    switch (type_desc.type) {
+    case TYPE_ARRAY:
+        // group <name> (LIST) { repeated group list { <element> } }
+        matched = type_desc.children.size() == 1 && is_group_with_fields(node, 1) &&
+                  is_group_with_fields(std::static_pointer_cast<::parquet::schema::GroupNode>(node)->field(0), 1);
+        break;
+    case TYPE_MAP:
+        // group <name> (MAP) { repeated group key_value { <key>, <value> } }
+        matched = type_desc.children.size() == 2 && is_group_with_fields(node, 1) &&
+                  is_group_with_fields(std::static_pointer_cast<::parquet::schema::GroupNode>(node)->field(0), 2);
+        break;
+    case TYPE_STRUCT:
+        matched = type_desc.field_names.size() == type_desc.children.size() &&
+                  is_group_with_fields(node, type_desc.children.size());
+        break;
+    case TYPE_VARIANT:
+        matched = node->is_group();
+        break;
+    default:
+        matched = node->is_primitive();
+        break;
+    }
+    if (!matched) {
+        return Status::InternalError(fmt::format("Parquet schema node '{}' does not match column type {}", node->name(),
+                                                 type_desc.debug_string()));
+    }
+    return Status::OK();
+}
+
+const ::parquet::schema::NodePtr& group_field(const ::parquet::schema::NodePtr& node, int i) {
+    return static_cast<const ::parquet::schema::GroupNode*>(node.get())->field(i);
+}
+
+// An expression can produce a constant column, for example from a literal, and a nested column, such as a field of
+// a struct, can be constant too. We fear it because the code that reads a column through its concrete class treats
+// a column that says it is nullable as a NullableColumn. So we expand it to a column of its rows first.
+ColumnPtr unfold_const(const TypeDescriptor& type_desc, const ColumnPtr& col) {
+    if (!col->is_constant()) {
+        return col;
+    }
+    return ColumnHelper::copy_and_unfold_const_column(type_desc, col->is_nullable(), col, col->size());
+}
+
+Status unexpected_column_kind(const TypeDescriptor& type_desc, const Column* data_col) {
+    return Status::InternalError(
+            fmt::format("Column {} does not match column type {}", data_col->get_name(), type_desc.debug_string()));
+}
+
+// The scalar writers read the values through the concrete column class of the logical type. We fear a column of
+// another class, because the cast in release builds is not checked and reads the memory of the column wrongly.
+template <typename ColumnType>
+Status check_data_column_class(const TypeDescriptor& type_desc, const ColumnPtr& col) {
+    const Column* data_col = ColumnHelper::get_data_column(col.get());
+    if (UNLIKELY(dynamic_cast<const ColumnType*>(data_col) == nullptr)) {
+        return unexpected_column_kind(type_desc, data_col);
+    }
+    return Status::OK();
+}
+
+} // namespace
+
 LevelBuilder::LevelBuilder(TypeDescriptor type_desc, ::parquet::schema::NodePtr root, std::string timezone,
                            bool use_legacy_decimal_encoding, bool use_int96_timestamp_encoding)
         : _type_desc(std::move(type_desc)),
@@ -70,7 +145,7 @@ LevelBuilder::LevelBuilder(TypeDescriptor type_desc, ::parquet::schema::NodePtr 
 
 Status LevelBuilder::init() {
     if (!TimezoneUtils::find_cctz_time_zone(_timezone, _ctz)) {
-        return Status::InternalError(fmt::format("can not find cctz time zone {}", timezone));
+        return Status::InternalError(fmt::format("can not find cctz time zone {}", _timezone));
     }
     return Status::OK();
 }
@@ -81,8 +156,10 @@ Status LevelBuilder::write(const LevelBuilderContext& ctx, const ColumnPtr& col,
 }
 
 Status LevelBuilder::_write_column_chunk(const LevelBuilderContext& ctx, const TypeDescriptor& type_desc,
-                                         const ::parquet::schema::NodePtr& node, const ColumnPtr& col,
+                                         const ::parquet::schema::NodePtr& node, const ColumnPtr& input_col,
                                          const CallbackFunction& write_leaf_callback) {
+    RETURN_IF_ERROR(check_node_shape(type_desc, node));
+    const ColumnPtr col = unfold_const(type_desc, input_col);
     switch (type_desc.type) {
     case TYPE_BOOLEAN: {
         return _write_boolean_column_chunk(ctx, type_desc, node, col, write_leaf_callback);
@@ -175,6 +252,7 @@ Status LevelBuilder::_write_column_chunk(const LevelBuilderContext& ctx, const T
 Status LevelBuilder::_write_boolean_column_chunk(const LevelBuilderContext& ctx, const TypeDescriptor& type_desc,
                                                  const ::parquet::schema::NodePtr& node, const ColumnPtr& col,
                                                  const CallbackFunction& write_leaf_callback) {
+    RETURN_IF_ERROR(check_data_column_class<RunTimeColumnType<TYPE_BOOLEAN>>(type_desc, col));
     const auto* data_col = get_raw_data_column<TYPE_BOOLEAN>(col);
     const auto* null_col = get_raw_null_column(col);
 
@@ -206,6 +284,7 @@ template <LogicalType lt, ::parquet::Type::type pt>
 Status LevelBuilder::_write_int_column_chunk(const LevelBuilderContext& ctx, const TypeDescriptor& type_desc,
                                              const ::parquet::schema::NodePtr& node, const ColumnPtr& col,
                                              const CallbackFunction& write_leaf_callback) {
+    RETURN_IF_ERROR(check_data_column_class<RunTimeColumnType<lt>>(type_desc, col));
     const auto* data_col = get_raw_data_column<lt>(col);
     const auto* null_col = get_raw_null_column(col);
 
@@ -275,6 +354,7 @@ Status LevelBuilder::_write_decimal_to_flba_column_chunk(const LevelBuilderConte
                                                          const ::parquet::schema::NodePtr& node, const ColumnPtr& col,
                                                          const CallbackFunction& write_leaf_callback) {
     static_assert(lt_is_decimal<lt>);
+    RETURN_IF_ERROR(check_data_column_class<RunTimeColumnType<lt>>(type_desc, col));
     const auto* data_col = get_raw_data_column<lt>(col);
     const auto* null_col = get_raw_null_column(col);
 
@@ -315,6 +395,7 @@ Status LevelBuilder::_write_decimal_to_flba_column_chunk(const LevelBuilderConte
 Status LevelBuilder::_write_date_column_chunk(const LevelBuilderContext& ctx, const TypeDescriptor& type_desc,
                                               const ::parquet::schema::NodePtr& node, const ColumnPtr& col,
                                               const CallbackFunction& write_leaf_callback) {
+    RETURN_IF_ERROR(check_data_column_class<RunTimeColumnType<TYPE_DATE>>(type_desc, col));
     const auto* data_col = get_raw_data_column<TYPE_DATE>(col);
     const auto* null_col = get_raw_null_column(col);
 
@@ -346,6 +427,7 @@ Status LevelBuilder::_write_date_column_chunk(const LevelBuilderContext& ctx, co
 Status LevelBuilder::_write_time_column_chunk(const LevelBuilderContext& ctx, const TypeDescriptor& type_desc,
                                               const ::parquet::schema::NodePtr& node, const ColumnPtr& col,
                                               const CallbackFunction& write_leaf_callback) {
+    RETURN_IF_ERROR(check_data_column_class<RunTimeColumnType<TYPE_TIME>>(type_desc, col));
     const auto* data_col = get_raw_data_column<TYPE_TIME>(col);
     const auto* null_col = get_raw_null_column(col);
 
@@ -375,6 +457,7 @@ template <bool use_int96_timestamp_encoding>
 Status LevelBuilder::_write_datetime_column_chunk(const LevelBuilderContext& ctx, const TypeDescriptor& type_desc,
                                                   const ::parquet::schema::NodePtr& node, const ColumnPtr& col,
                                                   const CallbackFunction& write_leaf_callback) {
+    RETURN_IF_ERROR(check_data_column_class<RunTimeColumnType<TYPE_DATETIME>>(type_desc, col));
     const auto data_col = get_raw_data_column<TYPE_DATETIME>(col);
     const auto null_col = get_raw_null_column(col);
 
@@ -422,6 +505,7 @@ template <LogicalType lt>
 Status LevelBuilder::_write_byte_array_column_chunk(const LevelBuilderContext& ctx, const TypeDescriptor& type_desc,
                                                     const ::parquet::schema::NodePtr& node, const ColumnPtr& col,
                                                     const CallbackFunction& write_leaf_callback) {
+    RETURN_IF_ERROR(check_data_column_class<RunTimeColumnType<lt>>(type_desc, col));
     const auto* data_col = down_cast<const RunTimeColumnType<lt>*>(ColumnHelper::get_data_column(col.get()));
     const auto* null_col = get_raw_null_column(col);
     const auto& vo = data_col->get_offset();
@@ -465,8 +549,12 @@ Status LevelBuilder::_write_array_column_chunk(const LevelBuilderContext& ctx, c
     auto mid_node = std::static_pointer_cast<::parquet::schema::GroupNode>(outer_node->field(0));
     auto inner_node = mid_node->field(0);
 
+    const auto* data_col = ColumnHelper::get_data_column(col.get());
+    if (UNLIKELY(!data_col->is_array())) {
+        return unexpected_column_kind(type_desc, data_col);
+    }
     auto* null_col = get_raw_null_column(col);
-    auto* array_col = down_cast<const ArrayColumn*>(ColumnHelper::get_data_column(col.get()));
+    auto* array_col = down_cast<const ArrayColumn*>(data_col);
     const auto& elements = array_col->elements_column();
     const auto offsets = array_col->offsets_column()->immutable_data();
 
@@ -551,8 +639,12 @@ Status LevelBuilder::_write_map_column_chunk(const LevelBuilderContext& ctx, con
     auto key_node = mid_node->field(0);
     auto value_node = mid_node->field(1);
 
+    const auto* data_col = ColumnHelper::get_data_column(col.get());
+    if (UNLIKELY(!data_col->is_map())) {
+        return unexpected_column_kind(type_desc, data_col);
+    }
     auto* null_col = get_raw_null_column(col);
-    auto* map_col = down_cast<const MapColumn*>(ColumnHelper::get_data_column(col.get()));
+    auto* map_col = down_cast<const MapColumn*>(data_col);
     const auto& keys = map_col->keys_column();
     if (UNLIKELY(keys->has_null())) {
         return Status::NotSupported("Does not support to write map value of null key");
@@ -632,17 +724,21 @@ Status LevelBuilder::_write_struct_column_chunk(const LevelBuilderContext& ctx, 
     DCHECK(type_desc.type == TYPE_STRUCT);
     auto struct_node = std::static_pointer_cast<::parquet::schema::GroupNode>(node);
 
-    auto* null_col = get_raw_null_column(col);
     auto* data_col = ColumnHelper::get_data_column(col.get());
+    if (UNLIKELY(!data_col->is_struct())) {
+        return unexpected_column_kind(type_desc, data_col);
+    }
+    auto* null_col = get_raw_null_column(col);
     auto* struct_col = down_cast<const StructColumn*>(data_col);
 
     // Use the rep_levels in the context from caller since node is primitive.
     auto rep_levels = ctx._rep_levels;
     auto def_levels = _make_def_levels(ctx, node, null_col, col->size());
 
-    LevelBuilderContext derived_ctx(def_levels->size(), def_levels, rep_levels,
-                                    ctx._max_def_level + node->is_optional(), ctx._max_rep_level,
-                                    ctx._repeated_ancestor_def_level);
+    // A required struct at the top level has no definition level, so we fear def_levels is nullptr here. We take the
+    // number of levels from the context, which always has it.
+    LevelBuilderContext derived_ctx(ctx._num_levels, def_levels, rep_levels, ctx._max_def_level + node->is_optional(),
+                                    ctx._max_rep_level, ctx._repeated_ancestor_def_level);
 
     for (size_t i = 0; i < type_desc.children.size(); i++) {
         ASSIGN_OR_RETURN(auto sub_col, struct_col->field_column(type_desc.field_names[i]));
@@ -655,6 +751,7 @@ Status LevelBuilder::_write_struct_column_chunk(const LevelBuilderContext& ctx, 
 Status LevelBuilder::_write_json_column_chunk(const LevelBuilderContext& ctx, const TypeDescriptor& type_desc,
                                               const ::parquet::schema::NodePtr& node, const ColumnPtr& col,
                                               const CallbackFunction& write_leaf_callback) {
+    RETURN_IF_ERROR(check_data_column_class<JsonColumn>(type_desc, col));
     const auto* data_col = down_cast<const JsonColumn*>(ColumnHelper::get_data_column(col.get()));
     const auto* null_col = get_raw_null_column(col);
 
@@ -693,16 +790,20 @@ Status LevelBuilder::_write_variant_column_chunk(const LevelBuilderContext& ctx,
     DCHECK(type_desc.type == TYPE_VARIANT);
 
     auto variant_node = std::static_pointer_cast<::parquet::schema::GroupNode>(node);
-    auto* null_col = get_raw_null_column(col);
     auto* data_col = ColumnHelper::get_data_column(col.get());
+    if (UNLIKELY(!data_col->is_variant())) {
+        return unexpected_column_kind(type_desc, data_col);
+    }
+    auto* null_col = get_raw_null_column(col);
     auto* variant_col = down_cast<const VariantColumn*>(data_col);
 
     auto rep_levels = ctx._rep_levels;
     auto def_levels = _make_def_levels(ctx, node, null_col, col->size());
 
-    LevelBuilderContext derived_ctx(def_levels->size(), def_levels, rep_levels,
-                                    ctx._max_def_level + node->is_optional(), ctx._max_rep_level,
-                                    ctx._repeated_ancestor_def_level);
+    // A required variant at the top level has no definition level, so we fear def_levels is nullptr here. We take the
+    // number of levels from the context, which always has it.
+    LevelBuilderContext derived_ctx(ctx._num_levels, def_levels, rep_levels, ctx._max_def_level + node->is_optional(),
+                                    ctx._max_rep_level, ctx._repeated_ancestor_def_level);
 
     int metadata_index = -1;
     int value_index = -1;
@@ -822,6 +923,8 @@ std::shared_ptr<std::vector<uint8_t>> LevelBuilder::_make_null_bitset(const Leve
 
 // Make definition levels in terms of repetition and nullity.
 // node could be primitive, or group node denoting struct.
+// A required node adds no definition level, so the result is the def levels of the context, which is nullptr when
+// the context has no definition level (max_def_level == 0). Callers must not dereference it without a check.
 std::shared_ptr<std::vector<int16_t>> LevelBuilder::_make_def_levels(const LevelBuilderContext& ctx,
                                                                      const ::parquet::schema::NodePtr& node,
                                                                      const uint8_t* nulls,
@@ -874,6 +977,148 @@ std::shared_ptr<std::vector<int16_t>> LevelBuilder::_make_def_levels(const Level
     DCHECK(col_offset == col_size);
 
     return def_levels;
+}
+
+bool has_required_descendant(const TypeDescriptor& type_desc, const ::parquet::schema::NodePtr& node) {
+    // A node of another shape is reported by check_required_descendants.
+    if (!check_node_shape(type_desc, node).ok()) {
+        return true;
+    }
+    switch (type_desc.type) {
+    case TYPE_STRUCT: {
+        for (size_t i = 0; i < type_desc.children.size(); i++) {
+            const auto& child = group_field(node, i);
+            if (child->is_required() || has_required_descendant(type_desc.children[i], child)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    case TYPE_ARRAY: {
+        const auto& element = group_field(group_field(node, 0), 0);
+        return element->is_required() || has_required_descendant(type_desc.children[0], element);
+    }
+    case TYPE_MAP: {
+        const auto& key_value = group_field(node, 0);
+        const auto& key = group_field(key_value, 0);
+        const auto& value = group_field(key_value, 1);
+        return value->is_required() || has_required_descendant(type_desc.children[0], key) ||
+               has_required_descendant(type_desc.children[1], value);
+    }
+    default:
+        return false;
+    }
+}
+
+namespace {
+
+// Marks the elements of the rows that are marked in `row_nulls`.
+template <typename Offsets>
+std::vector<uint8_t> expand_to_elements(const std::vector<uint8_t>& row_nulls, const Offsets& offsets,
+                                        size_t num_elements) {
+    std::vector<uint8_t> element_nulls(num_elements, 0);
+    for (size_t row = 0; row < row_nulls.size(); row++) {
+        if (!row_nulls[row]) {
+            continue;
+        }
+        for (size_t i = offsets[row]; i < offsets[row + 1] && i < num_elements; i++) {
+            element_nulls[i] = 1;
+        }
+    }
+    return element_nulls;
+}
+
+// `ancestor_nulls` marks the rows of `input_col` that sit below a NULL value of an ancestor, or is nullptr if there is
+// no such row. The writer writes no value for such a row, so a NULL there is not an error.
+Status check_required_field(const TypeDescriptor& type_desc, const ::parquet::schema::NodePtr& node,
+                            const ColumnPtr& input_col, const std::vector<uint8_t>* ancestor_nulls,
+                            const std::string& path, bool check_self) {
+    RETURN_IF_ERROR(check_node_shape(type_desc, node));
+    const ColumnPtr col = unfold_const(type_desc, input_col);
+    const uint8_t* nulls = get_raw_null_column(col);
+    const size_t num_rows = col->size();
+
+    if (check_self && node->is_required() && nulls != nullptr) {
+        for (size_t i = 0; i < num_rows; i++) {
+            if (nulls[i] && (ancestor_nulls == nullptr || !(*ancestor_nulls)[i])) {
+                return Status::DataQualityError(fmt::format("NULL value in non-nullable field '{}'", path));
+            }
+        }
+    }
+    if (!has_required_descendant(type_desc, node)) {
+        return Status::OK();
+    }
+
+    // The rows of the children that sit below a NULL value.
+    const bool has_null_rows = nulls != nullptr || ancestor_nulls != nullptr;
+    std::vector<uint8_t> null_rows;
+    if (has_null_rows) {
+        null_rows.resize(num_rows);
+        for (size_t i = 0; i < num_rows; i++) {
+            null_rows[i] = (nulls != nullptr && nulls[i]) || (ancestor_nulls != nullptr && (*ancestor_nulls)[i]);
+        }
+    }
+
+    const Column* data_col = ColumnHelper::get_data_column(col.get());
+    switch (type_desc.type) {
+    case TYPE_STRUCT: {
+        if (UNLIKELY(!data_col->is_struct())) {
+            return unexpected_column_kind(type_desc, data_col);
+        }
+        const auto* struct_col = down_cast<const StructColumn*>(data_col);
+        for (size_t i = 0; i < type_desc.children.size(); i++) {
+            ASSIGN_OR_RETURN(auto sub_col, struct_col->field_column(type_desc.field_names[i]));
+            RETURN_IF_ERROR(check_required_field(type_desc.children[i], group_field(node, i), sub_col,
+                                                 has_null_rows ? &null_rows : nullptr,
+                                                 path + "." + type_desc.field_names[i], true));
+        }
+        break;
+    }
+    case TYPE_ARRAY: {
+        if (UNLIKELY(!data_col->is_array())) {
+            return unexpected_column_kind(type_desc, data_col);
+        }
+        const auto* array_col = down_cast<const ArrayColumn*>(data_col);
+        const auto& elements = array_col->elements_column();
+        std::vector<uint8_t> element_nulls;
+        if (has_null_rows) {
+            element_nulls =
+                    expand_to_elements(null_rows, array_col->offsets_column()->immutable_data(), elements->size());
+        }
+        RETURN_IF_ERROR(check_required_field(type_desc.children[0], group_field(group_field(node, 0), 0), elements,
+                                             has_null_rows ? &element_nulls : nullptr, path + ".element", true));
+        break;
+    }
+    case TYPE_MAP: {
+        if (UNLIKELY(!data_col->is_map())) {
+            return unexpected_column_kind(type_desc, data_col);
+        }
+        const auto* map_col = down_cast<const MapColumn*>(data_col);
+        const auto& keys = map_col->keys_column();
+        const auto& values = map_col->values_column();
+        std::vector<uint8_t> entry_nulls;
+        if (has_null_rows) {
+            entry_nulls = expand_to_elements(null_rows, map_col->offsets_column()->immutable_data(), keys->size());
+        }
+        const auto& key_value = group_field(node, 0);
+        // The map writer rejects a NULL key itself.
+        RETURN_IF_ERROR(check_required_field(type_desc.children[0], group_field(key_value, 0), keys,
+                                             has_null_rows ? &entry_nulls : nullptr, path + ".key", false));
+        RETURN_IF_ERROR(check_required_field(type_desc.children[1], group_field(key_value, 1), values,
+                                             has_null_rows ? &entry_nulls : nullptr, path + ".value", true));
+        break;
+    }
+    default:
+        break;
+    }
+    return Status::OK();
+}
+
+} // namespace
+
+Status check_required_descendants(const TypeDescriptor& type_desc, const ::parquet::schema::NodePtr& node,
+                                  const ColumnPtr& col, const std::string& path) {
+    return check_required_field(type_desc, node, col, nullptr, path, false);
 }
 
 } // namespace starrocks::parquet

@@ -33,6 +33,7 @@
 #include "gutil/casts.h"
 #include "runtime/descriptor_helper.h"
 #include "testutil/assert.h"
+#include "testutil/column_test_helper.h"
 
 namespace starrocks::parquet {
 
@@ -569,6 +570,108 @@ TEST_F(FileWriterTest, TestWriteStruct) {
     auto read_chunk = _read_chunk(type_descs);
     ASSERT_TRUE(read_chunk != nullptr);
     Utils::assert_equal_chunk(chunk.get(), read_chunk.get());
+}
+
+TEST_F(FileWriterTest, TestWriteRequiredStruct) {
+    // The schema of a NOT NULL expression is required, so the struct has no definition level of its own.
+    auto struct_type = TypeDescriptor::create_struct_type({"a", "b"}, {TYPE_INT_DESC, TYPE_VARCHAR_DESC});
+    std::vector<TypeDescriptor> type_descs{struct_type};
+
+    auto node = ParquetBuildHelper::make_schema_node(struct_type.debug_string(), struct_type,
+                                                     ::parquet::Repetition::REQUIRED);
+    ASSERT_TRUE(node.ok());
+    ::parquet::schema::NodeVector schema_fields{node.ValueOrDie()};
+    auto schema = std::static_pointer_cast<::parquet::schema::GroupNode>(
+            ::parquet::schema::GroupNode::Make("table", ::parquet::Repetition::REQUIRED, std::move(schema_fields)));
+
+    auto chunk = std::make_shared<Chunk>();
+    {
+        Columns fields{ColumnTestHelper::build_nullable_column<int32_t>({1, 2, 3}, {0, 1, 0}),
+                       ColumnTestHelper::build_nullable_column<Slice>({"x", "y", "z"}, {0, 0, 1})};
+        chunk->append_column(StructColumn::create(std::move(fields), struct_type.field_names), chunk->num_columns());
+    }
+
+    ASSERT_OK(_write_chunk(chunk, type_descs, schema));
+
+    // the read column is nullable, so we compare the rows
+    auto read_chunk = _read_chunk(type_descs);
+    ASSERT_TRUE(read_chunk != nullptr);
+    ASSERT_EQ(3, read_chunk->num_rows());
+    for (size_t row = 0; row < 3; row++) {
+        ASSERT_EQ(chunk->get_column_by_index(0)->debug_item(row), read_chunk->get_column_by_index(0)->debug_item(row));
+    }
+}
+
+TEST_F(FileWriterTest, TestCallCatchingParquetException) {
+    ASSERT_OK(call_catching_parquet_exception("action", []() { return Status::OK(); }));
+
+    auto st = call_catching_parquet_exception("action",
+                                              []() -> Status { throw ::parquet::ParquetException("parquet failure"); });
+    ASSERT_TRUE(st.is_io_error());
+    EXPECT_NE(st.message().find("action: parquet failure"), std::string::npos) << st.message();
+
+    st = call_catching_parquet_exception("action", []() -> Status {
+        throw ::parquet::ParquetStatusException(arrow::Status::IOError("disk is full"));
+    });
+    ASSERT_TRUE(st.is_io_error());
+    EXPECT_NE(st.message().find("disk is full"), std::string::npos) << st.message();
+
+    st = call_catching_parquet_exception("action", []() -> Status {
+        throw ::parquet::ParquetStatusException(arrow::Status::OutOfMemory("no memory"));
+    });
+    ASSERT_TRUE(st.is_mem_limit_exceeded());
+
+    st = call_catching_parquet_exception("action", []() -> Status { throw std::runtime_error("other failure"); });
+    ASSERT_TRUE(st.is_io_error());
+
+    // the memory limit of a query is reported with std::bad_alloc, which is left to the caller
+    EXPECT_THROW(call_catching_parquet_exception("action", []() -> Status { throw std::bad_alloc(); }), std::bad_alloc);
+}
+
+TEST_F(FileWriterTest, TestChunkWriterReturnsErrorWhenParquetThrows) {
+    std::vector<TypeDescriptor> type_descs{TYPE_INT_DESC};
+    auto schema = _make_schema(type_descs);
+    ASSERT_TRUE(schema != nullptr);
+
+    auto sink = arrow::io::BufferOutputStream::Create().ValueOrDie();
+    auto parquet_writer = ::parquet::ParquetFileWriter::Open(sink, schema);
+    // column() of a row group that is not buffered throws
+    auto* rg_writer = parquet_writer->AppendRowGroup();
+    ChunkWriter chunk_writer(
+            rg_writer, type_descs, schema,
+            [](Chunk* chunk, size_t col_idx) { return chunk->get_column_by_index(col_idx); }, "Asia/Shanghai");
+
+    auto chunk = std::make_shared<Chunk>();
+    chunk->append_column(ColumnTestHelper::build_column<int32_t>({1, 2, 3}), 0);
+
+    auto st = chunk_writer.write(chunk.get());
+    ASSERT_FALSE(st.ok());
+    ASSERT_TRUE(st.is_io_error()) << st;
+}
+
+TEST_F(FileWriterTest, TestChunkWriterRejectsMoreLeafColumnsThanTheFile) {
+    std::vector<TypeDescriptor> one_type{TYPE_INT_DESC};
+    std::vector<TypeDescriptor> two_types{TYPE_INT_DESC, TYPE_BIGINT_DESC};
+    auto file_schema = _make_schema(one_type);
+    auto chunk_schema = _make_schema(two_types);
+    ASSERT_TRUE(file_schema != nullptr);
+    ASSERT_TRUE(chunk_schema != nullptr);
+
+    auto sink = arrow::io::BufferOutputStream::Create().ValueOrDie();
+    auto parquet_writer = ::parquet::ParquetFileWriter::Open(sink, file_schema);
+    auto* rg_writer = parquet_writer->AppendBufferedRowGroup();
+    // The chunk writer has one more column than the row group, whose column() returns nullptr for the second column.
+    ChunkWriter chunk_writer(
+            rg_writer, two_types, chunk_schema,
+            [](Chunk* chunk, size_t col_idx) { return chunk->get_column_by_index(col_idx); }, "Asia/Shanghai");
+
+    auto chunk = std::make_shared<Chunk>();
+    chunk->append_column(ColumnTestHelper::build_column<int32_t>({1, 2, 3}), 0);
+    chunk->append_column(ColumnTestHelper::build_column<int64_t>({4, 5, 6}), 1);
+
+    auto st = chunk_writer.write(chunk.get());
+    ASSERT_FALSE(st.ok());
+    EXPECT_NE(st.message().find("more leaf columns"), std::string::npos) << st.message();
 }
 
 TEST_F(FileWriterTest, TestWriteMap) {

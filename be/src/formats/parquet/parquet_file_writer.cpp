@@ -57,9 +57,12 @@ DEFINE_FAIL_POINT(parquet_writer_rowgroup_write_failed);
 
 Status ParquetFileWriter::write(Chunk* chunk) {
     if (_rowgroup_writer == nullptr) {
-        _rowgroup_writer = std::make_unique<parquet::ChunkWriter>(
-                _writer->AppendBufferedRowGroup(), _type_descs, _schema, _eval_func, _writer_options->time_zone,
-                _writer_options->use_legacy_decimal_encoding, _writer_options->use_int96_timestamp_encoding);
+        RETURN_IF_ERROR(parquet::call_catching_parquet_exception("append row group error", [&]() {
+            _rowgroup_writer = std::make_unique<parquet::ChunkWriter>(
+                    _writer->AppendBufferedRowGroup(), _type_descs, _schema, _eval_func, _writer_options->time_zone,
+                    _writer_options->use_legacy_decimal_encoding, _writer_options->use_int96_timestamp_encoding);
+            return Status::OK();
+        }));
     }
 
     RETURN_IF_ERROR(_rowgroup_writer->write(chunk));
@@ -93,9 +96,18 @@ FileWriter::CommitResult ParquetFileWriter::close() {
         result.io_status.update(Status::IOError(fmt::format("{}: {}", "close output stream error", status.message())));
     }
 
+    // We fear a writer whose init failed or that is closed already: it has no file metadata to commit, so we
+    // return an error instead of reading the metadata of a null writer.
+    if (result.io_status.ok() && _writer == nullptr) {
+        result.io_status.update(Status::InternalError("The parquet writer is not initialized or is closed"));
+    }
+
     if (result.io_status.ok()) {
-        result.file_statistics = _statistics(_writer->metadata().get(), _writer_options->column_ids.has_value());
-        result.file_statistics.file_size = _output_stream->Tell().MoveValueUnsafe();
+        result.io_status.update(parquet::call_catching_parquet_exception("collect file statistics error", [&]() {
+            result.file_statistics = _statistics(_writer->metadata().get(), _writer_options->column_ids.has_value());
+            result.file_statistics.file_size = _output_stream->Tell().MoveValueUnsafe();
+            return Status::OK();
+        }));
     }
 
     _writer = nullptr;
@@ -103,7 +115,7 @@ FileWriter::CommitResult ParquetFileWriter::close() {
 }
 
 int64_t ParquetFileWriter::get_written_bytes() {
-    int n = _output_stream->Tell().MoveValueUnsafe();
+    int64_t n = _output_stream->Tell().MoveValueUnsafe();
     if (_rowgroup_writer != nullptr) {
         n += _rowgroup_writer->estimated_buffered_bytes();
     }
@@ -273,13 +285,31 @@ Status ParquetFileWriter::init() {
     }
     _eval_func = [&](Chunk* chunk, size_t col_idx) { return _column_evaluators[col_idx]->evaluate(chunk); };
 
+    // We fear column names, nullability flags or field ids that are fewer than the columns, because the schema is
+    // built by indexing all of them by column position. So we return an error before we build it.
+    const size_t num_columns = _type_descs.size();
+    const size_t num_field_ids =
+            _writer_options->column_ids.has_value() ? _writer_options->column_ids->size() : num_columns;
+    if (_column_names.size() != num_columns || num_field_ids != num_columns ||
+        (!_nullable.empty() && _nullable.size() != num_columns)) {
+        return Status::InternalError(
+                fmt::format("Parquet writer schema does not match the columns: columns={}, names={}, field ids={}, "
+                            "nullable flags={}",
+                            num_columns, _column_names.size(), num_field_ids, _nullable.size()));
+    }
+
     auto status = [&]() {
-        if (_writer_options->column_ids.has_value()) {
-            ARROW_ASSIGN_OR_RAISE(
-                    _schema, _make_schema(_column_names, _type_descs, _writer_options->column_ids.value(), _nullable));
-        } else {
-            std::vector<FileColumnId> column_ids(_type_descs.size());
-            ARROW_ASSIGN_OR_RAISE(_schema, _make_schema(_column_names, _type_descs, column_ids, _nullable));
+        // Building a schema node throws for a type that parquet-cpp rejects, such as a decimal of a wrong precision.
+        try {
+            if (_writer_options->column_ids.has_value()) {
+                ARROW_ASSIGN_OR_RAISE(_schema, _make_schema(_column_names, _type_descs,
+                                                            _writer_options->column_ids.value(), _nullable));
+            } else {
+                std::vector<FileColumnId> column_ids(_type_descs.size());
+                ARROW_ASSIGN_OR_RAISE(_schema, _make_schema(_column_names, _type_descs, column_ids, _nullable));
+            }
+        } catch (const ::parquet::ParquetException& e) {
+            return arrow::Status::Invalid(e.what());
         }
         return arrow::Status::OK();
     }();
@@ -310,8 +340,10 @@ Status ParquetFileWriter::init() {
 
     _properties = builder.build();
 
-    _writer = ::parquet::ParquetFileWriter::Open(_output_stream, _schema, _properties);
-    return Status::OK();
+    return parquet::call_catching_parquet_exception("open parquet writer error", [&]() {
+        _writer = ::parquet::ParquetFileWriter::Open(_output_stream, _schema, _properties);
+        return Status::OK();
+    });
 }
 
 ParquetFileWriter::~ParquetFileWriter() = default;

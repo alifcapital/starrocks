@@ -19,6 +19,7 @@
 #include <gtest/gtest.h>
 
 #include <future>
+#include <optional>
 #include <thread>
 
 #include "connector/connector_chunk_sink.h"
@@ -321,6 +322,36 @@ TEST_F(IcebergChunkSinkTest, test_factory_selects_writer_by_column_types) {
         EXPECT_FALSE(uses_spill_writer(*sink));
         EXPECT_TRUE(uses_buffer_writer(*sink));
     }
+}
+
+TEST_F(IcebergChunkSinkTest, test_generate_parquet_field_ids_required) {
+    auto make_field = [](int32_t field_id, std::optional<bool> is_optional, std::vector<TIcebergSchemaField> children) {
+        TIcebergSchemaField field;
+        field.__set_field_id(field_id);
+        if (is_optional.has_value()) {
+            field.__set_is_optional(*is_optional);
+        }
+        if (!children.empty()) {
+            field.__set_children(children);
+        }
+        return field;
+    };
+
+    // a struct column that is required and has a required, an optional and a field with no flag; an optional column
+    std::vector<TIcebergSchemaField> fields{
+            make_field(1, false, {make_field(2, false, {}), make_field(3, true, {}), make_field(4, std::nullopt, {})}),
+            make_field(5, true, {})};
+    auto ids = IcebergUtils::generate_parquet_field_ids(fields);
+
+    ASSERT_EQ(2, ids.size());
+    EXPECT_EQ(1, ids[0].field_id);
+    EXPECT_TRUE(ids[0].required);
+    EXPECT_FALSE(ids[1].required);
+    ASSERT_EQ(3, ids[0].children.size());
+    EXPECT_TRUE(ids[0].children[0].required);
+    EXPECT_FALSE(ids[0].children[1].required);
+    // an unset flag means optional
+    EXPECT_FALSE(ids[0].children[2].required);
 }
 
 TEST_F(IcebergChunkSinkTest, test_utils) {

@@ -207,6 +207,8 @@ std::vector<formats::FileColumnId> IcebergUtils::generate_parquet_field_ids(
     std::vector<formats::FileColumnId> file_column_ids(fields.size());
     for (int i = 0; i < fields.size(); ++i) {
         file_column_ids[i].field_id = fields[i].field_id;
+        // An unset flag means optional: we never require a field without an explicit signal from the Iceberg schema.
+        file_column_ids[i].required = fields[i].__isset.is_optional && !fields[i].is_optional;
         file_column_ids[i].children = generate_parquet_field_ids(fields[i].children);
     }
     return file_column_ids;

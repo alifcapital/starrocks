@@ -96,6 +96,18 @@ struct LevelBuilderResult {
     uint8_t* null_bitset;
 };
 
+// Returns true when a field below the node is required, other than the key of a map. Returns true for a node that does
+// not fit the type too, so that check_required_descendants reports it.
+bool has_required_descendant(const TypeDescriptor& type_desc, const ::parquet::schema::NodePtr& node);
+
+// The level builder writes a required nested field without a definition level of its own, so a NULL value of it
+// would shift the values of the field. We fear such a NULL, so the caller runs this check on a column before it
+// writes anything of the column, and we return an error for the first NULL of a required field below `node`. A NULL
+// below a NULL ancestor is not an error because the writer writes no value for it. The requiredness of `node` itself
+// is not checked. `path` is the name of the column, which we extend with the names of the nested fields in the error.
+Status check_required_descendants(const TypeDescriptor& type_desc, const ::parquet::schema::NodePtr& node,
+                                  const ColumnPtr& col, const std::string& path);
+
 // Convert columns of nested type into definition/repetition levels, which are required to write Parquet file.
 class LevelBuilder {
 public:

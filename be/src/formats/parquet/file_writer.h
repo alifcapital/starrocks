@@ -73,6 +73,9 @@ namespace starrocks::parquet {
 struct FileColumnId {
     int32_t field_id = -1;
     std::vector<FileColumnId> children;
+    // The field is NOT NULL. A field nested in a struct, a list or a map is written as a required parquet field only
+    // when this is set. A top level column takes its requiredness from the nullable flags of the writer instead.
+    bool required = false;
 };
 
 class ParquetOutputStream : public arrow::io::OutputStream {
@@ -184,7 +187,7 @@ public:
     virtual bool closed() const = 0;
 
 protected:
-    void _generate_chunk_writer();
+    Status _generate_chunk_writer();
 
     virtual Status _flush_row_group() = 0;
 

@@ -245,7 +245,12 @@ StatusOr<std::shared_ptr<::parquet::WriterProperties>> ParquetBuildHelper::make_
     return builder.build();
 }
 
-// Repetition of subtype in nested type is set by default now, due to type descriptor has no nullable field.
+// The type descriptor has no nullable flag, so a nested field is optional unless the caller marks it required in its
+// FileColumnId. The key of a map is always required.
+static ::parquet::Repetition::type nested_repetition(const FileColumnId& file_column_id) {
+    return file_column_id.required ? ::parquet::Repetition::REQUIRED : ::parquet::Repetition::OPTIONAL;
+}
+
 arrow::Result<::parquet::schema::NodePtr> ParquetBuildHelper::make_schema_node(const std::string& name,
                                                                                const TypeDescriptor& type_desc,
                                                                                ::parquet::Repetition::type rep_type,
@@ -331,9 +336,9 @@ arrow::Result<::parquet::schema::NodePtr> ParquetBuildHelper::make_schema_node(c
         DCHECK(type_desc.children.size() == type_desc.field_names.size());
         ::parquet::schema::NodeVector fields;
         for (size_t i = 0; i < type_desc.children.size(); i++) {
-            ARROW_ASSIGN_OR_RAISE(
-                    auto child, make_schema_node(type_desc.field_names[i], type_desc.children[i],
-                                                 ::parquet::Repetition::OPTIONAL, file_column_id.children[i], options));
+            ARROW_ASSIGN_OR_RAISE(auto child, make_schema_node(type_desc.field_names[i], type_desc.children[i],
+                                                               nested_repetition(file_column_id.children[i]),
+                                                               file_column_id.children[i], options));
             fields.push_back(std::move(child));
         }
         return ::parquet::schema::GroupNode::Make(name, rep_type, fields, ::parquet::ConvertedType::NONE,
@@ -341,9 +346,9 @@ arrow::Result<::parquet::schema::NodePtr> ParquetBuildHelper::make_schema_node(c
     }
     case TYPE_ARRAY: {
         DCHECK(type_desc.children.size() == 1);
-        ARROW_ASSIGN_OR_RAISE(auto element,
-                              make_schema_node("element", type_desc.children[0], ::parquet::Repetition::OPTIONAL,
-                                               file_column_id.children[0], options));
+        ARROW_ASSIGN_OR_RAISE(auto element, make_schema_node("element", type_desc.children[0],
+                                                             nested_repetition(file_column_id.children[0]),
+                                                             file_column_id.children[0], options));
         auto list = ::parquet::schema::GroupNode::Make("list", ::parquet::Repetition::REPEATED, {element});
         return ::parquet::schema::GroupNode::Make(name, rep_type, {list}, ::parquet::LogicalType::List(),
                                                   file_column_id.field_id);
@@ -352,9 +357,9 @@ arrow::Result<::parquet::schema::NodePtr> ParquetBuildHelper::make_schema_node(c
         DCHECK(type_desc.children.size() == 2);
         ARROW_ASSIGN_OR_RAISE(auto key, make_schema_node("key", type_desc.children[0], ::parquet::Repetition::REQUIRED,
                                                          file_column_id.children[0], options))
-        ARROW_ASSIGN_OR_RAISE(auto value,
-                              make_schema_node("value", type_desc.children[1], ::parquet::Repetition::OPTIONAL,
-                                               file_column_id.children[1], options));
+        ARROW_ASSIGN_OR_RAISE(auto value, make_schema_node("value", type_desc.children[1],
+                                                           nested_repetition(file_column_id.children[1]),
+                                                           file_column_id.children[1], options));
         auto key_value = ::parquet::schema::GroupNode::Make("key_value", ::parquet::Repetition::REPEATED, {key, value});
         return ::parquet::schema::GroupNode::Make(name, rep_type, {key_value}, ::parquet::LogicalType::Map(),
                                                   file_column_id.field_id);
@@ -420,19 +425,27 @@ FileWriterBase::FileWriterBase(std::unique_ptr<WritableFile> writable_file,
 }
 
 Status FileWriterBase::init() {
-    _writer = ::parquet::ParquetFileWriter::Open(_outstream, _schema, _properties);
+    RETURN_IF_ERROR(call_catching_parquet_exception("open parquet writer error", [&]() {
+        _writer = ::parquet::ParquetFileWriter::Open(_outstream, _schema, _properties);
+        return Status::OK();
+    }));
     if (_writer == nullptr) {
         return Status::InternalError("Failed to create file writer");
     }
     return Status::OK();
 }
 
-void FileWriterBase::_generate_chunk_writer() {
+Status FileWriterBase::_generate_chunk_writer() {
     DCHECK(_writer != nullptr);
     if (_chunk_writer == nullptr) {
-        auto rg_writer = _writer->AppendBufferedRowGroup();
-        _chunk_writer = std::make_unique<ChunkWriter>(rg_writer, _type_descs, _schema, _eval_func, _state->timezone());
+        return call_catching_parquet_exception("append row group error", [&]() {
+            auto rg_writer = _writer->AppendBufferedRowGroup();
+            _chunk_writer =
+                    std::make_unique<ChunkWriter>(rg_writer, _type_descs, _schema, _eval_func, _state->timezone());
+            return Status::OK();
+        });
     }
+    return Status::OK();
 }
 
 Status FileWriterBase::write(Chunk* chunk) {
@@ -440,7 +453,7 @@ Status FileWriterBase::write(Chunk* chunk) {
         return Status::OK();
     }
 
-    _generate_chunk_writer();
+    RETURN_IF_ERROR(_generate_chunk_writer());
     RETURN_IF_ERROR(_chunk_writer->write(chunk));
 
     if (_chunk_writer->estimated_buffered_bytes() > _max_row_group_size && !is_last_row_group()) {
@@ -472,12 +485,13 @@ Status FileWriterBase::split_offsets(std::vector<int64_t>& splitOffsets) const {
 
 Status SyncFileWriter::_flush_row_group() {
     if (_chunk_writer != nullptr) {
-        try {
+        auto st = call_catching_parquet_exception("flush rowgroup error", [&]() {
             _chunk_writer->close();
-        } catch (const ::parquet::ParquetStatusException& e) {
+            return Status::OK();
+        });
+        if (!st.ok()) {
             _chunk_writer.reset();
             _closed = true;
-            auto st = Status::IOError(fmt::format("{}: {}", "flush rowgroup error", e.what()));
             LOG(WARNING) << st;
             return st;
         }
@@ -493,11 +507,13 @@ Status SyncFileWriter::close() {
     }
 
     RETURN_IF_ERROR(_flush_row_group());
-    try {
+    auto close_st = call_catching_parquet_exception("close writer error", [&]() {
         _writer->Close();
-    } catch (const ::parquet::ParquetStatusException& e) {
-        LOG(WARNING) << "close writer error: " << e.what();
-        return Status::IOError(fmt::format("{}: {}", "close writer error", e.what()));
+        return Status::OK();
+    });
+    if (!close_st.ok()) {
+        LOG(WARNING) << close_st;
+        return close_st;
     }
 
     auto arrow_st = _outstream->Close();
@@ -537,11 +553,13 @@ Status AsyncFileWriter::_flush_row_group() {
         SCOPED_THREAD_LOCAL_MEM_TRACKER_SETTER(_state->instance_mem_tracker());
         SCOPED_TIMER(_io_timer);
         if (_chunk_writer != nullptr) {
-            try {
+            auto st = call_catching_parquet_exception("flush rowgroup error", [&]() {
                 _chunk_writer->close();
-            } catch (const ::parquet::ParquetStatusException& e) {
-                LOG(WARNING) << "flush row group error: " << e.what();
-                set_io_status(Status::IOError(fmt::format("{}: {}", "flush rowgroup error", e.what())));
+                return Status::OK();
+            });
+            if (!st.ok()) {
+                LOG(WARNING) << "flush row group error: " << st;
+                set_io_status(st);
             }
             _chunk_writer = nullptr;
         }
@@ -580,11 +598,13 @@ Status AsyncFileWriter::close(RuntimeState* state,
             // set closed to true anyway
             _closed.store(true);
         });
-        try {
+        auto close_st = call_catching_parquet_exception("close writer error", [&]() {
             _writer->Close();
-        } catch (const ::parquet::ParquetStatusException& e) {
-            LOG(WARNING) << "close writer error: " << e.what();
-            set_io_status(Status::IOError(fmt::format("{}: {}", "close writer error", e.what())));
+            return Status::OK();
+        });
+        if (!close_st.ok()) {
+            LOG(WARNING) << "close writer error: " << close_st;
+            set_io_status(close_st);
         }
         _chunk_writer = nullptr;
         _file_metadata = _writer->metadata();

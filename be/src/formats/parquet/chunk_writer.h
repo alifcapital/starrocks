@@ -20,6 +20,7 @@
 #include <arrow/io/api.h>
 #include <arrow/io/file.h>
 #include <arrow/io/interfaces.h>
+#include <fmt/format.h>
 #include <gen_cpp/DataSinks_types.h>
 #include <parquet/api/reader.h>
 #include <parquet/api/writer.h>
@@ -29,8 +30,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <exception>
 #include <functional>
 #include <memory>
+#include <new>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -55,6 +59,27 @@ class StatusOr;
 
 namespace starrocks::parquet {
 
+// parquet-cpp reports an error, such as a failed allocation or a failed write to the output stream, by throwing.
+// Nothing above the writer catches it, so we fear that it terminates the BE. We run every call into the parquet
+// writer through this function and return the exception as a Status. We do not convert std::bad_alloc: the memory
+// limit of a query is reported with it, and the caller handles it. An arrow out-of-memory status becomes a memory
+// limit error.
+template <typename Fn>
+Status call_catching_parquet_exception(std::string_view action, Fn&& fn) {
+    try {
+        return fn();
+    } catch (const std::bad_alloc&) {
+        throw;
+    } catch (const ::parquet::ParquetStatusException& e) {
+        if (e.status().IsOutOfMemory()) {
+            return Status::MemoryLimitExceeded(fmt::format("{}: {}", action, e.what()));
+        }
+        return Status::IOError(fmt::format("{}: {}", action, e.what()));
+    } catch (const std::exception& e) {
+        return Status::IOError(fmt::format("{}: {}", action, e.what()));
+    }
+}
+
 // Wraps parquet::RowGroupWriter.
 // Write chunks into buffer. Flush on closing.
 class ChunkWriter {
@@ -71,6 +96,8 @@ public:
     int64_t estimated_buffered_bytes() const;
 
 private:
+    Status _write(Chunk* chunk);
+
     ::parquet::RowGroupWriter* _rg_writer;
     std::vector<TypeDescriptor> _type_descs;
     std::shared_ptr<::parquet::schema::GroupNode> _schema;
