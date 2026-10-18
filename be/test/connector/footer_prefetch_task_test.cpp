@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "cache/datacache.h"
+#include "cache/disk_cache/block_cache.h"
 #include "cache/disk_cache/test_cache_utils.h"
 #include "cache/mem_cache/lrucache_engine.h"
 #include "cache/mem_cache/page_cache.h"
@@ -173,9 +174,10 @@ protected:
         DataCache::GetInstance()->set_page_cache(_page_cache);
     }
 
+    // The process has a block cache all the time, initialized or not, and the tests after these expect one.
     void TearDown() override {
         DataCache::GetInstance()->set_page_cache(nullptr);
-        DataCache::GetInstance()->set_block_cache(nullptr);
+        DataCache::GetInstance()->set_block_cache(std::make_shared<BlockCache>());
     }
 
     std::shared_ptr<LRUCacheEngine> _lru_engine;
@@ -237,7 +239,18 @@ TEST_F(FooterPrefetchWarmCacheTest, WarmFooterPopulatesBlockCacheOnceThenHits) {
 // will not read that way.
 class FooterPrefetchBuildItemsTest : public FooterPrefetchWarmCacheTest {
 protected:
-    void SetUp() override { install_page_cache(); }
+    // The test environment turns the storage page cache off, and the builder warms the page cache only when it is on.
+    void SetUp() override {
+        _disable_page_cache = config::disable_storage_page_cache;
+        config::disable_storage_page_cache = false;
+        install_page_cache();
+    }
+    void TearDown() override {
+        config::disable_storage_page_cache = _disable_page_cache;
+        FooterPrefetchWarmCacheTest::TearDown();
+    }
+
+    bool _disable_page_cache = true;
 };
 
 TEST_F(FooterPrefetchBuildItemsTest, SkipsRangesTheNativeParquetReaderWillNotServe) {
@@ -355,7 +368,12 @@ TEST_F(FooterPrefetchBuildItemsTest, FailsSoftWhenFileSystemCannotBeCreated) {
     hdfs_scan_node.__set_tuple_id(0);
     HiveDataSourceProvider provider(0, hdfs_scan_node);
 
-    auto params = make_parquet_range("bogus-scheme://bucket/x.parquet");
+    const std::string path = "bogus-scheme://bucket/x.parquet";
+    // An unknown scheme falls back to the Hadoop client where the build has one, which then creates the file system.
+    if (FileSystem::CreateUniqueFromString(path, FSOptions()).ok()) {
+        GTEST_SKIP() << "the file system of an unknown scheme is created here";
+    }
+    auto params = make_parquet_range(path);
     FooterPrefetchPlan plan = provider.build_footer_prefetch_items(state.get(), {params});
     EXPECT_TRUE(plan.items.empty());
 }
