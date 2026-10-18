@@ -55,6 +55,8 @@ public:
         // large io range begin, so a read that crosses the end of this buffer can continue in the next one. It is
         // false when a hole follows the buffer, because the caller reads the hole by other means.
         bool has_next_piece = false;
+        // The bytes of the buffer. A buffer is loaded when the capacity of the vector is not 0, and get_bytes() sets it
+        // only after the read of the bytes succeeded.
         std::vector<uint8_t> buffer;
         // True for a buffer that split_shared_buffer() made. The caller of split_shared_buffer() has chosen
         // the bytes that the buffer covers, so no one needs to choose them again.

@@ -120,6 +120,11 @@ public:
         if (offset < 0 || count < 0 || offset + count > _size) {
             return Status::EndOfFile("read out of the file");
         }
+        if (fail_next_reads > 0) {
+            fail_next_reads -= 1;
+            failed_reads += 1;
+            return Status::IOError("the remote read fails");
+        }
         reads.emplace_back(offset, count);
         bytes += count;
         memcpy(out, _contents + offset, count);
@@ -135,9 +140,12 @@ public:
 
     StatusOr<int64_t> get_size() override { return _size; }
 
-    // (offset, size) of each read, in the order of the reads.
+    // (offset, size) of each read that succeeded, in the order of the reads.
     std::vector<std::pair<int64_t, int64_t>> reads;
     int64_t bytes = 0;
+    // The next reads fail with an IO error and are not in `reads`.
+    int64_t fail_next_reads = 0;
+    int64_t failed_reads = 0;
 
 private:
     const char* _contents;
@@ -1087,6 +1095,33 @@ struct SkipCachedBlocksCase {
     std::shared_ptr<io::SharedBufferedInputStream> sb_stream;
     std::unique_ptr<io::CacheInputStream> cache_stream;
 };
+
+// A load of a shared buffer that fails must not make the buffer look loaded: the next read would copy the bytes that no
+// one wrote and save them in the cache. The next read loads the buffer again, and the cache gets the bytes of the file.
+TEST_F(CacheInputStreamTest, test_shared_buffer_failed_load_is_retried_and_never_populates_unloaded_bytes) {
+    const int64_t block_count = 4;
+    SkipCachedBlocksCase c("test_shared_buffer_failed_load_is_retried_and_never_populates_unloaded_bytes",
+                           block_size * block_count);
+    c.set_io_range(0, block_size * block_count);
+
+    c.remote->fail_next_reads = 1;
+    std::string buffer(block_size, 0);
+    ASSERT_OK(c.cache_stream->seek(block_size));
+    ASSERT_FALSE(c.cache_stream->read(buffer.data(), block_size).ok());
+    ASSERT_EQ(1, c.remote->failed_reads);
+    ASSERT_TRUE(c.remote->reads.empty());
+    ASSERT_EQ(0, c.engine->write_calls);
+    ASSERT_TRUE(c.engine->blocks.empty());
+
+    ASSERT_NO_FATAL_FAILURE(c.read_and_check(block_size, block_size));
+    ASSERT_EQ((Reads{{0, block_size * block_count}}), c.remote->reads);
+    ASSERT_NO_FATAL_FAILURE(c.read_and_check(0, block_size * block_count));
+    ASSERT_EQ(1u, c.remote->reads.size());
+    ASSERT_EQ(static_cast<size_t>(block_count), c.engine->blocks.size());
+    for (int64_t i = 0; i < block_count; ++i) {
+        ASSERT_EQ(c.data.substr(i * block_size, block_size), c.engine->blocks[c.block_key(i)]) << "block " << i;
+    }
+}
 
 TEST_F(CacheInputStreamTest, test_shared_buffer_cold_read_loads_whole_range) {
     const int64_t block_count = 8;

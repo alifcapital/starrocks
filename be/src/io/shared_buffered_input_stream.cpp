@@ -333,6 +333,14 @@ Status SharedBufferedInputStream::get_bytes(const uint8_t** buffer, size_t offse
     if (sb.buffer.capacity() == 0) {
         RETURN_IF_ERROR(CurrentThread::mem_tracker()->check_mem_limit("read into shared buffer"));
         SCOPED_RAW_TIMER(&_shared_io_timer);
+        // The readers of a buffer take a capacity for a loaded buffer, and the data cache saves the bytes of a loaded
+        // buffer. We fear that a read which fails leaves the reserved capacity behind, and then the next read serves
+        // bytes that no one wrote. So we read into a vector of our own and give it to the buffer only after the read
+        // succeeds. A failed read leaves the buffer unloaded, and the next read of the range loads it again.
+        std::vector<uint8_t> loaded;
+        loaded.reserve(sb.size);
+        RETURN_IF_ERROR(_stream->read_at_fully(sb.offset, loaded.data(), sb.size));
+        sb.buffer.swap(loaded);
         _shared_io_count += 1;
         _shared_io_bytes += sb.size;
         if (sb.large) {
@@ -344,8 +352,6 @@ Status SharedBufferedInputStream::get_bytes(const uint8_t** buffer, size_t offse
             // we will count how many extra bytes we read because of alignment.
             _shared_align_io_bytes += sb.size - sb.raw_size;
         }
-        sb.buffer.reserve(sb.size);
-        RETURN_IF_ERROR(_stream->read_at_fully(sb.offset, sb.buffer.data(), sb.size));
     }
     if (sb.large) {
         _large_used_bytes += count;

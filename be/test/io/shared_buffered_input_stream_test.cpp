@@ -47,6 +47,12 @@ public:
         if (offset < 0 || count < 0 || offset + count > static_cast<int64_t>(_contents.size())) {
             return Status::EndOfFile("read out of the file");
         }
+        if (fail_next_reads > 0) {
+            // The read leaves the bytes of `out` as they were, like a stream that fails before it fills them.
+            fail_next_reads -= 1;
+            failed_reads += 1;
+            return Status::IOError("the remote read fails");
+        }
         reads.emplace_back(offset, count);
         memcpy(out, _contents.data() + offset, count);
         return Status::OK();
@@ -61,8 +67,11 @@ public:
 
     StatusOr<int64_t> get_size() override { return _contents.size(); }
 
-    // (offset, size) of each read, in the order of the reads.
+    // (offset, size) of each read that succeeded, in the order of the reads.
     std::vector<std::pair<int64_t, int64_t>> reads;
+    // The next reads fail with an IO error and are not in `reads`.
+    int64_t fail_next_reads = 0;
+    int64_t failed_reads = 0;
 
 private:
     std::string _contents;
@@ -114,6 +123,35 @@ struct SplitCase {
     std::shared_ptr<RecordingInputStream> remote;
     std::shared_ptr<io::SharedBufferedInputStream> stream;
 };
+
+// A read that fails must not leave the buffer looking loaded, because the next read would serve the bytes that no one
+// wrote. The buffer stays unloaded, the next read loads it again, and the counters count only the load that worked.
+TEST_F(SharedBufferedInputStreamTest, test_failed_load_leaves_the_buffer_unloaded_and_the_next_read_retries) {
+    constexpr int64_t KB = SplitCase::KB;
+    SplitCase c;
+    auto sb = c.register_buffer();
+    ASSERT_EQ(0, sb->buffer.capacity());
+
+    c.remote->fail_next_reads = 1;
+    std::string out(10 * KB, 'x');
+    ASSERT_FALSE(c.stream->read_at_fully(300 * KB, out.data(), out.size()).ok());
+    ASSERT_EQ(1, c.remote->failed_reads);
+    ASSERT_EQ(0, sb->buffer.capacity());
+    ASSERT_EQ(0, c.stream->shared_io_count());
+    ASSERT_EQ(0, c.stream->shared_io_bytes());
+    // the buffer is still registered and unloaded, so a zero-copy peek does not serve it
+    ASSERT_OK(c.stream->seek(300 * KB));
+    ASSERT_TRUE(c.stream->peek(10 * KB).status().is_not_supported());
+
+    // the same range again loads the buffer with a request of its own and returns the bytes of the file
+    ASSERT_NO_FATAL_FAILURE(c.read_and_check(300 * KB, 10 * KB));
+    ASSERT_EQ((Reads{{0, 1024 * KB}}), c.remote->reads);
+    ASSERT_LT(0, sb->buffer.capacity());
+    ASSERT_EQ(1, c.stream->shared_io_count());
+    ASSERT_EQ(1024 * KB, c.stream->shared_io_bytes());
+    ASSERT_NO_FATAL_FAILURE(c.read_and_check(880 * KB, 10 * KB));
+    ASSERT_EQ(1u, c.remote->reads.size());
+}
 
 TEST_F(SharedBufferedInputStreamTest, test_split_shared_buffer_lookups) {
     constexpr int64_t KB = SplitCase::KB;
