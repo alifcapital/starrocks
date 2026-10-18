@@ -171,7 +171,13 @@ Status LogBlockContainer::close() {
 Status LogBlockContainer::append_data(const std::vector<Slice>& data, size_t total_size) {
     auto* dir = _dir.get();
     RETURN_IF(!try_acquire_sizes(total_size), DISK_ACQUIRE_ERROR(total_size, dir));
-    RETURN_IF_ERROR(_writable_file->pre_allocate(total_size));
+    // A direct IO write must not extend the file, so we allocate its space first. A buffered write goes to the page
+    // cache, and the filesystem allocates the space when it writes the pages out. We fear an allocation for every
+    // buffered append: on XFS each one is a metadata transaction, and the spill writes wait for the filesystem
+    // instead of the page cache.
+    if (_direct_io) {
+        RETURN_IF_ERROR(_writable_file->pre_allocate(total_size));
+    }
     auto scope = IOProfiler::scope(IOProfiler::TAG::TAG_SPILL, 0);
     RETURN_IF_ERROR(_writable_file->appendv(data.data(), data.size()));
     _data_size += total_size;
