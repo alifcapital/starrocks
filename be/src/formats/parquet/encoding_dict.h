@@ -156,6 +156,10 @@ public:
         return Status::OK();
     }
 
+    // `src_data` holds the `num_non_nulls` values of the batch and must have one more readable element after them.
+    // We fear a batch that ends with NULL rows: SIMD::Expand::expand_load copies the next source element for
+    // every row, NULL rows included, so it reads the element after the last value. A caller has to allocate that
+    // element, or the read goes past the buffer.
     template <class DataType>
     void assign_data_with_nulls(size_t count, size_t num_non_nulls, const uint8_t* nulls, const DataType* src_data,
                                 DataType* dst_data) {
@@ -317,15 +321,34 @@ public:
                 return Status::InternalError("Index not in dictionary bounds");
             }
 
+            // We skip the dictionary lookup of a row the filter drops. We fear a reader that looks at every row
+            // before the dropped rows are removed, for example a converter that multiplies each value by a
+            // scale factor: it would read memory that nobody wrote and overflow on it. So a dropped row gets
+            // zero, and it is also marked NULL, as the Slice specialization does, so that a reader which skips
+            // NULL rows skips it. `_next_null_column` has already written the NULL flags of this batch.
+            uint8_t* null_data = nullable_column->null_column_raw_ptr()->get_data().data() + cur_size;
             size_t cnt = 0;
-            for (int i = 0; i < count; i++) {
-                if (filter[i] & !is_nulls[i]) {
-                    data[i] = _dict[_indexes[cnt]];
+            size_t num_dropped = 0;
+            for (size_t i = 0; i < count; i++) {
+                if (is_nulls[i]) {
+                    continue;
                 }
-                cnt += !is_nulls[i];
+                if (filter[i]) {
+                    data[i] = _dict[_indexes[cnt]];
+                } else {
+                    data[i] = T{};
+                    null_data[i] = 1;
+                    num_dropped++;
+                }
+                cnt++;
+            }
+            if (num_dropped > 0) {
+                nullable_column->set_has_null(true);
             }
         } else {
-            _temp_read_data.resize(read_count);
+            // assign_data_with_nulls reads one element after the last value when the batch ends with NULL rows,
+            // so the buffer holds one more element than the values.
+            _temp_read_data.resize(read_count + 1);
             auto ret =
                     _rle_batch_reader.GetBatchWithDict(_dict.data(), _dict.size(), _temp_read_data.data(), read_count);
             if (UNLIKELY(ret <= 0)) {
@@ -366,10 +389,28 @@ private:
                 return Status::InternalError("Index not in dictionary bounds");
             }
 
-            for (int i = 0; i < count; i++) {
+            // A dropped row gets zero and, in a nullable column, a NULL flag, for the reason given in
+            // next_value_batch_with_nulls. The null column has just got `count` default entries, which are the
+            // last ones.
+            uint8_t* null_data = nullptr;
+            if (dst->is_nullable()) {
+                auto& null_flags = down_cast<NullableColumn*>(dst)->null_column_raw_ptr()->get_data();
+                null_data = null_flags.data() + null_flags.size() - count;
+            }
+            size_t num_dropped = 0;
+            for (size_t i = 0; i < count; i++) {
                 if (filter[i]) {
                     data[i] = _dict[_indexes[i]];
+                } else {
+                    data[i] = T{};
+                    if (null_data != nullptr) {
+                        null_data[i] = 1;
+                    }
+                    num_dropped++;
                 }
+            }
+            if (null_data != nullptr && num_dropped > 0) {
+                down_cast<NullableColumn*>(dst)->set_has_null(true);
             }
         } else {
             auto ret = _rle_batch_reader.GetBatchWithDict(_dict.data(), _dict.size(), data, count);

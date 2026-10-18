@@ -25,6 +25,7 @@
 #include "column/fixed_length_column.h"
 #include "column/nullable_column.h"
 #include "common/config.h"
+#include "formats/parquet/encoding_dict.h"
 #include "formats/parquet/types.h"
 #include "util/byte_stream_split.h"
 
@@ -382,6 +383,365 @@ TEST_F(ParquetEncodingTest, Int32) {
 
         DecoderChecker<int32_t, true>::check(values, encoder->build(), decoder.get());
     }
+}
+
+namespace {
+
+template <typename T>
+constexpr T kDictSentinel = static_cast<T>(-12345);
+
+// The encoder owns the page memory, so it has to outlive the decoder.
+template <tparquet::Type::type PT>
+void make_numeric_dict_page(const std::vector<typename PhysicalTypeTraits<PT>::CppType>& values,
+                            std::unique_ptr<Encoder>* encoder, std::unique_ptr<Decoder>* decoder) {
+    const EncodingInfo* plain_encoding = nullptr;
+    const EncodingInfo* dict_encoding = nullptr;
+    (void)EncodingInfo::get(PT, tparquet::Encoding::PLAIN, &plain_encoding);
+    (void)EncodingInfo::get(PT, tparquet::Encoding::RLE_DICTIONARY, &dict_encoding);
+    ASSERT_TRUE(plain_encoding != nullptr);
+    ASSERT_TRUE(dict_encoding != nullptr);
+
+    Status st = dict_encoding->create_encoder(encoder);
+    ASSERT_TRUE(st.ok()) << st.to_string();
+    st = (*encoder)->append(reinterpret_cast<const uint8_t*>(values.data()), values.size());
+    ASSERT_TRUE(st.ok()) << st.to_string();
+
+    std::unique_ptr<Encoder> dict_encoder;
+    st = plain_encoding->create_encoder(&dict_encoder);
+    ASSERT_TRUE(st.ok()) << st.to_string();
+    size_t num_dicts = 0;
+    st = (*encoder)->encode_dict(dict_encoder.get(), &num_dicts);
+    ASSERT_TRUE(st.ok()) << st.to_string();
+
+    std::unique_ptr<Decoder> dict_decoder;
+    st = plain_encoding->create_decoder(&dict_decoder);
+    ASSERT_TRUE(st.ok()) << st.to_string();
+    st = dict_decoder->set_data(dict_encoder->build());
+    ASSERT_TRUE(st.ok()) << st.to_string();
+
+    st = dict_encoding->create_decoder(decoder);
+    ASSERT_TRUE(st.ok()) << st.to_string();
+    st = (*decoder)->set_dict(config::vector_chunk_size, num_dicts, dict_decoder.get());
+    ASSERT_TRUE(st.ok()) << st.to_string();
+    st = (*decoder)->set_data((*encoder)->build());
+    ASSERT_TRUE(st.ok()) << st.to_string();
+}
+
+// A decoder appends rows to a column without initializing them, so a row it does not write keeps whatever the
+// memory held. We fill the capacity of the column with a sentinel before the decoding, so that such a row shows
+// the sentinel and the test does not depend on what the allocator returns.
+template <typename T>
+auto make_sentinel_data_column(size_t capacity) {
+    auto column = FixedLengthColumn<T>::create();
+    auto& data = column->get_data();
+    data.resize(capacity, kDictSentinel<T>);
+    data.clear();
+    return column;
+}
+
+NullInfos make_dict_null_infos(const std::vector<uint8_t>& nulls) {
+    NullInfos null_infos;
+    null_infos.reset_with_capacity(nulls.size());
+    size_t num_ranges = nulls.empty() ? 0 : 1;
+    for (size_t i = 0; i < nulls.size(); ++i) {
+        null_infos.nulls_data()[i] = nulls[i];
+        null_infos.num_nulls += nulls[i];
+        if (i > 0 && nulls[i] != nulls[i - 1]) {
+            num_ranges++;
+        }
+    }
+    null_infos.num_ranges = num_ranges;
+    return null_infos;
+}
+
+// Checks the rows `[prev_rows, prev_rows + nulls.size())` of `dst`. `values` are the values of the rows that are
+// not NULL in the page, in page order. A row the filter drops has to be zero, and NULL when `dst` is nullable.
+// A row that is NULL in the page has to be NULL. The value of such a row is not defined, so it is not checked.
+template <typename T>
+void verify_dict_batch(Column* dst, size_t prev_rows, const std::vector<uint8_t>& nulls,
+                       const std::vector<uint8_t>* filter, const std::vector<T>& values) {
+    const size_t count = nulls.size();
+    ASSERT_EQ(prev_rows + count, dst->size());
+    NullableColumn* nullable = dst->is_nullable() ? down_cast<NullableColumn*>(dst) : nullptr;
+    const Column* data_column = nullable != nullptr ? nullable->data_column_raw_ptr() : dst;
+    ASSERT_EQ(prev_rows + count, data_column->size());
+    if (nullable != nullptr) {
+        ASSERT_EQ(prev_rows + count, nullable->null_column_raw_ptr()->size());
+    }
+    const T* data = reinterpret_cast<const T*>(data_column->raw_data());
+
+    size_t next_value = 0;
+    bool expect_null_row = false;
+    for (size_t i = 0; i < count; ++i) {
+        const size_t row = prev_rows + i;
+        if (nulls[i]) {
+            ASSERT_TRUE(nullable != nullptr && nullable->is_null(row)) << "row " << row;
+            expect_null_row = true;
+            continue;
+        }
+        const T expected = values[next_value++];
+        if (filter != nullptr && !(*filter)[i]) {
+            if (nullable != nullptr) {
+                ASSERT_TRUE(nullable->is_null(row)) << "row " << row;
+                expect_null_row = true;
+            }
+            ASSERT_EQ(T(0), data[row]) << "row " << row;
+        } else {
+            if (nullable != nullptr) {
+                ASSERT_FALSE(nullable->is_null(row)) << "row " << row;
+            }
+            ASSERT_EQ(expected, data[row]) << "row " << row;
+        }
+    }
+    ASSERT_EQ(values.size(), next_value);
+    if (expect_null_row) {
+        ASSERT_TRUE(nullable->has_null());
+    }
+}
+
+// Decodes `count` rows of a page without NULL rows, the way the reader does for a required column or for a page
+// that has no nulls, appends them to `dst` and checks them.
+template <typename T>
+void decode_and_verify_dict_batch(Decoder* decoder, const std::vector<T>& page_values, size_t* page_pos, size_t count,
+                                  const std::vector<uint8_t>* filter, Column* dst) {
+    const size_t prev_rows = dst->size();
+    Status st = decoder->next_batch(count, ColumnContentType::VALUE, dst, filter != nullptr ? filter->data() : nullptr);
+    ASSERT_TRUE(st.ok()) << st.to_string();
+    const std::vector<T> values(page_values.begin() + *page_pos, page_values.begin() + *page_pos + count);
+    *page_pos += count;
+    ASSERT_NO_FATAL_FAILURE(verify_dict_batch<T>(dst, prev_rows, std::vector<uint8_t>(count, 0), filter, values));
+}
+
+// Decodes one batch of a page with NULL rows, appends it to `dst` and checks it. The page holds the values of the
+// rows that are not NULL only.
+template <typename T>
+void decode_and_verify_dict_batch_with_nulls(Decoder* decoder, const std::vector<T>& page_values, size_t* page_pos,
+                                             const std::vector<uint8_t>& nulls, const std::vector<uint8_t>* filter,
+                                             Column* dst) {
+    const size_t prev_rows = dst->size();
+    NullInfos null_infos = make_dict_null_infos(nulls);
+    Status st = decoder->next_batch_with_nulls(nulls.size(), null_infos, ColumnContentType::VALUE, dst,
+                                               filter != nullptr ? filter->data() : nullptr);
+    ASSERT_TRUE(st.ok()) << st.to_string();
+    const size_t num_values = nulls.size() - null_infos.num_nulls;
+    const std::vector<T> values(page_values.begin() + *page_pos, page_values.begin() + *page_pos + num_values);
+    *page_pos += num_values;
+    ASSERT_NO_FATAL_FAILURE(verify_dict_batch<T>(dst, prev_rows, nulls, filter, values));
+}
+
+template <typename T>
+std::vector<T> make_dict_page_values(size_t count) {
+    std::vector<T> values;
+    for (size_t i = 0; i < count; ++i) {
+        values.push_back(static_cast<T>((i * 3 % 5 + 1) * 100));
+    }
+    return values;
+}
+
+template <tparquet::Type::type PT>
+void check_dict_filter_without_nulls(bool nullable_dst) {
+    using T = typename PhysicalTypeTraits<PT>::CppType;
+    const std::vector<T> values = make_dict_page_values<T>(24);
+    std::unique_ptr<Encoder> encoder;
+    std::unique_ptr<Decoder> decoder;
+    ASSERT_NO_FATAL_FAILURE(make_numeric_dict_page<PT>(values, &encoder, &decoder));
+
+    auto nullable_column = NullableColumn::create(make_sentinel_data_column<T>(values.size()), NullColumn::create());
+    auto plain_column = make_sentinel_data_column<T>(values.size());
+    Column* dst = nullable_dst ? static_cast<Column*>(nullable_column.get()) : static_cast<Column*>(plain_column.get());
+    size_t page_pos = 0;
+
+    // Most rows are dropped, as it is when the filter is selective. The first and the last row are dropped too.
+    {
+        const std::vector<uint8_t> filter = {0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 0};
+        ASSERT_NO_FATAL_FAILURE(decode_and_verify_dict_batch<T>(decoder.get(), values, &page_pos, 12, &filter, dst));
+    }
+    // No filter: the batch after a filtered one has to start at the right value, and nothing is dropped.
+    ASSERT_NO_FATAL_FAILURE(decode_and_verify_dict_batch<T>(decoder.get(), values, &page_pos, 4, nullptr, dst));
+    // Every row is dropped, but the decoder still has to move over all the values.
+    {
+        const std::vector<uint8_t> filter(4, 0);
+        ASSERT_NO_FATAL_FAILURE(decode_and_verify_dict_batch<T>(decoder.get(), values, &page_pos, 4, &filter, dst));
+    }
+    ASSERT_EQ(20U, dst->size());
+
+    // Every row is kept: nothing is dropped, so no row may become NULL.
+    auto kept_column = NullableColumn::create(make_sentinel_data_column<T>(4), NullColumn::create());
+    {
+        const std::vector<uint8_t> filter(4, 1);
+        ASSERT_NO_FATAL_FAILURE(
+                decode_and_verify_dict_batch<T>(decoder.get(), values, &page_pos, 4, &filter, kept_column.get()));
+        ASSERT_FALSE(kept_column->has_null());
+    }
+    ASSERT_EQ(values.size(), page_pos);
+}
+
+struct DictBatchWithNulls {
+    std::vector<uint8_t> nulls;
+    // Empty: the batch is decoded without a filter.
+    std::vector<uint8_t> filter;
+};
+
+template <tparquet::Type::type PT>
+void check_dict_filter_with_nulls() {
+    using T = typename PhysicalTypeTraits<PT>::CppType;
+    const std::vector<DictBatchWithNulls> batches = {
+            // More than two runs of NULL rows: the decoder reads the values of the whole batch at once. A kept
+            // row, a dropped row, a NULL row that is kept and a NULL row that is dropped are all there.
+            {{0, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1}, {1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 0}},
+            // No filter: the batch after a filtered one has to start at the right value.
+            {{0, 1, 0, 1, 0}, {}},
+            // Every row is dropped.
+            {{1, 0, 0, 1, 0, 0}, {0, 0, 0, 0, 0, 0}},
+            // Two runs or less: the decoder reads one run of values at a time. A run of NULL rows first.
+            {{1, 1, 0, 0, 0, 0, 0, 0}, {1, 1, 1, 0, 0, 1, 1, 0}},
+            // A run of NULL rows last.
+            {{0, 0, 0, 0, 1, 1}, {0, 1, 0, 1, 1, 0}},
+    };
+    size_t num_rows = 0;
+    size_t num_values = 0;
+    for (const auto& batch : batches) {
+        num_rows += batch.nulls.size();
+        for (uint8_t is_null : batch.nulls) {
+            num_values += !is_null;
+        }
+    }
+    const std::vector<T> values = make_dict_page_values<T>(num_values);
+    std::unique_ptr<Encoder> encoder;
+    std::unique_ptr<Decoder> decoder;
+    ASSERT_NO_FATAL_FAILURE(make_numeric_dict_page<PT>(values, &encoder, &decoder));
+    // next_batch_with_nulls() hands the filter to the decoder only for a dictionary bigger than the L2 cache, so
+    // the threshold is dropped to reach the filtered path with a small dictionary.
+    down_cast<CacheAwareDictDecoder*>(decoder.get())->_dict_size_threshold = 0;
+
+    auto dst = NullableColumn::create(make_sentinel_data_column<T>(num_rows), NullColumn::create());
+    size_t page_pos = 0;
+    for (const auto& batch : batches) {
+        ASSERT_NO_FATAL_FAILURE(
+                decode_and_verify_dict_batch_with_nulls<T>(decoder.get(), values, &page_pos, batch.nulls,
+                                                           batch.filter.empty() ? nullptr : &batch.filter, dst.get()));
+    }
+    ASSERT_EQ(num_rows, dst->size());
+    ASSERT_EQ(values.size(), page_pos);
+}
+
+// Every third row is NULL and the batch ends with a run of NULL rows. There are enough values for the vectorized
+// loop of expand_load and for its scalar tail, which runs over the trailing NULL rows.
+std::vector<uint8_t> make_nulls_with_trailing_nulls() {
+    std::vector<uint8_t> nulls(37, 0);
+    for (size_t i = 0; i < nulls.size(); ++i) {
+        nulls[i] = (i % 3 == 1) || i + 6 >= nulls.size();
+    }
+    return nulls;
+}
+
+size_t count_non_null_rows(const std::vector<uint8_t>& nulls) {
+    size_t num = 0;
+    for (uint8_t is_null : nulls) {
+        num += !is_null;
+    }
+    return num;
+}
+
+// We fear that expand_load reads the source element after the last value when a batch ends with NULL rows. So the
+// buffer that holds the values of the batch is made as small as the values: a build with ASAN reports the read,
+// and without a sanitizer the check of the buffer size fails if the decoder does not allocate the extra element.
+template <tparquet::Type::type PT>
+void check_dict_value_batch_ending_with_nulls() {
+    using T = typename PhysicalTypeTraits<PT>::CppType;
+    const std::vector<uint8_t> nulls = make_nulls_with_trailing_nulls();
+    const size_t num_values = count_non_null_rows(nulls);
+    const std::vector<T> values = make_dict_page_values<T>(num_values);
+    std::unique_ptr<Encoder> encoder;
+    std::unique_ptr<Decoder> decoder;
+    ASSERT_NO_FATAL_FAILURE(make_numeric_dict_page<PT>(values, &encoder, &decoder));
+
+    auto* dict_decoder = down_cast<DictDecoder<T>*>(decoder.get());
+    dict_decoder->_temp_read_data.assign(num_values, T(0));
+    dict_decoder->_temp_read_data.shrink_to_fit();
+
+    auto dst = NullableColumn::create(make_sentinel_data_column<T>(nulls.size()), NullColumn::create());
+    size_t page_pos = 0;
+    ASSERT_NO_FATAL_FAILURE(
+            decode_and_verify_dict_batch_with_nulls<T>(decoder.get(), values, &page_pos, nulls, nullptr, dst.get()));
+    ASSERT_EQ(num_values, page_pos);
+    ASSERT_TRUE(dst->has_null());
+    ASSERT_EQ(num_values + 1, dict_decoder->_temp_read_data.size());
+}
+
+// The dictionary codes of the same batch go through expand_load too.
+template <tparquet::Type::type PT>
+void check_dict_code_batch_ending_with_nulls() {
+    using T = typename PhysicalTypeTraits<PT>::CppType;
+    const std::vector<uint8_t> nulls = make_nulls_with_trailing_nulls();
+    const size_t num_values = count_non_null_rows(nulls);
+    const std::vector<T> values = make_dict_page_values<T>(num_values);
+    std::unique_ptr<Encoder> encoder;
+    std::unique_ptr<Decoder> decoder;
+    ASSERT_NO_FATAL_FAILURE(make_numeric_dict_page<PT>(values, &encoder, &decoder));
+
+    // The encoder gives a code to a value when it first sees it.
+    std::map<T, int32_t> codes;
+    for (const T& value : values) {
+        codes.emplace(value, static_cast<int32_t>(codes.size()));
+    }
+
+    auto dst = NullableColumn::create(FixedLengthColumn<int32_t>::create(), NullColumn::create());
+    NullInfos null_infos = make_dict_null_infos(nulls);
+    Status st =
+            decoder->next_batch_with_nulls(nulls.size(), null_infos, ColumnContentType::DICT_CODE, dst.get(), nullptr);
+    ASSERT_TRUE(st.ok()) << st.to_string();
+    ASSERT_EQ(nulls.size(), dst->size());
+    ASSERT_TRUE(dst->has_null());
+    const int32_t* data = reinterpret_cast<const int32_t*>(dst->data_column_raw_ptr()->raw_data());
+    size_t next_value = 0;
+    for (size_t i = 0; i < nulls.size(); ++i) {
+        if (nulls[i]) {
+            ASSERT_TRUE(dst->is_null(i)) << "row " << i;
+        } else {
+            ASSERT_FALSE(dst->is_null(i)) << "row " << i;
+            ASSERT_EQ(codes.at(values[next_value++]), data[i]) << "row " << i;
+        }
+    }
+    ASSERT_EQ(num_values, next_value);
+}
+
+} // namespace
+
+// The decoder skips the dictionary lookup of a row the filter drops. We fear that it leaves such a row as it finds
+// it: the memory of the column is not initialized, so the row holds garbage and is not NULL. A converter that
+// reads every row before the dropped rows are removed, for example one that multiplies each value by a scale
+// factor, would then read garbage and overflow on it. So a dropped row has to be zero, and NULL as well when the
+// column is nullable.
+TEST_F(ParquetEncodingTest, NumericDictFilterDroppedRowsAreDefinedWithoutNulls) {
+    for (bool nullable_dst : {true, false}) {
+        ASSERT_NO_FATAL_FAILURE(check_dict_filter_without_nulls<tparquet::Type::INT32>(nullable_dst));
+        ASSERT_NO_FATAL_FAILURE(check_dict_filter_without_nulls<tparquet::Type::INT64>(nullable_dst));
+        ASSERT_NO_FATAL_FAILURE(check_dict_filter_without_nulls<tparquet::Type::FLOAT>(nullable_dst));
+        ASSERT_NO_FATAL_FAILURE(check_dict_filter_without_nulls<tparquet::Type::DOUBLE>(nullable_dst));
+    }
+}
+
+// The same for a page that has NULL rows: a row that is NULL in the page keeps its NULL flag, a row that the
+// filter drops becomes NULL, and the values of the other rows are read from the right place of the page.
+TEST_F(ParquetEncodingTest, NumericDictFilterDroppedRowsAreDefinedWithNulls) {
+    ASSERT_NO_FATAL_FAILURE(check_dict_filter_with_nulls<tparquet::Type::INT32>());
+    ASSERT_NO_FATAL_FAILURE(check_dict_filter_with_nulls<tparquet::Type::INT64>());
+    ASSERT_NO_FATAL_FAILURE(check_dict_filter_with_nulls<tparquet::Type::FLOAT>());
+    ASSERT_NO_FATAL_FAILURE(check_dict_filter_with_nulls<tparquet::Type::DOUBLE>());
+}
+
+// A batch of a nullable column that ends with NULL rows, decoded without a filter, so the values are expanded
+// to their rows by expand_load. The values and the NULL rows have to be right whatever the width of the value.
+TEST_F(ParquetEncodingTest, NumericDictBatchEndingWithNulls) {
+    ASSERT_NO_FATAL_FAILURE(check_dict_value_batch_ending_with_nulls<tparquet::Type::INT32>());
+    ASSERT_NO_FATAL_FAILURE(check_dict_value_batch_ending_with_nulls<tparquet::Type::INT64>());
+    ASSERT_NO_FATAL_FAILURE(check_dict_value_batch_ending_with_nulls<tparquet::Type::FLOAT>());
+    ASSERT_NO_FATAL_FAILURE(check_dict_value_batch_ending_with_nulls<tparquet::Type::DOUBLE>());
+    ASSERT_NO_FATAL_FAILURE(check_dict_code_batch_ending_with_nulls<tparquet::Type::INT32>());
+    ASSERT_NO_FATAL_FAILURE(check_dict_code_batch_ending_with_nulls<tparquet::Type::INT64>());
+    ASSERT_NO_FATAL_FAILURE(check_dict_code_batch_ending_with_nulls<tparquet::Type::FLOAT>());
+    ASSERT_NO_FATAL_FAILURE(check_dict_code_batch_ending_with_nulls<tparquet::Type::DOUBLE>());
 }
 
 TEST_F(ParquetEncodingTest, String) {
