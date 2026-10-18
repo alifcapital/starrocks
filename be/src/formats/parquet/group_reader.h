@@ -149,7 +149,8 @@ private:
     // Extract dict filter columns and conjuncts
     void _process_columns_and_conjunct_ctxs();
 
-    // Fills _compound_conjuncts and _has_compound_conjunct_with_indirect_inputs.
+    // Fills _compound_conjuncts and _has_compound_conjunct_with_indirect_inputs. It needs the final
+    // split of the columns into active and lazy ones, since defer_is_free depends on the lazy columns.
     void _collect_compound_conjunct_info();
 
     // ── get_next() pipeline phases ───────────────────────────────────────────
@@ -160,6 +161,9 @@ private:
         Filter chunk_filter;
         bool has_filter = false;
         size_t row_count = 0;
+        // The compound conjuncts (indexes into scanner_ctxs, in ascending order) that stage 3 left to
+        // stage 7, which evaluates them on the output chunk.
+        std::vector<size_t> deferred_conjuncts;
     };
 
     // 1. Prune deleted rows: applies deletion bitmap to produce chunk_filter.
@@ -174,14 +178,15 @@ private:
 
     // 3. Evaluate compound (multi-slot) conjuncts via scanner_ctxs.
     //    Side columns are appended to active_chunk for predicate evaluation.
-    //    lazy_ctx must still be attached.  Returns true if rows survive.
+    //    lazy_ctx must still be attached.  Returns true if rows survive. Conjuncts that
+    //    state.deferred_conjuncts holds are left to stage 7.
     StatusOr<bool> _evaluate_compound_predicates(const Range<uint64_t>& r, RowGroupScanState& state,
                                                  LazyMaterializationContext* lazy_ctx);
 
-    // Stage 3 when at least one row is dropped: each conjunct is evaluated on the rows that
-    // chunk_filter keeps, and its result is ANDed back into chunk_filter. A conjunct that reads
-    // its inputs from the chunk directly (lambda, dictionary mapping) gets the lazy columns it
-    // needs read under chunk_filter. Returns the surviving row count.
+    // Stage 3 when at least one row is dropped: each conjunct that state.deferred_conjuncts does not
+    // hold is evaluated on the rows that chunk_filter keeps, and its result is ANDed back into
+    // chunk_filter. A conjunct that reads its inputs from the chunk directly (lambda, dictionary
+    // mapping) gets the lazy columns it needs read under chunk_filter. Returns the surviving row count.
     StatusOr<size_t> _evaluate_compound_predicates_on_selected_rows(RowGroupScanState& state,
                                                                     LazyMaterializationContext* lazy_ctx);
 
@@ -190,6 +195,17 @@ private:
     // Returns the surviving row count.
     StatusOr<size_t> _evaluate_compound_predicates_on_whole_chunk(RowGroupScanState& state,
                                                                   LazyMaterializationContext* lazy_ctx);
+
+    // Whether stage 3 may leave compound conjunct i to stage 7 in this pass. The caller has checked that
+    // the config is on and that at least one row of the pass is dropped. A conjunct with a dictionary
+    // mapping stays in stage 3, and a conjunct that is free to defer (CompoundConjunctInfo::defer_is_free)
+    // is always left to stage 7. The statistics of any other conjunct in this scan range must allow it.
+    bool _can_defer_compound_conjunct(size_t i) const;
+
+    // Stage 7: evaluates the deferred compound conjuncts on the output chunk, which holds only the rows
+    // that stages 1 to 6 kept, and drops the rows that they reject from the chunk. Sets row_count to
+    // the rows left.
+    Status _evaluate_deferred_compound_predicates(const RowGroupScanState& state, ChunkPtr* chunk, size_t* row_count);
 
     // 3.1 Probe join runtime filters against decoded rows, ANDing into chunk_filter
     //     so non-matching rows are dropped before lazy columns are materialized.
@@ -256,9 +272,22 @@ private:
         // True when the conjunct may read slots that get_slot_ids() does not report (a lambda
         // host, a dictionary mapping), so it needs the lazy columns read for it.
         bool has_indirect_inputs = false;
+        // True when a dictionary mapping is in the conjunct. Such a conjunct is never deferred.
+        bool has_dict_mapping = false;
         // The slots that the conjunct reads, sorted and without duplicates: get_slot_ids(), and
         // when has_indirect_inputs is true also the code slot of every dictionary mapping.
         std::vector<SlotId> slots;
+        // True when we expect that deferring the conjunct costs no lazy read, so we defer it whatever it
+        // keeps. A deferred conjunct leaves the rows that it would drop in the chunk until stage 7, and we
+        // fear that the reader then reads a lazy column, or runs another conjunct, for these rows. So the
+        // flag is true only when
+        // - the conjunct reads every lazy column that the reader reads for an output or for a compound
+        //   conjunct: it reads them for the surviving rows either way, and no other lazy column is left to
+        //   read for the extra rows,
+        // - the conjunct has no dictionary mapping, and
+        // - every later conjunct has the flag too, so it is deferred as well and does not run in stage 3 on
+        //   the extra rows.
+        bool defer_is_free = false;
     };
     // One entry per conjunct, in the order of scanner_ctxs.
     std::vector<CompoundConjunctInfo> _compound_conjuncts;

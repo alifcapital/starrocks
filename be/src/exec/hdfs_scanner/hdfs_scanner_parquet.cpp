@@ -133,6 +133,7 @@ void HdfsParquetScanner::do_update_counter(HdfsScannerProfile* profile) {
     RuntimeProfile::Counter* compound_pred_input_rows = nullptr;
     RuntimeProfile::Counter* compound_pred_output_rows = nullptr;
     RuntimeProfile::Counter* compound_pred_selected_rows = nullptr;
+    RuntimeProfile::Counter* compound_pred_deferred_rows = nullptr;
 
     request_bytes_read = ADD_CHILD_COUNTER(root, "RequestBytesRead", TUnit::BYTES, kParquetProfileSectionPrefix);
     request_bytes_read_uncompressed =
@@ -208,6 +209,8 @@ void HdfsParquetScanner::do_update_counter(HdfsScannerProfile* profile) {
             ADD_CHILD_COUNTER(root, "CompoundPredicateOutputRows", TUnit::UNIT, kParquetProfileSectionPrefix);
     compound_pred_selected_rows =
             ADD_CHILD_COUNTER(root, "CompoundPredicateSelectedRows", TUnit::UNIT, kParquetProfileSectionPrefix);
+    compound_pred_deferred_rows =
+            ADD_CHILD_COUNTER(root, "CompoundPredicateDeferredRows", TUnit::UNIT, kParquetProfileSectionPrefix);
 
     COUNTER_UPDATE(request_bytes_read, _app_stats.request_bytes_read);
     COUNTER_UPDATE(request_bytes_read_uncompressed, _app_stats.request_bytes_read_uncompressed);
@@ -257,6 +260,7 @@ void HdfsParquetScanner::do_update_counter(HdfsScannerProfile* profile) {
     COUNTER_UPDATE(compound_pred_input_rows, _app_stats.compound_pred_input_rows);
     COUNTER_UPDATE(compound_pred_output_rows, _app_stats.compound_pred_output_rows);
     COUNTER_UPDATE(compound_pred_selected_rows, _app_stats.compound_pred_selected_rows);
+    COUNTER_UPDATE(compound_pred_deferred_rows, _app_stats.compound_pred_deferred_rows);
 
     if (_runtime_state->fragment_ctx()->pred_tree_params().enable_show_in_profile) {
         root->add_info_string("ParquetPredicateTreeFilter",

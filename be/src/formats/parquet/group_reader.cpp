@@ -187,13 +187,17 @@ Status GroupReader::get_next(ChunkPtr* chunk, size_t* row_count) {
         return Status::EndOfFile("");
     }
 
+    // *row_count is also the output, and a pass whose rows the deferred compound conjuncts all drop sets
+    // it to 0 before the next pass. We fear that the next pass then asks the range iterator for 0 rows,
+    // which does not move the iterator, so every pass reads up to the count that the caller asked for.
+    const size_t max_rows = *row_count;
     while (true) {
         if (!_range_iter.has_more()) {
             *row_count = 0;
             return Status::EndOfFile("");
         }
 
-        auto r = _range_iter.next(*row_count);
+        auto r = _range_iter.next(max_rows);
         _param.stats->raw_rows_read += r.span_size();
 
         _column_materializer->reset_read_chunk();
@@ -252,6 +256,13 @@ Status GroupReader::get_next(ChunkPtr* chunk, size_t* row_count) {
         if ((*row_count) > 0) {
             RETURN_IF_ERROR(_param.scanner_ctx->append_side_columns_to_chunk(chunk, (*row_count)));
         }
+
+        // 7. Evaluate the compound conjuncts that stage 3 deferred. The output chunk holds only the
+        //    rows that are left, with the values of every column that these conjuncts read.
+        if (!state.deferred_conjuncts.empty() && (*row_count) > 0) {
+            RETURN_IF_ERROR(_evaluate_deferred_compound_predicates(state, chunk, row_count));
+            if ((*row_count) == 0) continue;
+        }
         break;
     }
 
@@ -299,14 +310,15 @@ namespace {
 
 // A dictionary mapping reads its column of codes through slot_id(), while get_slot_ids() reports
 // the slots of the expression that it maps. We add the code slots of every dictionary mapping in
-// the tree to slots. do_for_each_child() also visits the common expressions that a lambda host
-// keeps outside its children.
-void collect_dict_mapping_slots(Expr* expr, std::vector<SlotId>* slots) {
+// the tree to slots, and set *found when there is one. do_for_each_child() also visits the common
+// expressions that a lambda host keeps outside its children.
+void collect_dict_mapping_slots(Expr* expr, std::vector<SlotId>* slots, bool* found) {
     if (expr->is_dictmapping_expr()) {
         slots->push_back(down_cast<DictMappingExpr*>(expr)->slot_id());
+        *found = true;
     }
-    (void)expr->do_for_each_child([slots](Expr* child) {
-        collect_dict_mapping_slots(child, slots);
+    (void)expr->do_for_each_child([slots, found](Expr* child) {
+        collect_dict_mapping_slots(child, slots, found);
         return Status::OK();
     });
 }
@@ -323,14 +335,15 @@ void collect_dict_mapping_slots(Expr* expr, std::vector<SlotId>* slots) {
 // lazy column. We fear that such a conjunct (has_indirect_inputs) meets a lazy column that is not
 // in the chunk, so we read the lazy columns that it needs before the evaluation and put them in
 // the narrow chunk. The read goes through lazy_ctx, so it honors the filter that lazy_ctx holds
-// and the later backfill of the lazy columns reuses the result.
+// and the later backfill of the lazy columns reuses the result. lazy_ctx is null for the output
+// chunk, which holds every column that the conjunct reads.
 StatusOr<ChunkPtr> compound_conjunct_input(const std::vector<SlotId>& slots, bool has_indirect_inputs,
                                            const ChunkPtr& active_chunk, LazyMaterializationContext* lazy_ctx) {
     auto input = std::make_shared<Chunk>();
     for (SlotId slot : slots) {
         if (active_chunk->is_slot_exist(slot)) {
             input->append_column(active_chunk->get_column_by_slot_id(slot), slot);
-        } else if (has_indirect_inputs && lazy_ctx->can_materialize(slot)) {
+        } else if (has_indirect_inputs && lazy_ctx != nullptr && lazy_ctx->can_materialize(slot)) {
             ASSIGN_OR_RETURN(ColumnPtr column, lazy_ctx->provide(slot));
             input->append_column(std::move(column), slot);
         }
@@ -431,6 +444,24 @@ Status apply_selected_result(const ColumnPtr& result, std::vector<uint32_t>* row
     return Status::OK();
 }
 
+// Evaluates the conjunct ctx on the given rows of chunk with Expr::evaluate_selected(), ANDs the result
+// into filter and keeps in rows the rows that passed. slots and has_indirect_inputs are the facts about
+// the conjunct that compound_conjunct_input() needs.
+Status evaluate_conjunct_on_rows(ExprContext* ctx, const std::vector<SlotId>& slots, bool has_indirect_inputs,
+                                 const ChunkPtr& chunk, LazyMaterializationContext* lazy_ctx,
+                                 std::vector<uint32_t>* rows, Filter* filter) {
+    ASSIGN_OR_RETURN(ChunkPtr input, compound_conjunct_input(slots, has_indirect_inputs, chunk, lazy_ctx));
+    StatusOr<ColumnPtr> result;
+    // Same error conversion as ExprContext::evaluate().
+    try {
+        result = ctx->root()->evaluate_selected(ctx, input.get(), *rows);
+    } catch (std::runtime_error& e) {
+        return Status::RuntimeError(fmt::format("Expr evaluate meet error: {}", e.what()));
+    }
+    RETURN_IF_ERROR(result);
+    return apply_selected_result(result.value(), rows, filter);
+}
+
 } // namespace
 
 void GroupReader::_collect_compound_conjunct_info() {
@@ -445,12 +476,39 @@ void GroupReader::_collect_compound_conjunct_info() {
         info.has_indirect_inputs = root->has_indirect_inputs();
         root->get_slot_ids(&info.slots);
         if (info.has_indirect_inputs) {
-            collect_dict_mapping_slots(root, &info.slots);
+            collect_dict_mapping_slots(root, &info.slots, &info.has_dict_mapping);
         }
         std::sort(info.slots.begin(), info.slots.end());
         info.slots.erase(std::unique(info.slots.begin(), info.slots.end()), info.slots.end());
         _has_compound_conjunct_with_indirect_inputs |= info.has_indirect_inputs;
         _compound_conjuncts.push_back(std::move(info));
+    }
+
+    // We want to defer a conjunct whatever it keeps when that makes the reader read no lazy column for the
+    // rows that the conjunct drops. The lazy columns that the reader reads for something are the output ones
+    // and the ones that a compound conjunct reads (a lazy column that nothing needs is filled with defaults).
+    // A conjunct that reads all of them reads them for its surviving rows either way, so we mark it free.
+    // We fear that a later conjunct that stays in stage 3 runs on the rows that this one would have dropped,
+    // so a conjunct is free only if every later one is free and is deferred with it.
+    std::vector<SlotId> lazy_needed;
+    for (int col_idx : _column_materializer->lazy_column_indices()) {
+        const auto& column = _param.read_cols[col_idx];
+        const SlotId slot_id = column.slot_id();
+        const bool read_by_conjunct = std::any_of(
+                _compound_conjuncts.begin(), _compound_conjuncts.end(), [slot_id](const CompoundConjunctInfo& info) {
+                    return std::binary_search(info.slots.begin(), info.slots.end(), slot_id);
+                });
+        if (column.slot_desc->is_output_column() || read_by_conjunct) {
+            lazy_needed.push_back(slot_id);
+        }
+    }
+    std::sort(lazy_needed.begin(), lazy_needed.end());
+    bool suffix_is_free = true;
+    for (size_t i = _compound_conjuncts.size(); i-- > 0;) {
+        CompoundConjunctInfo& info = _compound_conjuncts[i];
+        suffix_is_free = suffix_is_free && !info.has_dict_mapping &&
+                         std::includes(info.slots.begin(), info.slots.end(), lazy_needed.begin(), lazy_needed.end());
+        info.defer_is_free = suffix_is_free;
     }
 }
 
@@ -485,16 +543,35 @@ StatusOr<bool> GroupReader::_evaluate_compound_predicates(const Range<uint64_t>&
     // chunk_filter keeps its full-range positions, so the later stages see it as before.
     const size_t rows_left = SIMD::count_nonzero(state.chunk_filter.data(), state.row_count);
     const bool on_selected_rows = state.active_chunk->num_rows() > 0 && rows_left < state.row_count;
+    auto& conjunct_stats = _param.scanner_ctx->compound_conjunct_stats;
+    if (conjunct_stats.size() != conjuncts.size()) {
+        conjunct_stats.assign(conjuncts.size(), {});
+    }
     size_t compound_hit = 0;
     if (on_selected_rows) {
-        _param.stats->compound_pred_input_rows += rows_left;
-        _param.stats->compound_pred_selected_rows += rows_left;
-        ASSIGN_OR_RETURN(compound_hit, _evaluate_compound_predicates_on_selected_rows(state, lazy_ctx));
+        // At least one row is dropped, so a conjunct may be left to stage 7, which evaluates it on the output chunk.
+        if (config::parquet_compound_predicate_defer_enable) {
+            for (size_t i = 0; i < conjuncts.size(); ++i) {
+                if (_can_defer_compound_conjunct(i)) {
+                    state.deferred_conjuncts.push_back(i);
+                }
+            }
+        }
+        compound_hit = rows_left;
+        if (state.deferred_conjuncts.size() < conjuncts.size()) {
+            // A row counts once, even when stage 7 evaluates the other conjuncts on it later.
+            _param.stats->compound_pred_input_rows += rows_left;
+            _param.stats->compound_pred_selected_rows += rows_left;
+            ASSIGN_OR_RETURN(compound_hit, _evaluate_compound_predicates_on_selected_rows(state, lazy_ctx));
+        }
     } else {
         _param.stats->compound_pred_input_rows += state.row_count;
         ASSIGN_OR_RETURN(compound_hit, _evaluate_compound_predicates_on_whole_chunk(state, lazy_ctx));
     }
-    _param.stats->compound_pred_output_rows += compound_hit;
+    // When stage 7 evaluates conjuncts, the rows that pass all of them are known after it.
+    if (state.deferred_conjuncts.empty()) {
+        _param.stats->compound_pred_output_rows += compound_hit;
+    }
     if (compound_hit == 0) {
         _param.stats->late_materialize_skip_rows += state.row_count;
         return false;
@@ -506,14 +583,20 @@ StatusOr<bool> GroupReader::_evaluate_compound_predicates(const Range<uint64_t>&
 StatusOr<size_t> GroupReader::_evaluate_compound_predicates_on_whole_chunk(RowGroupScanState& state,
                                                                            LazyMaterializationContext* lazy_ctx) {
     const auto& conjuncts = _param.scanner_ctx->conjuncts.scanner_ctxs;
+    // When deferring is on, we want to know the rows that each conjunct sees and keeps, so we evaluate
+    // the conjuncts one by one. Otherwise one call evaluates them all, which lets them share the casts
+    // of a column.
+    const bool track_stats = config::parquet_compound_predicate_defer_enable;
     // We fear that a narrow chunk made from a chunk without rows has no column to carry the row
     // count, so we pass such a chunk on as it is; eval_conjuncts_into_filter() returns at once for it.
-    if (!_has_compound_conjunct_with_indirect_inputs || state.active_chunk->num_rows() == 0) {
+    if ((!_has_compound_conjunct_with_indirect_inputs && !track_stats) || state.active_chunk->num_rows() == 0) {
         return ExecNode::eval_conjuncts_into_filter(conjuncts, state.active_chunk.get(), &state.chunk_filter);
     }
 
     // A conjunct with indirect inputs gets its own chunk, with the lazy columns that it needs read
     // for the whole range, since no row is dropped. The other conjuncts read active_chunk.
+    auto& conjunct_stats = _param.scanner_ctx->compound_conjunct_stats;
+    size_t hit = state.row_count;
     for (size_t i = 0; i < conjuncts.size(); ++i) {
         ExprContext* ctx = conjuncts[i];
         const CompoundConjunctInfo& info = _compound_conjuncts[i];
@@ -522,12 +605,15 @@ StatusOr<size_t> GroupReader::_evaluate_compound_predicates_on_whole_chunk(RowGr
             ASSIGN_OR_RETURN(
                     input, compound_conjunct_input(info.slots, info.has_indirect_inputs, state.active_chunk, lazy_ctx));
         }
-        ASSIGN_OR_RETURN(size_t hit, ExecNode::eval_conjuncts_into_filter({ctx}, input.get(), &state.chunk_filter));
+        const size_t input_rows = hit;
+        ASSIGN_OR_RETURN(hit, ExecNode::eval_conjuncts_into_filter({ctx}, input.get(), &state.chunk_filter));
+        conjunct_stats[i].input_rows += input_rows;
+        conjunct_stats[i].output_rows += hit;
         if (hit == 0) {
             return 0;
         }
     }
-    return SIMD::count_nonzero(state.chunk_filter.data(), state.row_count);
+    return hit;
 }
 
 StatusOr<size_t> GroupReader::_evaluate_compound_predicates_on_selected_rows(RowGroupScanState& state,
@@ -543,26 +629,101 @@ StatusOr<size_t> GroupReader::_evaluate_compound_predicates_on_selected_rows(Row
     std::vector<uint32_t> rows;
     selected_rows_of(state.chunk_filter, state.row_count, &rows);
     const auto& conjuncts = _param.scanner_ctx->conjuncts.scanner_ctxs;
+    auto& conjunct_stats = _param.scanner_ctx->compound_conjunct_stats;
+    // state.deferred_conjuncts is in ascending order, so we step through it together with the conjuncts.
+    size_t next_deferred = 0;
     for (size_t conjunct_idx = 0; conjunct_idx < conjuncts.size(); ++conjunct_idx) {
+        if (next_deferred < state.deferred_conjuncts.size() &&
+            state.deferred_conjuncts[next_deferred] == conjunct_idx) {
+            ++next_deferred;
+            continue;
+        }
         if (rows.empty()) {
             return 0;
         }
-        ExprContext* ctx = conjuncts[conjunct_idx];
         const CompoundConjunctInfo& info = _compound_conjuncts[conjunct_idx];
-        Expr* root = ctx->root();
-        ASSIGN_OR_RETURN(ChunkPtr input,
-                         compound_conjunct_input(info.slots, info.has_indirect_inputs, state.active_chunk, lazy_ctx));
-        StatusOr<ColumnPtr> result;
-        // Same error conversion as ExprContext::evaluate().
-        try {
-            result = root->evaluate_selected(ctx, input.get(), rows);
-        } catch (std::runtime_error& e) {
-            return Status::RuntimeError(fmt::format("Expr evaluate meet error: {}", e.what()));
-        }
-        RETURN_IF_ERROR(result);
-        RETURN_IF_ERROR(apply_selected_result(result.value(), &rows, &state.chunk_filter));
+        const size_t input_rows = rows.size();
+        RETURN_IF_ERROR(evaluate_conjunct_on_rows(conjuncts[conjunct_idx], info.slots, info.has_indirect_inputs,
+                                                  state.active_chunk, lazy_ctx, &rows, &state.chunk_filter));
+        conjunct_stats[conjunct_idx].input_rows += input_rows;
+        conjunct_stats[conjunct_idx].output_rows += rows.size();
     }
     return rows.size();
+}
+
+bool GroupReader::_can_defer_compound_conjunct(size_t i) const {
+    const CompoundConjunctInfo& info = _compound_conjuncts[i];
+    // We fear that a dictionary mapping reads its column of dictionary codes from the chunk, and the
+    // output chunk holds that column in another form than the active chunk does. So we never defer a
+    // conjunct with a dictionary mapping.
+    if (info.has_dict_mapping) {
+        return false;
+    }
+    // We expect that deferring a free conjunct saves the copy of its inputs and reads nothing extra, so we do
+    // not wait for its statistics.
+    if (info.defer_is_free) {
+        return true;
+    }
+    // Deferring any other conjunct makes the reader read lazy columns for the rows that it drops, so we
+    // defer it only if it drops few rows. We expect a conjunct to keep a similar part of the rows in the
+    // rest of the scan range, so we decide by what it kept so far, once it has seen enough rows to tell.
+    const auto& stats = _param.scanner_ctx->compound_conjunct_stats[i];
+    if (stats.input_rows < config::parquet_compound_predicate_defer_min_observed_rows) {
+        return false;
+    }
+    return static_cast<double>(stats.output_rows) >=
+           config::parquet_compound_predicate_defer_min_keep_ratio * static_cast<double>(stats.input_rows);
+}
+
+Status GroupReader::_evaluate_deferred_compound_predicates(const RowGroupScanState& state, ChunkPtr* chunk,
+                                                           size_t* row_count) {
+    SCOPED_RAW_TIMER(&_param.stats->compound_pred_eval_ns);
+    const auto& conjuncts = _param.scanner_ctx->conjuncts.scanner_ctxs;
+    auto& conjunct_stats = _param.scanner_ctx->compound_conjunct_stats;
+    const size_t num_rows = (*chunk)->num_rows();
+    _param.stats->compound_pred_deferred_rows += num_rows;
+    // Stage 3 counted the input rows when it evaluated a conjunct. When every conjunct is deferred, no
+    // stage counted them, and they are the rows of the output chunk.
+    if (state.deferred_conjuncts.size() == conjuncts.size()) {
+        _param.stats->compound_pred_input_rows += num_rows;
+    }
+
+    // Every row of the output chunk is a surviving row, so the first conjunct runs on the whole chunk. We
+    // fear that a later conjunct sees a row that an earlier one dropped, so once a row is dropped the
+    // later conjuncts run only on the rows that are left, in the same way as in stage 3. The chunk is
+    // compacted once, at the end.
+    Filter filter(num_rows, 1);
+    std::vector<uint32_t> rows;
+    bool on_selected_rows = false;
+    size_t rows_left = num_rows;
+    for (size_t i : state.deferred_conjuncts) {
+        const size_t input_rows = rows_left;
+        if (!on_selected_rows) {
+            ASSIGN_OR_RETURN(rows_left, ExecNode::eval_conjuncts_into_filter({conjuncts[i]}, chunk->get(), &filter));
+            if (rows_left > 0 && rows_left < num_rows) {
+                selected_rows_of(filter, num_rows, &rows);
+                on_selected_rows = true;
+            }
+        } else {
+            const CompoundConjunctInfo& info = _compound_conjuncts[i];
+            RETURN_IF_ERROR(evaluate_conjunct_on_rows(conjuncts[i], info.slots, info.has_indirect_inputs, *chunk,
+                                                      nullptr, &rows, &filter));
+            rows_left = rows.size();
+        }
+        conjunct_stats[i].input_rows += input_rows;
+        conjunct_stats[i].output_rows += rows_left;
+        if (rows_left == 0) {
+            break;
+        }
+    }
+    if (rows_left == 0) {
+        (*chunk)->set_num_rows(0);
+    } else if (rows_left < num_rows) {
+        (*chunk)->filter(filter);
+    }
+    _param.stats->compound_pred_output_rows += rows_left;
+    *row_count = (*chunk)->num_rows();
+    return Status::OK();
 }
 
 // ── 3.1 Evaluate join runtime filters ──────
@@ -713,6 +874,15 @@ StatusOr<bool> GroupReader::_filter_and_backfill_lazy(const Range<uint64_t>& r, 
         _param.stats->parquet_lazy_col_skip_rows += state.row_count - state.active_chunk->num_rows();
     }
     if (!_column_materializer->lazy_column_indices().empty()) {
+        // A deferred conjunct runs on the output chunk and reads its lazy columns there. We fear that it sees
+        // the default value of a lazy column that no output needs, so we read the columns that it reads.
+        std::vector<SlotId> force_backfill_slots;
+        for (size_t i : state.deferred_conjuncts) {
+            const auto& slots = _compound_conjuncts[i].slots;
+            force_backfill_slots.insert(force_backfill_slots.end(), slots.begin(), slots.end());
+        }
+        _column_materializer->set_force_backfill_slots(std::move(force_backfill_slots));
+        DeferOp clear_force_backfill_slots([this] { _column_materializer->set_force_backfill_slots({}); });
         RETURN_IF_ERROR(_column_materializer->read_lazy_columns(r, post_filter_range, post_filter, state.chunk_filter,
                                                                 state.has_filter, state.active_chunk));
     }

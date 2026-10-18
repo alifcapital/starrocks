@@ -61,6 +61,11 @@ public:
     std::vector<SlotId>& mutable_active_slot_ids() { return _active_slot_ids; }
     const std::vector<SlotId>& active_slot_ids() const { return _active_slot_ids; }
     const std::vector<SlotId>& lazy_slot_ids() const { return _lazy_slot_ids; }
+    // The lazy slots that read_lazy_columns() reads from the file even when no output needs them. A compound
+    // conjunct that runs on the output chunk reads them, and we fear that it sees a default value in a lazy
+    // column that nothing else reads. The caller sets the slots of the deferred conjuncts of one pass for the
+    // call of read_lazy_columns() and clears them after it.
+    void set_force_backfill_slots(std::vector<SlotId> slots) { _force_backfill_slots = std::move(slots); }
     ColumnReadOrderCtx* read_order_ctx() const { return _column_read_order_ctx.get(); }
     size_t min_round_cost() const {
         return _column_read_order_ctx == nullptr ? 0 : _column_read_order_ctx->get_min_round_cost();
@@ -292,6 +297,9 @@ private:
     // emit_physical_columns() so those slots bypass fill_dst_column and use a
     // direct swap instead. Cleared by reset_read_chunk().
     std::unordered_set<SlotId> _logical_slot_ids;
+
+    // See set_force_backfill_slots(). It holds a few slots, so a linear search is enough.
+    std::vector<SlotId> _force_backfill_slots;
 
     std::unique_ptr<ReadRangePlanner> _read_range_planner;
 };

@@ -119,6 +119,9 @@ struct HdfsScannerStats {
     // Of compound_pred_input_rows, the rows that were evaluated on the selected rows with
     // Expr::evaluate_selected(). The rest were evaluated on the whole chunk.
     int64_t compound_pred_selected_rows = 0;
+    // Rows that the deferred compound conjuncts were evaluated on, in the output chunk. A row counts
+    // once per pass, however many conjuncts were deferred.
+    int64_t compound_pred_deferred_rows = 0;
     // page statistics
     bool has_page_statistics = false;
     // page skip
@@ -456,6 +459,15 @@ struct HdfsScannerContext {
     // TODO: probably should be removed in later version.
     std::atomic<int32_t>* lazy_column_coalesce_counter = nullptr;
     ColumnIdToGlobalDictMap* global_dictmaps = &EMPTY_GLOBAL_DICTMAPS;
+
+    // The rows that each compound conjunct (by its index in conjuncts.scanner_ctxs) saw and kept in this
+    // scan range. We expect the conjunct to keep a similar part of the rows later in the scan range, so the
+    // parquet reader uses these numbers to decide where the conjunct runs.
+    struct CompoundConjunctStats {
+        int64_t input_rows = 0;
+        int64_t output_rows = 0;
+    };
+    std::vector<CompoundConjunctStats> compound_conjunct_stats;
 
     // ===== infrastructure =====
     // ObjectPool for allocations built by _build_scanner_context().

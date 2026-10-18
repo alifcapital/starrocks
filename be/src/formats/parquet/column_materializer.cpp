@@ -311,13 +311,15 @@ Status ColumnMaterializer::read_lazy_columns(const Range<uint64_t>& full_range,
     }
 
     if (!untriggered_indices.empty()) {
-        // Output columns → backfill from disk.
+        // Output columns and force-backfill slots → backfill from disk.
         // Predicate-only columns → null-fill (no IO, values unused downstream).
         std::vector<int> backfill_indices;
         size_t rows = active_chunk->num_rows();
         for (int col_idx : untriggered_indices) {
             const auto& col_info = _param.read_cols[col_idx];
-            if (col_info.slot_desc->is_output_column()) {
+            if (col_info.slot_desc->is_output_column() ||
+                std::find(_force_backfill_slots.begin(), _force_backfill_slots.end(), col_info.slot_id()) !=
+                        _force_backfill_slots.end()) {
                 backfill_indices.push_back(col_idx);
             } else {
                 auto col = _read_chunk->get_column_by_slot_id(col_info.slot_id())->clone_empty();

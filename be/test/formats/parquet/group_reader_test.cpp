@@ -26,6 +26,7 @@
 #include "column/column_viewer.h"
 #include "column/nullable_column.h"
 #include "common/config.h"
+#include "connector/deletion_vector/deletion_bitmap.h"
 #include "exec/hdfs_scanner/hdfs_scanner.h"
 #include "exprs/arithmetic_expr.h"
 #include "exprs/array_expr.h"
@@ -267,10 +268,12 @@ public:
 };
 
 // An INT column that only the compound conjunct reads, so the group reader reads it lazily.
-// value(row) is its value at a row of the row group.
+// value(row) is its value at a row of the row group. With is_output the query outputs the column, so
+// the group reader reads it for the rows left even if no conjunct reads it.
 struct CompoundLazyColumn {
     SlotId slot_id = 0;
     std::function<int32_t(uint64_t)> value;
+    bool is_output = false;
 };
 
 // Setup of GroupReaderTest::_scan_with_compound_predicate(). The row group has num_rows rows, 12
@@ -292,6 +295,8 @@ struct CompoundScanCase {
     MakeConjunct make_conjunct;
     // Compound conjuncts after the first one, in the order of evaluation.
     std::vector<MakeConjunct> more_conjuncts;
+    // Rows of the row group (row numbers) that the deletion vector drops.
+    std::vector<uint64_t> deleted_rows;
     // A join runtime filter that holds join_values and probes the column of join_filter_slot; no
     // filter when join_values is empty. With join_filter_ready false the filter is declared but
     // has not arrived yet.
@@ -313,8 +318,11 @@ struct CompoundScanResult {
     std::vector<std::vector<int64_t>> lazy_read_filter_rows;
     // What the group reader cached about the compound conjunct before the scan.
     bool conjunct_has_indirect_inputs = false;
+    bool conjunct_has_dict_mapping = false;
     std::vector<SlotId> conjunct_slots;
     HdfsScannerStats stats;
+    // The rows that each compound conjunct saw and kept, in the order of the conjuncts.
+    std::vector<HdfsScannerContext::CompoundConjunctStats> conjunct_stats;
 };
 
 class GroupReaderTest : public ::testing::Test {
@@ -2229,7 +2237,18 @@ StatusOr<CompoundScanResult> GroupReaderTest::_scan_with_compound_predicate(cons
     ca.slot_desc = slot_a;
     param->read_cols = {ca};
     for (const auto& lazy : scan_case.lazy_columns) {
-        auto* slot = _pool.add(new SlotDescriptor(lazy.slot_id, fmt::format("c{}", lazy.slot_id), TYPE_INT_DESC));
+        // The constructor with a name and a type makes a slot that no query outputs.
+        SlotDescriptor* slot = nullptr;
+        if (lazy.is_output) {
+            TSlotDescriptorBuilder builder;
+            builder.id(lazy.slot_id)
+                    .type(TYPE_INT_DESC)
+                    .column_name(fmt::format("c{}", lazy.slot_id))
+                    .is_output_column(true);
+            slot = _pool.add(new SlotDescriptor(builder.build()));
+        } else {
+            slot = _pool.add(new SlotDescriptor(lazy.slot_id, fmt::format("c{}", lazy.slot_id), TYPE_INT_DESC));
+        }
         GroupReaderParam::Column column{};
         column.slot_desc = slot;
         param->read_cols.push_back(column);
@@ -2268,6 +2287,13 @@ StatusOr<CompoundScanResult> GroupReaderTest::_scan_with_compound_predicate(cons
     }
 
     SkipRowsContextPtr skip_rows_ctx = std::make_shared<SkipRowsContext>();
+    if (!scan_case.deleted_rows.empty()) {
+        roaring64_bitmap_t* bitmap = roaring64_bitmap_create();
+        for (uint64_t row : scan_case.deleted_rows) {
+            roaring64_bitmap_add(bitmap, row);
+        }
+        skip_rows_ctx->deletion_bitmap = std::make_shared<DeletionBitmap>(bitmap);
+    }
     auto* group_reader = _pool.add(new GroupReader(*param, 0, skip_rows_ctx, 0));
     group_reader->_column_readers.emplace(slot_a->id(), std::make_unique<MockIntColumnReader>());
     std::vector<MockIntColumnReader*> lazy_readers;
@@ -2286,6 +2312,7 @@ StatusOr<CompoundScanResult> GroupReaderTest::_scan_with_compound_predicate(cons
 
     CompoundScanResult result;
     result.conjunct_has_indirect_inputs = group_reader->_compound_conjuncts[0].has_indirect_inputs;
+    result.conjunct_has_dict_mapping = group_reader->_compound_conjuncts[0].has_dict_mapping;
     result.conjunct_slots = group_reader->_compound_conjuncts[0].slots;
     result.lazy_values.resize(scan_case.lazy_columns.size());
     while (true) {
@@ -2314,6 +2341,7 @@ StatusOr<CompoundScanResult> GroupReaderTest::_scan_with_compound_predicate(cons
         result.lazy_read_filter_rows.push_back(reader->read_filter_rows);
     }
     result.stats = *param->stats;
+    result.conjunct_stats = param->scanner_ctx->compound_conjunct_stats;
     return result;
 }
 
@@ -2441,13 +2469,10 @@ TEST_F(GroupReaderTest, PreparedLambdaHostReportsCapturedAndInputSlots) {
 static constexpr SlotId kDictCodeSlot = 702;
 static constexpr SlotId kDictPlaceholderSlot = 710;
 
-// recorder(a) <= dictmap(code) over a = row, the code of the dictionary string "11 - row" is
-// 12 - row: it holds on the rows 0..5.
-static CompoundScanCase create_dict_mapping_scan_case(int32_t active_min, IntRecorderExpr** recorder) {
-    CompoundScanCase scan_case;
-    scan_case.active_min = active_min;
-    scan_case.lazy_columns = {{kDictCodeSlot, [](uint64_t row) { return static_cast<int32_t>(12 - row); }}};
-    scan_case.make_conjunct = [recorder](ObjectPool* pool, RuntimeState* state) -> StatusOr<Expr*> {
+// Makes the conjunct recorder(a) <= dictmap(code), with the dictionary that it needs registered in the
+// runtime state. The code of the dictionary string "11 - row" is 12 - row.
+static CompoundScanCase::MakeConjunct make_dict_mapping_conjunct(IntRecorderExpr** recorder) {
+    return [recorder](ObjectPool* pool, RuntimeState* state) -> StatusOr<Expr*> {
         state->init_instance_mem_tracker();
         std::vector<int32_t> ids;
         std::vector<std::string> strings;
@@ -2463,6 +2488,15 @@ static CompoundScanCase create_dict_mapping_scan_case(int32_t active_min, IntRec
         return create_dict_mapping_conjunct(pool, CompoundScanCase::kActiveSlot, kDictCodeSlot, kDictPlaceholderSlot,
                                             recorder);
     };
+}
+
+// recorder(a) <= dictmap(code) over a = row, the code of the dictionary string "11 - row" is
+// 12 - row: it holds on the rows 0..5.
+static CompoundScanCase create_dict_mapping_scan_case(int32_t active_min, IntRecorderExpr** recorder) {
+    CompoundScanCase scan_case;
+    scan_case.active_min = active_min;
+    scan_case.lazy_columns = {{kDictCodeSlot, [](uint64_t row) { return static_cast<int32_t>(12 - row); }}};
+    scan_case.make_conjunct = make_dict_mapping_conjunct(recorder);
     return scan_case;
 }
 
@@ -2730,13 +2764,14 @@ static std::vector<int32_t> values_where(int32_t from, int32_t to, const std::fu
     return values;
 }
 
-// Makes a compound conjunct that applies verdict to the lazy column 701, and returns the predicate in
-// *predicate when the scan creates it.
+// Makes a compound conjunct that applies verdict to the column of slot_id, the lazy column 701 unless the
+// test says otherwise, and returns the predicate in *predicate when the scan creates it.
 static CompoundScanCase::MakeConjunct make_int_verdict_conjunct(IntVerdictPredicate** predicate,
-                                                                std::function<int(int32_t)> verdict) {
-    return [predicate, verdict = std::move(verdict)](ObjectPool* pool, RuntimeState*) -> StatusOr<Expr*> {
+                                                                std::function<int(int32_t)> verdict,
+                                                                SlotId slot_id = 701) {
+    return [predicate, verdict = std::move(verdict), slot_id](ObjectPool* pool, RuntimeState*) -> StatusOr<Expr*> {
         *predicate = pool->add(new IntVerdictPredicate(verdict));
-        (*predicate)->add_child(create_int_column_ref(pool, 701));
+        (*predicate)->add_child(create_int_column_ref(pool, slot_id));
         return *predicate;
     };
 }
@@ -2839,6 +2874,450 @@ TEST_F(GroupReaderTest, SecondCompoundPredicateSeesOnlyRowsKeptByTheFirst) {
     EXPECT_EQ(90, result.stats.compound_pred_input_rows);
     EXPECT_EQ(90, result.stats.compound_pred_selected_rows);
     EXPECT_EQ(static_cast<int64_t>(kept.size()), result.stats.compound_pred_output_rows);
+}
+
+// Sets the configs of the deferral of compound conjuncts for the scope of a test and restores them
+// afterwards.
+class ScopedDeferConfig {
+public:
+    ScopedDeferConfig(bool enable, double min_keep_ratio, int64_t min_observed_rows)
+            : _enable(config::parquet_compound_predicate_defer_enable),
+              _min_keep_ratio(config::parquet_compound_predicate_defer_min_keep_ratio),
+              _min_observed_rows(config::parquet_compound_predicate_defer_min_observed_rows) {
+        config::parquet_compound_predicate_defer_enable = enable;
+        config::parquet_compound_predicate_defer_min_keep_ratio = min_keep_ratio;
+        config::parquet_compound_predicate_defer_min_observed_rows = min_observed_rows;
+    }
+
+    ~ScopedDeferConfig() {
+        config::parquet_compound_predicate_defer_enable = _enable;
+        config::parquet_compound_predicate_defer_min_keep_ratio = _min_keep_ratio;
+        config::parquet_compound_predicate_defer_min_observed_rows = _min_observed_rows;
+    }
+
+private:
+    bool _enable;
+    double _min_keep_ratio;
+    int64_t _min_observed_rows;
+};
+
+// Covers: a deferred compound conjunct drops every row of the first pass while rows remain in the row
+//         group. The next pass reads the next rows instead of an empty range, so the scan ends, and
+//         the result is the same as without deferral.
+TEST_F(GroupReaderTest, DeferredCompoundPredicateDropsWholePass) {
+    ScopedDeferConfig defer(true, 0, 0);
+    OddIntPredicate* odd = nullptr;
+    // The passes are the rows {0, 1, 2}, {3, 4, 5}, ... The column predicate keeps only the row 2 of the
+    // first pass, so the conjunct is deferred there, and it drops the row 2, which is even.
+    CompoundScanCase scan_case = create_odd_scan_case(2, &odd);
+    scan_case.rows_per_read = 3;
+
+    ASSIGN_OR_ABORT(auto result, _scan_with_compound_predicate(scan_case));
+    EXPECT_EQ(std::vector<int32_t>({3, 5, 7, 9, 11}), result.a_values);
+    EXPECT_EQ(std::vector<int32_t>({3, 5, 7, 9, 11}), result.lazy_values[0]);
+    // The conjunct saw the row 2 in the output chunk, and the rows of the other passes in the reader.
+    EXPECT_EQ(std::vector<int32_t>({2, 3, 4, 5, 6, 7, 8, 9, 10, 11}), odd->evaluated_values);
+    EXPECT_EQ(1, result.stats.compound_pred_deferred_rows);
+    EXPECT_EQ(0, result.stats.compound_pred_selected_rows);
+    EXPECT_EQ(10, result.stats.compound_pred_input_rows);
+    EXPECT_EQ(5, result.stats.compound_pred_output_rows);
+    // The first pass reads the column for the deferred conjunct, under the filter of the row left.
+    EXPECT_EQ(std::vector<int64_t>({1, -1, -1, -1}), result.lazy_read_filter_rows[0]);
+}
+
+// Covers: a deferred compound conjunct runs on the output chunk, whose rows are the rows that the
+//         earlier stages kept, and the lazy column that only it reads has real values there. The result
+//         is the same as without deferral, and the counters tell where the rows were evaluated.
+TEST_F(GroupReaderTest, DeferredCompoundPredicateRunsOnOutputChunk) {
+    auto scan = [this](bool defer, OddIntPredicate** odd) {
+        ScopedDeferConfig defer_config(defer, 0, 0);
+        ASSIGN_OR_ABORT(auto result, _scan_with_compound_predicate(create_odd_scan_case(6, odd)));
+        return result;
+    };
+    OddIntPredicate* reference_odd = nullptr;
+    OddIntPredicate* deferred_odd = nullptr;
+    const auto reference = scan(false, &reference_odd);
+    const auto deferred = scan(true, &deferred_odd);
+
+    EXPECT_EQ(std::vector<int32_t>({7, 9, 11}), reference.a_values);
+    EXPECT_EQ(std::vector<int32_t>({7, 9, 11}), reference.lazy_values[0]);
+    EXPECT_EQ(std::vector<int32_t>({6, 7, 8, 9, 10, 11}), reference_odd->evaluated_values);
+    EXPECT_EQ(0, reference.stats.compound_pred_deferred_rows);
+    EXPECT_EQ(6, reference.stats.compound_pred_selected_rows);
+    EXPECT_EQ(6, reference.stats.compound_pred_input_rows);
+    EXPECT_EQ(3, reference.stats.compound_pred_output_rows);
+
+    EXPECT_EQ(reference.a_values, deferred.a_values);
+    EXPECT_EQ(reference.lazy_values, deferred.lazy_values);
+    EXPECT_EQ(reference_odd->evaluated_values, deferred_odd->evaluated_values);
+    EXPECT_EQ(6, deferred.stats.compound_pred_deferred_rows);
+    EXPECT_EQ(0, deferred.stats.compound_pred_selected_rows);
+    EXPECT_EQ(6, deferred.stats.compound_pred_input_rows);
+    EXPECT_EQ(3, deferred.stats.compound_pred_output_rows);
+    // The column is read once, for the rows that the column predicate kept.
+    EXPECT_EQ(1u, deferred.lazy_read_counts[0]);
+    EXPECT_EQ(std::vector<int64_t>({6}), deferred.lazy_read_filter_rows[0]);
+    ASSERT_EQ(1u, deferred.conjunct_stats.size());
+    EXPECT_EQ(6, deferred.conjunct_stats[0].input_rows);
+    EXPECT_EQ(3, deferred.conjunct_stats[0].output_rows);
+}
+
+// Covers: when no row of the pass is dropped, the conjunct runs on the whole chunk in the reader, and
+//         its statistics still count the rows that it saw and kept.
+TEST_F(GroupReaderTest, CompoundPredicateIsNotDeferredWhenNoRowIsDropped) {
+    ScopedDeferConfig defer(true, 0, 0);
+    OddIntPredicate* odd = nullptr;
+    ASSIGN_OR_ABORT(auto result, _scan_with_compound_predicate(create_odd_scan_case(0, &odd)));
+
+    EXPECT_EQ(std::vector<int32_t>({1, 3, 5, 7, 9, 11}), result.a_values);
+    EXPECT_EQ(std::vector<int32_t>({0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}), odd->evaluated_values);
+    EXPECT_EQ(0, result.stats.compound_pred_deferred_rows);
+    EXPECT_EQ(0, result.stats.compound_pred_selected_rows);
+    EXPECT_EQ(12, result.stats.compound_pred_input_rows);
+    EXPECT_EQ(6, result.stats.compound_pred_output_rows);
+    ASSERT_EQ(1u, result.conjunct_stats.size());
+    EXPECT_EQ(12, result.conjunct_stats[0].input_rows);
+    EXPECT_EQ(6, result.conjunct_stats[0].output_rows);
+}
+
+// Covers: a compound conjunct with a lambda host follows its statistics as any conjunct does when the
+//         query outputs a lazy column that the lambda does not read. It runs in the reader until it has
+//         seen the rows that the config asks for and kept enough of them, and it is deferred after that,
+//         so it needs its captured lazy column read for the output chunk. When it keeps too few rows, it
+//         is never deferred.
+TEST_F(GroupReaderTest, DeferredCompoundLambdaPredicateFollowsItsStatistics) {
+    // The passes are the rows {0, 1, 2}, {3, 4, 5}, ... and the deletion vector drops the first row of
+    // each pass. The lambda keeps the even rows: of the rows 1 and 2 it keeps the row 2, of the rows 4 and
+    // 5 the row 4, and so on, one of two rows. The lambda does not read the output column 703, and
+    // deferring the conjunct would read that column for rows that the conjunct drops.
+    auto scan = [this](double min_keep_ratio, IntRecorderExpr** recorder) {
+        ScopedDeferConfig defer(true, min_keep_ratio, 4);
+        CompoundScanCase scan_case = create_array_map_scan_case(0, recorder);
+        scan_case.lazy_columns.push_back({703, row_as_value, true});
+        scan_case.rows_per_read = 3;
+        scan_case.deleted_rows = {0, 3, 6, 9};
+        ASSIGN_OR_ABORT(auto result, _scan_with_compound_predicate(scan_case));
+        return result;
+    };
+
+    // It kept every second row, which is enough for 0, so the passes {6, 7, 8} and {9, 10, 11} defer it
+    // after the first two passes have shown 4 rows.
+    IntRecorderExpr* recorder = nullptr;
+    const auto deferred = scan(0, &recorder);
+    EXPECT_EQ(std::vector<int32_t>({2, 4, 8, 10}), deferred.a_values);
+    EXPECT_EQ(std::vector<int32_t>({10, 8, 4, 2}), deferred.lazy_values[0]);
+    EXPECT_EQ(std::vector<int32_t>({2, 4, 8, 10}), deferred.lazy_values[1]);
+    // The conjunct saw only the rows that the deletion vector kept, in the reader and in the output chunk.
+    EXPECT_EQ(std::vector<int32_t>({0, 10, 8, 0, 0, 4, 2, 0}), recorder->recorded_values);
+    EXPECT_TRUE(deferred.conjunct_has_indirect_inputs);
+    EXPECT_FALSE(deferred.conjunct_has_dict_mapping);
+    EXPECT_EQ(4, deferred.stats.compound_pred_selected_rows);
+    EXPECT_EQ(4, deferred.stats.compound_pred_deferred_rows);
+    EXPECT_EQ(8, deferred.stats.compound_pred_input_rows);
+    EXPECT_EQ(4, deferred.stats.compound_pred_output_rows);
+    EXPECT_EQ(std::vector<int64_t>({2, 2, 2, 2}), deferred.lazy_read_filter_rows[0]);
+    ASSERT_EQ(1u, deferred.conjunct_stats.size());
+    EXPECT_EQ(8, deferred.conjunct_stats[0].input_rows);
+    EXPECT_EQ(4, deferred.conjunct_stats[0].output_rows);
+
+    // The same scan with a keep ratio that the conjunct does not reach never defers it, and the rows
+    // are the same.
+    IntRecorderExpr* strict_recorder = nullptr;
+    const auto in_reader = scan(0.9, &strict_recorder);
+    EXPECT_EQ(deferred.a_values, in_reader.a_values);
+    EXPECT_EQ(deferred.lazy_values, in_reader.lazy_values);
+    EXPECT_EQ(recorder->recorded_values, strict_recorder->recorded_values);
+    EXPECT_EQ(8, in_reader.stats.compound_pred_selected_rows);
+    EXPECT_EQ(0, in_reader.stats.compound_pred_deferred_rows);
+    EXPECT_EQ(8, in_reader.stats.compound_pred_input_rows);
+    EXPECT_EQ(4, in_reader.stats.compound_pred_output_rows);
+    ASSERT_EQ(1u, in_reader.conjunct_stats.size());
+    EXPECT_EQ(8, in_reader.conjunct_stats[0].input_rows);
+    EXPECT_EQ(4, in_reader.conjunct_stats[0].output_rows);
+}
+
+// Covers: a compound conjunct with a dictionary mapping is never deferred, whatever its statistics,
+//         and it still runs in the reader on the rows that the column predicate kept.
+TEST_F(GroupReaderTest, CompoundDictMappingPredicateIsNeverDeferred) {
+    ScopedDeferConfig defer(true, 0, 0);
+    IntRecorderExpr* recorder = nullptr;
+    ASSIGN_OR_ABORT(auto result, _scan_with_compound_predicate(create_dict_mapping_scan_case(3, &recorder)));
+
+    EXPECT_EQ(std::vector<int32_t>({3, 4, 5}), result.a_values);
+    EXPECT_EQ(std::vector<int32_t>({9, 8, 7}), result.lazy_values[0]);
+    EXPECT_EQ(std::vector<int32_t>({3, 4, 5, 6, 7, 8, 9, 10, 11}), recorder->recorded_values);
+    EXPECT_TRUE(result.conjunct_has_dict_mapping);
+    EXPECT_EQ(0, result.stats.compound_pred_deferred_rows);
+    EXPECT_EQ(9, result.stats.compound_pred_selected_rows);
+    EXPECT_EQ(9, result.stats.compound_pred_input_rows);
+    EXPECT_EQ(3, result.stats.compound_pred_output_rows);
+    EXPECT_EQ(std::vector<int64_t>({9}), result.lazy_read_filter_rows[0]);
+    ASSERT_EQ(1u, result.conjunct_stats.size());
+    EXPECT_EQ(9, result.conjunct_stats[0].input_rows);
+    EXPECT_EQ(3, result.conjunct_stats[0].output_rows);
+}
+
+// Covers: a plain conjunct is deferred and a conjunct with a dictionary mapping stays in the reader, in
+//         the same scan, in either order. The deferred conjunct runs on the output chunk, which holds
+//         only the rows that the other conjunct kept, and the rows count once in the input counter.
+TEST_F(GroupReaderTest, DeferredAndInReaderCompoundPredicatesInOneScan) {
+    auto scan = [this](bool deferred_first, IntVerdictPredicate** plain, IntRecorderExpr** recorder) {
+        ScopedDeferConfig defer(true, 0, 0);
+        CompoundScanCase scan_case;
+        scan_case.active_min = 3;
+        scan_case.lazy_columns = {{701, row_as_value},
+                                  {kDictCodeSlot, [](uint64_t row) { return static_cast<int32_t>(12 - row); }}};
+        // The plain conjunct keeps the odd rows. The dictionary mapping one holds on the rows 0..5.
+        auto plain_conjunct = make_int_verdict_conjunct(plain, [](int32_t value) { return value % 2 == 1 ? 1 : 0; });
+        auto dict_conjunct = make_dict_mapping_conjunct(recorder);
+        scan_case.make_conjunct = deferred_first ? plain_conjunct : dict_conjunct;
+        scan_case.more_conjuncts = {deferred_first ? dict_conjunct : plain_conjunct};
+        ASSIGN_OR_ABORT(auto result, _scan_with_compound_predicate(scan_case));
+        return result;
+    };
+
+    for (bool deferred_first : {true, false}) {
+        SCOPED_TRACE(deferred_first);
+        IntVerdictPredicate* plain = nullptr;
+        IntRecorderExpr* recorder = nullptr;
+        const auto result = scan(deferred_first, &plain, &recorder);
+
+        EXPECT_EQ(std::vector<int32_t>({3, 5}), result.a_values);
+        EXPECT_EQ(std::vector<int32_t>({3, 5}), result.lazy_values[0]);
+        EXPECT_EQ(std::vector<int32_t>({9, 7}), result.lazy_values[1]);
+        // The dictionary mapping conjunct saw the rows 3..11, and the plain one only the rows 3..5 that
+        // the first one kept.
+        EXPECT_EQ(std::vector<int32_t>({3, 4, 5, 6, 7, 8, 9, 10, 11}), recorder->recorded_values);
+        EXPECT_EQ(std::vector<int32_t>({3, 4, 5}), plain->evaluated_values);
+        EXPECT_EQ(9, result.stats.compound_pred_selected_rows);
+        EXPECT_EQ(3, result.stats.compound_pred_deferred_rows);
+        EXPECT_EQ(9, result.stats.compound_pred_input_rows);
+        EXPECT_EQ(2, result.stats.compound_pred_output_rows);
+        ASSERT_EQ(2u, result.conjunct_stats.size());
+        const auto& plain_stats = result.conjunct_stats[deferred_first ? 0 : 1];
+        const auto& dict_stats = result.conjunct_stats[deferred_first ? 1 : 0];
+        EXPECT_EQ(3, plain_stats.input_rows);
+        EXPECT_EQ(2, plain_stats.output_rows);
+        EXPECT_EQ(9, dict_stats.input_rows);
+        EXPECT_EQ(3, dict_stats.output_rows);
+    }
+}
+
+// Covers: when several conjuncts are deferred, each one is evaluated only on the rows that the earlier
+//         ones kept, and the chunk loses the rejected rows once.
+TEST_F(GroupReaderTest, DeferredCompoundPredicatesSeeOnlyRowsKeptByEarlierOnes) {
+    ScopedDeferConfig defer(true, 0, 0);
+    IntVerdictPredicate* first = nullptr;
+    IntVerdictPredicate* second = nullptr;
+    CompoundScanCase scan_case;
+    scan_case.active_min = 3;
+    scan_case.lazy_columns = {{701, row_as_value}};
+    scan_case.make_conjunct = make_int_verdict_conjunct(&first, [](int32_t value) { return value % 2 == 1 ? 1 : 0; });
+    scan_case.more_conjuncts = {make_int_verdict_conjunct(&second, [](int32_t value) { return value >= 6 ? 1 : 0; })};
+
+    ASSIGN_OR_ABORT(auto result, _scan_with_compound_predicate(scan_case));
+    EXPECT_EQ(std::vector<int32_t>({7, 9, 11}), result.a_values);
+    EXPECT_EQ(std::vector<int32_t>({7, 9, 11}), result.lazy_values[0]);
+    EXPECT_EQ(std::vector<int32_t>({3, 4, 5, 6, 7, 8, 9, 10, 11}), first->evaluated_values);
+    EXPECT_EQ(std::vector<int32_t>({3, 5, 7, 9, 11}), second->evaluated_values);
+    EXPECT_EQ(0, result.stats.compound_pred_selected_rows);
+    EXPECT_EQ(9, result.stats.compound_pred_deferred_rows);
+    EXPECT_EQ(9, result.stats.compound_pred_input_rows);
+    EXPECT_EQ(3, result.stats.compound_pred_output_rows);
+    ASSERT_EQ(2u, result.conjunct_stats.size());
+    EXPECT_EQ(9, result.conjunct_stats[0].input_rows);
+    EXPECT_EQ(5, result.conjunct_stats[0].output_rows);
+    EXPECT_EQ(5, result.conjunct_stats[1].input_rows);
+    EXPECT_EQ(3, result.conjunct_stats[1].output_rows);
+}
+
+// Three passes of 8 rows. The deletion vector drops the first row of each pass, so every pass drops a row
+// and a compound conjunct can be deferred. Column a holds the row number, and the rows 1..7, 9..15 and
+// 17..23 reach the compound conjuncts.
+static CompoundScanCase create_three_pass_scan_case() {
+    CompoundScanCase scan_case;
+    scan_case.num_rows = 24;
+    scan_case.rows_per_read = 8;
+    scan_case.deleted_rows = {0, 8, 16};
+    return scan_case;
+}
+
+static std::vector<int32_t> rows_of_three_passes() {
+    return values_where(0, 24, [](int32_t value) { return value % 8 != 0; });
+}
+
+// Keeps the multiples of 4: the rows 4, 12 and 20 of the three passes, 3 of 21.
+static int keep_multiples_of_4(int32_t value) {
+    return value % 4 == 0 ? 1 : 0;
+}
+
+static int keep_from_10(int32_t value) {
+    return value >= 10 ? 1 : 0;
+}
+
+// Covers: a compound conjunct that keeps 3 of 21 rows is deferred to the output chunk from the first pass
+//         on, when the group reader reads no lazy column, although its statistics are far below the keep
+//         ratio. Nothing is read for the rows that it drops, and the rows are the same as without deferral.
+TEST_F(GroupReaderTest, SelectiveCompoundPredicateIsDeferredWhenNoLazyColumnIsRead) {
+    auto scan = [this](bool enable, IntVerdictPredicate** predicate) {
+        ScopedDeferConfig defer(enable, 0.9, 7);
+        CompoundScanCase scan_case = create_three_pass_scan_case();
+        scan_case.make_conjunct =
+                make_int_verdict_conjunct(predicate, keep_multiples_of_4, CompoundScanCase::kActiveSlot);
+        ASSIGN_OR_ABORT(auto result, _scan_with_compound_predicate(scan_case));
+        return result;
+    };
+    IntVerdictPredicate* reference_predicate = nullptr;
+    IntVerdictPredicate* predicate = nullptr;
+    const auto reference = scan(false, &reference_predicate);
+    const auto result = scan(true, &predicate);
+
+    EXPECT_EQ(std::vector<int32_t>({4, 12, 20}), reference.a_values);
+    EXPECT_EQ(0, reference.stats.compound_pred_deferred_rows);
+    EXPECT_EQ(21, reference.stats.compound_pred_selected_rows);
+
+    EXPECT_EQ(reference.a_values, result.a_values);
+    EXPECT_EQ(rows_of_three_passes(), predicate->evaluated_values);
+    EXPECT_EQ(21, result.stats.compound_pred_deferred_rows);
+    EXPECT_EQ(0, result.stats.compound_pred_selected_rows);
+    EXPECT_EQ(21, result.stats.compound_pred_input_rows);
+    EXPECT_EQ(3, result.stats.compound_pred_output_rows);
+    ASSERT_EQ(1u, result.conjunct_stats.size());
+    EXPECT_EQ(21, result.conjunct_stats[0].input_rows);
+    EXPECT_EQ(3, result.conjunct_stats[0].output_rows);
+}
+
+// Covers: the same conjunct stays in the reader when the query outputs a lazy column that the conjunct does
+//         not read. Deferring it would read that column for the rows that the conjunct drops, so its
+//         statistics decide, and they are far below the keep ratio. The column is read for the row that is
+//         left after the conjunct in each pass.
+TEST_F(GroupReaderTest, SelectiveCompoundPredicateStaysInReaderWhenALazyOutputColumnIsRead) {
+    ScopedDeferConfig defer(true, 0.9, 7);
+    IntVerdictPredicate* predicate = nullptr;
+    CompoundScanCase scan_case = create_three_pass_scan_case();
+    scan_case.lazy_columns = {{701, row_as_value, true}};
+    scan_case.make_conjunct = make_int_verdict_conjunct(&predicate, keep_multiples_of_4, CompoundScanCase::kActiveSlot);
+
+    ASSIGN_OR_ABORT(auto result, _scan_with_compound_predicate(scan_case));
+    EXPECT_EQ(std::vector<int32_t>({4, 12, 20}), result.a_values);
+    EXPECT_EQ(std::vector<int32_t>({4, 12, 20}), result.lazy_values[0]);
+    EXPECT_EQ(rows_of_three_passes(), predicate->evaluated_values);
+    EXPECT_EQ(0, result.stats.compound_pred_deferred_rows);
+    EXPECT_EQ(21, result.stats.compound_pred_selected_rows);
+    EXPECT_EQ(21, result.stats.compound_pred_input_rows);
+    EXPECT_EQ(3, result.stats.compound_pred_output_rows);
+    EXPECT_EQ(3u, result.lazy_read_counts[0]);
+    EXPECT_EQ(std::vector<int64_t>({1, 1, 1}), result.lazy_read_filter_rows[0]);
+}
+
+// Covers: a compound conjunct whose only lazy input is its own column is deferred whatever it keeps, whether
+//         the query outputs that column or not. The group reader reads the column for the rows that the
+//         earlier stages left, which are the rows that it reads it for when the conjunct runs in the reader.
+TEST_F(GroupReaderTest, SelectiveCompoundPredicateIsDeferredWhenItOnlyReadsItsOwnLazyColumn) {
+    ScopedDeferConfig defer(true, 0.9, 7);
+    for (bool is_output : {false, true}) {
+        SCOPED_TRACE(is_output);
+        IntVerdictPredicate* predicate = nullptr;
+        CompoundScanCase scan_case = create_three_pass_scan_case();
+        scan_case.lazy_columns = {{701, row_as_value, is_output}};
+        scan_case.make_conjunct = make_int_verdict_conjunct(&predicate, keep_multiples_of_4);
+
+        ASSIGN_OR_ABORT(auto result, _scan_with_compound_predicate(scan_case));
+        EXPECT_EQ(std::vector<int32_t>({4, 12, 20}), result.a_values);
+        EXPECT_EQ(std::vector<int32_t>({4, 12, 20}), result.lazy_values[0]);
+        EXPECT_EQ(rows_of_three_passes(), predicate->evaluated_values);
+        EXPECT_EQ(21, result.stats.compound_pred_deferred_rows);
+        EXPECT_EQ(0, result.stats.compound_pred_selected_rows);
+        EXPECT_EQ(21, result.stats.compound_pred_input_rows);
+        EXPECT_EQ(3, result.stats.compound_pred_output_rows);
+        EXPECT_EQ(3u, result.lazy_read_counts[0]);
+        EXPECT_EQ(std::vector<int64_t>({7, 7, 7}), result.lazy_read_filter_rows[0]);
+    }
+}
+
+// Covers: a conjunct is not free to defer when another conjunct reads a lazy column that it does not read,
+//         also when no query outputs that column. Deferring it would leave the rows that it drops to the
+//         other conjunct, and the column would be read for them. So the first conjunct stays in the reader
+//         and the column is read for the row that it leaves, while the second conjunct, which reads the
+//         column itself, is deferred.
+TEST_F(GroupReaderTest, CompoundPredicateIsNotFreeToDeferWhenAnotherOneReadsALazyColumn) {
+    ScopedDeferConfig defer(true, 0.9, 7);
+    for (bool is_output : {false, true}) {
+        SCOPED_TRACE(is_output);
+        IntVerdictPredicate* first = nullptr;
+        IntVerdictPredicate* second = nullptr;
+        CompoundScanCase scan_case = create_three_pass_scan_case();
+        scan_case.lazy_columns = {{701, row_as_value, is_output}};
+        scan_case.make_conjunct = make_int_verdict_conjunct(&first, keep_multiples_of_4, CompoundScanCase::kActiveSlot);
+        scan_case.more_conjuncts = {make_int_verdict_conjunct(&second, keep_from_10)};
+
+        ASSIGN_OR_ABORT(auto result, _scan_with_compound_predicate(scan_case));
+        EXPECT_EQ(std::vector<int32_t>({12, 20}), result.a_values);
+        EXPECT_EQ(std::vector<int32_t>({12, 20}), result.lazy_values[0]);
+        // The first conjunct saw the rows of the passes, the second one only the rows that the first kept.
+        EXPECT_EQ(rows_of_three_passes(), first->evaluated_values);
+        EXPECT_EQ(std::vector<int32_t>({4, 12, 20}), second->evaluated_values);
+        EXPECT_EQ(3, result.stats.compound_pred_deferred_rows);
+        EXPECT_EQ(21, result.stats.compound_pred_selected_rows);
+        EXPECT_EQ(21, result.stats.compound_pred_input_rows);
+        EXPECT_EQ(2, result.stats.compound_pred_output_rows);
+        EXPECT_EQ(std::vector<int64_t>({1, 1, 1}), result.lazy_read_filter_rows[0]);
+    }
+}
+
+// Covers: a conjunct that reads every lazy column is not free to defer when a later conjunct is not free,
+//         since the later conjunct would stay in the reader and run on the rows that the deferred one
+//         drops. Both conjuncts stay in the reader, and the second one sees only the rows that the first
+//         one kept.
+TEST_F(GroupReaderTest, CompoundPredicateIsNotFreeToDeferWhenALaterOneIsNotFree) {
+    ScopedDeferConfig defer(true, 0.9, 7);
+    IntVerdictPredicate* first = nullptr;
+    IntVerdictPredicate* second = nullptr;
+    CompoundScanCase scan_case = create_three_pass_scan_case();
+    // The first conjunct reads the only lazy column, which the query outputs. The second one reads column a,
+    // so it does not read that lazy column and is not free.
+    scan_case.lazy_columns = {{701, row_as_value, true}};
+    scan_case.make_conjunct = make_int_verdict_conjunct(&first, keep_multiples_of_4);
+    scan_case.more_conjuncts = {make_int_verdict_conjunct(&second, keep_from_10, CompoundScanCase::kActiveSlot)};
+
+    ASSIGN_OR_ABORT(auto result, _scan_with_compound_predicate(scan_case));
+    EXPECT_EQ(std::vector<int32_t>({12, 20}), result.a_values);
+    EXPECT_EQ(std::vector<int32_t>({12, 20}), result.lazy_values[0]);
+    EXPECT_EQ(rows_of_three_passes(), first->evaluated_values);
+    EXPECT_EQ(std::vector<int32_t>({4, 12, 20}), second->evaluated_values);
+    EXPECT_EQ(0, result.stats.compound_pred_deferred_rows);
+    EXPECT_EQ(21, result.stats.compound_pred_selected_rows);
+    EXPECT_EQ(21, result.stats.compound_pred_input_rows);
+    EXPECT_EQ(2, result.stats.compound_pred_output_rows);
+}
+
+// Covers: a compound conjunct with a lambda host is deferred whatever it keeps when the lazy column that its
+//         lambda captures is the only lazy column that is read. The lambda runs on the output chunk, and the
+//         captured column is read for the rows that the earlier stages left, as it is for the conjunct in
+//         the reader.
+TEST_F(GroupReaderTest, CompoundLambdaPredicateIsDeferredWhenItReadsTheOnlyLazyColumn) {
+    ScopedDeferConfig defer(true, 0.9, 4);
+    IntRecorderExpr* recorder = nullptr;
+    // The passes are the rows {0, 1, 2}, {3, 4, 5}, ... and the deletion vector drops the first row of each
+    // pass. The lambda keeps the even rows, one of two, so its statistics are far below the keep ratio.
+    CompoundScanCase scan_case = create_array_map_scan_case(0, &recorder);
+    scan_case.rows_per_read = 3;
+    scan_case.deleted_rows = {0, 3, 6, 9};
+
+    ASSIGN_OR_ABORT(auto result, _scan_with_compound_predicate(scan_case));
+    EXPECT_EQ(std::vector<int32_t>({2, 4, 8, 10}), result.a_values);
+    EXPECT_EQ(std::vector<int32_t>({10, 8, 4, 2}), result.lazy_values[0]);
+    EXPECT_EQ(std::vector<int32_t>({0, 10, 8, 0, 0, 4, 2, 0}), recorder->recorded_values);
+    EXPECT_TRUE(result.conjunct_has_indirect_inputs);
+    EXPECT_FALSE(result.conjunct_has_dict_mapping);
+    EXPECT_EQ(8, result.stats.compound_pred_deferred_rows);
+    EXPECT_EQ(0, result.stats.compound_pred_selected_rows);
+    EXPECT_EQ(8, result.stats.compound_pred_input_rows);
+    EXPECT_EQ(4, result.stats.compound_pred_output_rows);
+    EXPECT_EQ(std::vector<int64_t>({2, 2, 2, 2}), result.lazy_read_filter_rows[0]);
+    ASSERT_EQ(1u, result.conjunct_stats.size());
+    EXPECT_EQ(8, result.conjunct_stats[0].input_rows);
+    EXPECT_EQ(4, result.conjunct_stats[0].output_rows);
 }
 
 } // namespace starrocks::parquet

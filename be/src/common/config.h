@@ -1252,6 +1252,20 @@ CONF_mBool(parquet_cache_aware_dict_decoder_enable, "true");
 // runtime filters are only used for row group / page statistics pruning and the
 // row-level probe happens in the downstream scan operator instead.
 CONF_mBool(parquet_runtime_filter_push_down_enable, "true");
+// We expect a compound (multi-column) predicate that keeps almost every row it sees to gain little from
+// running before the lazy columns are read, while evaluating it on the rows that are left costs a copy of
+// its inputs for those rows. So when this is enabled, and at least one row of a pass is already dropped, the
+// reader evaluates such a predicate on the output chunk, which holds only the rows left, after the lazy
+// columns are read, and it reads the lazy columns that the predicate needs even if no output needs them.
+// A predicate is evaluated this way once it has seen at least parquet_compound_predicate_defer_min_observed_rows
+// rows in the scan range and has kept at least parquet_compound_predicate_defer_min_keep_ratio of them.
+// We fear that the reader reads lazy columns for the rows that the predicate would have dropped, which is why
+// the predicate has to keep most rows. When the predicate reads every lazy column that is read for an output or
+// for a compound predicate, and so does every later compound predicate, nothing extra is read, and the
+// predicate is evaluated on the output chunk whatever it keeps.
+CONF_mBool(parquet_compound_predicate_defer_enable, "false");
+CONF_mDouble(parquet_compound_predicate_defer_min_keep_ratio, "0.9");
+CONF_mInt64(parquet_compound_predicate_defer_min_observed_rows, "4096");
 
 CONF_mBool(parquet_reader_enable_adpative_bloom_filter, "true");
 CONF_Double(parquet_page_cache_decompress_threshold, "1.5");
