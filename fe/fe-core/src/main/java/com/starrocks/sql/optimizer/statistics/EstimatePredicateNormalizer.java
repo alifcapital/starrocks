@@ -235,7 +235,7 @@ final class EstimatePredicateNormalizer {
     }
 
     // A column of strings whose table declares the format of its dates with a day, and that is not a virtual column.
-    static boolean isDateColumn(ColumnRefOperator column) {
+    private static boolean isDateColumn(ColumnRefOperator column) {
         if (!column.getType().isStringType() || ExpressionStatisticsEstimator.isVirtualColumn(column)) {
             return false;
         }

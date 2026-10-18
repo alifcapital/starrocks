@@ -17,7 +17,6 @@ package com.starrocks.sql.optimizer.statistics;
 import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
-import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.LikePredicateOperator;
@@ -37,12 +36,12 @@ import java.util.OptionalInt;
  * every earlier part are added to theirs whole.
  * <p>
  * A part is a set of values of one expression e: e = v, or the comparisons of e with constants that are ANDed, which
- * are an interval with its ends open or closed, or c LIKE 'p%' on a column of dates, the interval of the strings from p
- * up to the first string after every string that starts with p, which the estimate of the LIKE reads so. Two parts are
- * apart when their values have none in common: another v, a v outside the interval, intervals with no common point.
- * Anything else is not told apart: a part of another form, another expression, constants that cannot be compared
- * exactly, an interval with no value. A part that is not of the form leaves every later part not told apart as well,
- * as it can have rows in common with them.
+ * are an interval with its ends open or closed, or e LIKE 'p%' of a string e, the interval of the strings from p up to
+ * the first string after every string that starts with p, in the order of the statistics. Two parts are apart when
+ * their values have none in common: another v, a v outside the interval, intervals with no common point; two LIKE
+ * parts are apart when neither prefix starts with the other. Anything else is not told apart: a part of another form,
+ * another expression, constants that cannot be compared exactly, an interval with no value. A part that is not of the
+ * form leaves every later part not told apart as well, as it can have rows in common with them.
  */
 final class DisjointOrParts {
     // The values e keeps from lower to upper; a null end is open without bound.
@@ -77,8 +76,7 @@ final class DisjointOrParts {
     }
 
     private static Range rangeOf(ScalarOperator part) {
-        if (part instanceof LikePredicateOperator like && !like.isRegexp()
-                && like.getChild(0) instanceof ColumnRefOperator column && EstimatePredicateNormalizer.isDateColumn(column)) {
+        if (part instanceof LikePredicateOperator like && !like.isRegexp() && like.getChild(0).getType().isStringType()) {
             // The strings that start with p are those from p up to the first string after all of them.
             Optional<String> prefix = LikePatternEstimator.pattern(like)
                     .flatMap(LikePatternEstimator.LikePattern::fixedPrefix);

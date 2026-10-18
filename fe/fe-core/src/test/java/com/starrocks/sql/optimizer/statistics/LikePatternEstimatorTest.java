@@ -15,12 +15,16 @@
 package com.starrocks.sql.optimizer.statistics;
 
 import com.starrocks.catalog.Function;
+import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.ast.expression.ExprUtils;
+import com.starrocks.sql.optimizer.Utils;
+import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.LikePredicateOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.type.IntegerType;
 import com.starrocks.type.Type;
 import com.starrocks.type.VarcharType;
@@ -334,6 +338,49 @@ public class LikePatternEstimatorTest {
         // A pattern that starts with a wildcard has no literal.
         Assertions.assertEquals(200, rows("_a%"), 1e-6);
         Assertions.assertEquals(300, rows("%a%"), 1e-6);
+    }
+
+    private static LikePredicateOperator likeOf(String pattern) {
+        return new LikePredicateOperator(LikePredicateOperator.LikeType.LIKE, STATUS,
+                ConstantOperator.createVarchar(pattern));
+    }
+
+    private static ScalarOperator equalsOf(String value) {
+        return new BinaryPredicateOperator(BinaryType.EQ, STATUS, ConstantOperator.createVarchar(value));
+    }
+
+    private static double rowsOf(ScalarOperator predicate, Statistics statistics) {
+        return PredicateStatisticsCalculator.statisticsCalculate(predicate, statistics).getOutputRowCount();
+    }
+
+    // The rows of the OR as the estimate takes them for parts that may share rows: the rows of the first, and of the
+    // second less its rows among those of the first.
+    private static double orWithSharedRows(ScalarOperator first, ScalarOperator second) {
+        Statistics statistics = stringStatistics();
+        Statistics afterFirst = PredicateStatisticsCalculator.statisticsCalculate(first, statistics);
+        return rowsOf(first, statistics) + rowsOf(second, statistics) - rowsOf(second, afterFirst);
+    }
+
+    @Test
+    void orOfLikeConditionsOfPrefixesAddsTheRowsOfPrefixesThatDoNotStartOneWithAnother() {
+        Statistics statistics = stringStatistics();
+        // No string starts with both ab and ac: the rows of the second are not among those of the first.
+        Assertions.assertEquals(95, rowsOf(likeOf("ab%"), statistics), 1e-6);
+        double sum = rowsOf(likeOf("ab%"), statistics) + rowsOf(likeOf("ac%"), statistics);
+        Assertions.assertEquals(sum, rowsOf(Utils.compoundOr(likeOf("ab%"), likeOf("ac%")), statistics), 1e-6);
+        Assertions.assertEquals(sum, rowsOf(Utils.compoundOr(likeOf("ac%"), likeOf("ab%")), statistics), 1e-6);
+        // A string that is not among those that start with ab.
+        double other = rowsOf(likeOf("ab%"), statistics) + rowsOf(equalsOf("b"), statistics);
+        Assertions.assertEquals(other, rowsOf(Utils.compoundOr(likeOf("ab%"), equalsOf("b")), statistics), 1e-6);
+        // ab is a prefix of abc, and the string ab starts with ab: the estimate of an OR that shares rows.
+        Assertions.assertEquals(orWithSharedRows(likeOf("ab%"), likeOf("abc%")),
+                rowsOf(Utils.compoundOr(likeOf("ab%"), likeOf("abc%")), statistics), 1e-6);
+        Assertions.assertEquals(orWithSharedRows(likeOf("abc%"), likeOf("ab%")),
+                rowsOf(Utils.compoundOr(likeOf("abc%"), likeOf("ab%")), statistics), 1e-6);
+        Assertions.assertEquals(orWithSharedRows(likeOf("ab%"), equalsOf("ab")),
+                rowsOf(Utils.compoundOr(likeOf("ab%"), equalsOf("ab")), statistics), 1e-6);
+        Assertions.assertEquals(orWithSharedRows(likeOf("ab%"), likeOf("ab%")),
+                rowsOf(Utils.compoundOr(likeOf("ab%"), likeOf("ab%")), statistics), 1e-6);
     }
 
     @Test

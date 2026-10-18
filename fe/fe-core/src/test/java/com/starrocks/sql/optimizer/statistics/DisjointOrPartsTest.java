@@ -14,7 +14,6 @@
 
 package com.starrocks.sql.optimizer.statistics;
 
-import com.starrocks.common.util.StringDateFormat;
 import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
@@ -205,59 +204,62 @@ public class DisjointOrPartsTest {
                 compare(BinaryType.GT, at, first)));
     }
 
-    private static ScalarOperator like(String pattern) {
-        return new LikePredicateOperator(LikePredicateOperator.LikeType.LIKE, TEXT,
+    private static ScalarOperator likeOf(ScalarOperator left, String pattern) {
+        return new LikePredicateOperator(LikePredicateOperator.LikeType.LIKE, left,
                 ConstantOperator.createVarchar(pattern));
+    }
+
+    private static ScalarOperator like(String pattern) {
+        return likeOf(TEXT, pattern);
     }
 
     private static ScalarOperator text(BinaryType type, String value) {
         return compare(type, TEXT, ConstantOperator.createVarchar(value));
     }
 
-    // The LIKE of a prefix is an interval for a column of dates, whose estimate reads it so.
-    private static List<Boolean> likeAnswers(ScalarOperator... parts) {
-        return PredicateStatisticsCalculator.withStringDateFormats(column -> TEXT.equals(column)
-                ? StringDateFormat.parse("%Y-%m-%dT%H:%i:%s.%fZ") : null, () -> answers(parts));
-    }
-
-    @Test
-    public void testLikeOfAPrefixOnAColumnWithoutDatesIsNotTold() {
-        Assertions.assertEquals(List.of(false, false), answers(like("a%"), like("b%")));
-        Assertions.assertEquals(List.of(true, false), answers(eq(E, 1), like("b%")));
-        Assertions.assertEquals(List.of(false, false), answers(like("a%"), text(BinaryType.EQ, "b")));
-    }
-
     @Test
     public void testLikeOfAPrefixIsTheStringsThatStartWithIt() {
         // From the prefix up to the first string after all those with it: a% is [a, b).
-        Assertions.assertEquals(List.of(true, true, true), likeAnswers(like("a%"), like("b%"), like("c%")));
+        Assertions.assertEquals(List.of(true, true, true), answers(like("a%"), like("b%"), like("c%")));
+        // Any string column, and the virtual column of the statistics on expressions, read so.
+        ColumnRefOperator x = new ColumnRefOperator(-1, VarcharType.VARCHAR, "expr#1", true);
+        Assertions.assertEquals(List.of(true, true), answers(likeOf(x, "ab%"), likeOf(x, "ac%")));
+        Assertions.assertEquals(List.of(true, false), answers(likeOf(x, "ab%"), likeOf(x, "abc%")));
+        Assertions.assertEquals(List.of(true, false), answers(likeOf(x, "ab%"), compare(BinaryType.EQ, x,
+                ConstantOperator.createVarchar("ab"))));
+        Assertions.assertEquals(List.of(true, true), answers(likeOf(x, "ab%"), compare(BinaryType.EQ, x,
+                ConstantOperator.createVarchar("b"))));
+        Assertions.assertEquals(List.of(true, true), answers(like("ab%"), like("ac%")));
+        Assertions.assertEquals(List.of(true, false), answers(like("ab%"), like("abc%")));
+        Assertions.assertEquals(List.of(true, false), answers(like("ab%"), text(BinaryType.EQ, "ab")));
+        Assertions.assertEquals(List.of(true, true), answers(like("ab%"), text(BinaryType.EQ, "b")));
         // A prefix of another prefix has its rows, in both orders; the same prefix again as well.
-        Assertions.assertEquals(List.of(true, false), likeAnswers(like("a%"), like("ab%")));
-        Assertions.assertEquals(List.of(true, false), likeAnswers(like("ab%"), like("a%")));
-        Assertions.assertEquals(List.of(true, false), likeAnswers(like("a%"), like("a%")));
-        Assertions.assertEquals(List.of(true, true), likeAnswers(like("ab%"), like("ac%")));
+        Assertions.assertEquals(List.of(true, false), answers(like("a%"), like("ab%")));
+        Assertions.assertEquals(List.of(true, false), answers(like("ab%"), like("a%")));
+        Assertions.assertEquals(List.of(true, false), answers(like("a%"), like("a%")));
+        Assertions.assertEquals(List.of(true, true), answers(like("ab%"), like("ac%")));
         // Equalities and comparisons of the same expression: the string a is among those that start with a.
-        Assertions.assertEquals(List.of(true, false), likeAnswers(like("a%"), text(BinaryType.EQ, "a")));
-        Assertions.assertEquals(List.of(true, false), likeAnswers(like("a%"), text(BinaryType.EQ, "abc")));
-        Assertions.assertEquals(List.of(true, true), likeAnswers(like("a%"), text(BinaryType.EQ, "b")));
-        Assertions.assertEquals(List.of(true, true), likeAnswers(like("a%"), text(BinaryType.LT, "a")));
-        Assertions.assertEquals(List.of(true, false), likeAnswers(like("a%"), text(BinaryType.LE, "a")));
-        Assertions.assertEquals(List.of(true, true), likeAnswers(like("a%"), text(BinaryType.GE, "b")));
-        Assertions.assertEquals(List.of(true, false), likeAnswers(like("a%"), text(BinaryType.GE, "az")));
-        Assertions.assertEquals(List.of(true, true), likeAnswers(text(BinaryType.EQ, "2026-08-15"), like("2026-08-16%")));
+        Assertions.assertEquals(List.of(true, false), answers(like("a%"), text(BinaryType.EQ, "a")));
+        Assertions.assertEquals(List.of(true, false), answers(like("a%"), text(BinaryType.EQ, "abc")));
+        Assertions.assertEquals(List.of(true, true), answers(like("a%"), text(BinaryType.EQ, "b")));
+        Assertions.assertEquals(List.of(true, true), answers(like("a%"), text(BinaryType.LT, "a")));
+        Assertions.assertEquals(List.of(true, false), answers(like("a%"), text(BinaryType.LE, "a")));
+        Assertions.assertEquals(List.of(true, true), answers(like("a%"), text(BinaryType.GE, "b")));
+        Assertions.assertEquals(List.of(true, false), answers(like("a%"), text(BinaryType.GE, "az")));
+        Assertions.assertEquals(List.of(true, true), answers(text(BinaryType.EQ, "2026-08-15"), like("2026-08-16%")));
         // The escaped characters are read as characters.
-        Assertions.assertEquals(List.of(true, true), likeAnswers(like("a\\%b%"), like("a\\%c%")));
-        Assertions.assertEquals(List.of(true, false), likeAnswers(like("a\\%b%"), text(BinaryType.EQ, "a%b")));
+        Assertions.assertEquals(List.of(true, true), answers(like("a\\%b%"), like("a\\%c%")));
+        Assertions.assertEquals(List.of(true, false), answers(like("a\\%b%"), text(BinaryType.EQ, "a%b")));
         // No string is above all of those that start with the last code point: the interval has no upper end.
         String last = new String(Character.toChars(Character.MAX_CODE_POINT));
-        Assertions.assertEquals(List.of(true, true), likeAnswers(like(last + "%"), text(BinaryType.EQ, "a")));
-        Assertions.assertEquals(List.of(true, false), likeAnswers(like(last + "%"), text(BinaryType.GE, "zzz")));
+        Assertions.assertEquals(List.of(true, true), answers(like(last + "%"), text(BinaryType.EQ, "a")));
+        Assertions.assertEquals(List.of(true, false), answers(like(last + "%"), text(BinaryType.GE, "zzz")));
         // A pattern with more than a prefix, and a REGEXP, are not told, and the parts after them neither.
-        Assertions.assertEquals(List.of(true, false, false), likeAnswers(like("a%"), like("b_%"), like("c%")));
-        Assertions.assertEquals(List.of(true, false), likeAnswers(like("a%"),
+        Assertions.assertEquals(List.of(true, false, false), answers(like("a%"), like("b_%"), like("c%")));
+        Assertions.assertEquals(List.of(true, false), answers(like("a%"),
                 new LikePredicateOperator(LikePredicateOperator.LikeType.REGEXP, TEXT, ConstantOperator.createVarchar("^b"))));
         // Another expression.
-        Assertions.assertEquals(List.of(true, false), likeAnswers(like("a%"), compare(BinaryType.EQ, E, number(1))));
+        Assertions.assertEquals(List.of(true, false), answers(like("a%"), compare(BinaryType.EQ, E, number(1))));
     }
 
     @Test

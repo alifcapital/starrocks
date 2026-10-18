@@ -201,7 +201,8 @@ public class ExpressionStatisticsMatcherTest {
         ScalarOperator or = Utils.compoundOr(like(C, "101%"), like(C, "102%"));
         ExpressionStatisticsMatcher.Result result =
                 ExpressionStatisticsMatcher.match(or, expressions(left(8), false), plain());
-        Assertions.assertTrue(result.hasOr());
+        // The prefixes of 3 characters of one OR are one prefix IN, so no OR is left over x.
+        Assertions.assertFalse(result.hasOr());
         Assertions.assertFalse(Utils.extractColumnRef(result.getPredicate()).contains(C));
         ScalarOperator not = new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.NOT, like(C, "1%"));
         Assertions.assertEquals(X, rewrite(not).getChild(0).getChild(0));
@@ -276,7 +277,7 @@ public class ExpressionStatisticsMatcherTest {
         // Over x alone the NULL rows of c are left out of the share of x.
         ExpressionStatisticsMatcher.Result pure = ExpressionStatisticsMatcher.match(Utils.compoundOr(prefix,
                 like(C, "102%")), expressions(left(8), false), plain());
-        Assertions.assertTrue(pure.hasOr());
+        Assertions.assertFalse(pure.hasOr());
         Assertions.assertEquals(Set.of(C), pure.getNullRowsLeftOutColumns());
     }
 

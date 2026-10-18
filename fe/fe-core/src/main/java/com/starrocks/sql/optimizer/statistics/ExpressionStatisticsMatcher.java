@@ -36,6 +36,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -59,7 +60,46 @@ import java.util.Set;
  * estimated over x and the others as before, and the two shares multiply as independent.
  */
 public final class ExpressionStatisticsMatcher {
+    // We expect predicates of hundreds of atoms over x to be generated, and fear that their estimate takes longer than
+    // the planner waits: every atom written over x makes the estimate of the AND, OR or NOT around it filter the head
+    // of x again, so the work is the number of atoms times the size of the head, and 600 atoms of x <> p took 2.4 to
+    // 3.0 s on the stand against the 3 s the planner gives. The atoms of one axis, such as the equalities of an OR, are
+    // one set before they are counted, and estimated in one pass. The other atoms written over x are counted over the
+    // predicate, after the source of each column is chosen, and an atom past this number stays as it is, to be
+    // estimated without x, while the atoms before it are still written. The atoms of the worst form that do not
+    // merge, x >= p, take 0.24 s for 64 of them in an AND on the stand, and 0.15 s for an OR or an AND of 64 on a head
+    // of 600 values in ExpressionStatisticsLargeOrTest.
+    static final int MAX_ATOMS_OVER_X = 64;
+
     private ExpressionStatisticsMatcher() {
+    }
+
+    // The atoms that can still be written over x in a predicate; the cost of a written atom is paid here.
+    private static final class AtomBudget {
+        private int remaining;
+        private int spent;
+
+        private AtomBudget(int remaining) {
+            this.remaining = remaining;
+        }
+
+        // The budget of a count: how many atoms a conjunct would cost, without limit.
+        private static AtomBudget unlimited() {
+            return new AtomBudget(Integer.MAX_VALUE);
+        }
+
+        private boolean take() {
+            return take(1);
+        }
+
+        private boolean take(int atoms) {
+            if (remaining < atoms) {
+                return false;
+            }
+            remaining -= atoms;
+            spent += atoms;
+            return true;
+        }
     }
 
     /** The copy of the predicate for the estimate. */
@@ -185,7 +225,9 @@ public final class ExpressionStatisticsMatcher {
             columns.add(new HashSet<>(Utils.extractColumnRef(conjunct)));
         }
 
-        // The conditions each expression can write, by the position of the conjunct.
+        // The conditions each expression can write, by the position of the conjunct, and the atoms each of them costs.
+        // The cost is not paid here: the expression that is chosen for a column pays it below.
+        Map<ScanExpressionStatistics.Entry, Map<Integer, Integer>> costs = new HashMap<>();
         Map<ScanExpressionStatistics.Entry, Map<Integer, ScalarOperator>> candidates = new LinkedHashMap<>();
         Map<ScanExpressionStatistics.Entry, Set<ColumnRefOperator>> entrySources = new HashMap<>();
         for (ScanExpressionStatistics.Entry entry : expressions.getEntries()) {
@@ -193,18 +235,22 @@ public final class ExpressionStatisticsMatcher {
             entrySources.put(entry, sources);
             PrefixDerivationRule rule = PrefixDerivationRule.of(entry);
             Map<Integer, ScalarOperator> written = new LinkedHashMap<>();
+            Map<Integer, Integer> cost = new HashMap<>();
             for (int i = 0; i < size; i++) {
                 ScalarOperator conjunct = conjuncts.get(i);
                 if (!estimated[i] || conjunct.isFromPredicateRangeDerive() || Collections.disjoint(columns.get(i), sources)) {
                     continue;
                 }
-                ScalarOperator rewritten = rewriteTree(conjunct, entry, rule, cache);
+                AtomBudget count = AtomBudget.unlimited();
+                ScalarOperator rewritten = rewriteTree(conjunct, entry, rule, cache, count);
                 if (rewritten != null) {
                     written.put(i, rewritten);
+                    cost.put(i, count.spent);
                 }
             }
             if (!written.isEmpty()) {
                 candidates.put(entry, written);
+                costs.put(entry, cost);
             }
         }
         if (candidates.isEmpty()) {
@@ -225,6 +271,7 @@ public final class ExpressionStatisticsMatcher {
         Set<ColumnRefOperator> used = new HashSet<>();
         Set<ColumnRefOperator> nonNull = new HashSet<>();
         Set<ColumnRefOperator> nullRowsLeftOut = new HashSet<>();
+        AtomBudget budget = new AtomBudget(MAX_ATOMS_OVER_X);
         boolean hasOr = false;
         boolean changed = false;
         for (ScanExpressionStatistics.Entry entry : order) {
@@ -274,7 +321,9 @@ public final class ExpressionStatisticsMatcher {
                 claimed.addAll(related);
                 continue;
             }
-            for (Map.Entry<Integer, ScalarOperator> item : written.entrySet()) {
+            Map<Integer, ScalarOperator> chosen = payForAtoms(written, costs.get(entry), conjuncts, dropped, entry,
+                    PrefixDerivationRule.of(entry), cache, budget);
+            for (Map.Entry<Integer, ScalarOperator> item : chosen.entrySet()) {
                 replacement[item.getKey()] = item.getValue();
                 // A condition with a part kept on a real column is not over x only. We do not narrow the
                 // distribution of x by it, as the values of x cannot tell which rows the kept part takes, and the
@@ -322,6 +371,78 @@ public final class ExpressionStatisticsMatcher {
             }
         }
         return new Result(conjuncts, replacement, dropped, used, hasOr, filtered, nonNull, nullRowsLeftOut);
+    }
+
+    /**
+     * The conditions of the conjuncts that the chosen expression writes, within the atoms that are left of the budget
+     * of the predicate. The negations x <> a, x NOT IN and NOT of a prefix atom, of different conjuncts, are the atoms
+     * of one axis in an AND, so they are one set at the place of the first of them, and the others are dropped; the set
+     * costs one atom. A conjunct is paid in the order of the conjuncts: when the atoms of a conjunct are more than are
+     * left, its atoms are written again one by one while the budget lasts, and the others stay as they are.
+     */
+    private static Map<Integer, ScalarOperator> payForAtoms(Map<Integer, ScalarOperator> written,
+                                                            Map<Integer, Integer> costs, List<ScalarOperator> conjuncts,
+                                                            boolean[] dropped, ScanExpressionStatistics.Entry entry,
+                                                            PrefixDerivationRule rule, ExpressionStatisticsCache cache,
+                                                            AtomBudget budget) {
+        ColumnRefOperator x = entry.getColumn();
+        Map<AxisSets.Axis, List<Integer>> negations = new LinkedHashMap<>();
+        Map<Integer, AxisSets.Member> members = new HashMap<>();
+        for (Map.Entry<Integer, ScalarOperator> item : written.entrySet()) {
+            Optional<AxisSets.Member> member = AxisSets.memberOf(item.getValue(), x, true);
+            if (member.isPresent()) {
+                members.put(item.getKey(), member.get());
+                negations.computeIfAbsent(member.get().axis(), axis -> new ArrayList<>()).add(item.getKey());
+            }
+        }
+        Map<Integer, List<Integer>> sets = new HashMap<>();
+        negations.values().stream().filter(indexes -> indexes.size() > 1)
+                .forEach(indexes -> sets.put(indexes.get(0), indexes));
+        Set<Integer> merged = new HashSet<>();
+        sets.values().forEach(indexes -> merged.addAll(indexes.subList(1, indexes.size())));
+        Map<Integer, ScalarOperator> chosen = new LinkedHashMap<>();
+        for (Map.Entry<Integer, ScalarOperator> item : written.entrySet()) {
+            int index = item.getKey();
+            if (merged.contains(index)) {
+                continue;
+            }
+            List<Integer> set = sets.get(index);
+            if (set != null) {
+                ScalarOperator one = AxisSets.setOf(members.get(index).axis(),
+                        set.stream().map(members::get).toList(), x, true);
+                if (one != null && budget.take()) {
+                    chosen.put(index, one);
+                    set.subList(1, set.size()).forEach(other -> dropped[other] = true);
+                    continue;
+                }
+                // The set is not written: its negations are estimated each as it stands, one by one.
+                for (int other : set) {
+                    ScalarOperator single = payForConjunct(written.get(other), costs.get(other), conjuncts.get(other),
+                            entry, rule, cache, budget);
+                    if (single != null) {
+                        chosen.put(other, single);
+                    }
+                }
+                continue;
+            }
+            ScalarOperator paid = payForConjunct(item.getValue(), costs.get(index), conjuncts.get(index), entry, rule,
+                    cache, budget);
+            if (paid != null) {
+                chosen.put(index, paid);
+            }
+        }
+        return chosen;
+    }
+
+    // The written conjunct when the budget holds its atoms; else the conjunct written again within what is left, null
+    // when no atom of it is.
+    private static ScalarOperator payForConjunct(ScalarOperator written, int cost, ScalarOperator conjunct,
+                                                 ScanExpressionStatistics.Entry entry, PrefixDerivationRule rule,
+                                                 ExpressionStatisticsCache cache, AtomBudget budget) {
+        if (budget.take(cost)) {
+            return written;
+        }
+        return rewriteTree(conjunct, entry, rule, cache, budget);
     }
 
     /**
@@ -514,87 +635,182 @@ public final class ExpressionStatisticsMatcher {
      * parts as it does for any other columns.
      */
     private static ScalarOperator rewriteTree(ScalarOperator operator, ScanExpressionStatistics.Entry entry,
-                                              PrefixDerivationRule rule, ExpressionStatisticsCache cache) {
-        ScalarOperator rewritten = rewritePart(operator, entry, rule, cache);
+                                              PrefixDerivationRule rule, ExpressionStatisticsCache cache,
+                                              AtomBudget budget) {
+        ScalarOperator rewritten = rewritePart(operator, entry, rule, cache, budget);
         return rewritten == operator ? null : rewritten;
     }
 
-    // The same object when no atom of the operator is written.
+    // The same object when no atom of the operator is written. Each atom written over x is paid from the budget, and
+    // an atom the budget cannot pay stays as it is.
     private static ScalarOperator rewritePart(ScalarOperator operator, ScanExpressionStatistics.Entry entry,
-                                              PrefixDerivationRule rule, ExpressionStatisticsCache cache) {
-        if (operator instanceof CompoundPredicateOperator && ((CompoundPredicateOperator) operator).isOr()) {
-            return rewriteOr(operator, entry, rule, cache);
+                                              PrefixDerivationRule rule, ExpressionStatisticsCache cache,
+                                              AtomBudget budget) {
+        if (operator instanceof CompoundPredicateOperator compound && !compound.isNot()) {
+            return rewriteChain(operator, compound.isOr(), entry, rule, cache, budget);
         }
-        if (operator instanceof CompoundPredicateOperator) {
-            CompoundPredicateOperator compound = (CompoundPredicateOperator) operator;
-            List<ScalarOperator> children = new ArrayList<>(operator.getChildren().size());
-            boolean changed = false;
-            for (ScalarOperator child : operator.getChildren()) {
-                ScalarOperator rewritten = rewritePart(child, entry, rule, cache);
-                changed |= rewritten != child;
-                children.add(rewritten);
-            }
-            if (!changed) {
+        if (operator instanceof CompoundPredicateOperator negation) {
+            ScalarOperator child = rewritePart(negation.getChild(0), entry, rule, cache, budget);
+            if (child == negation.getChild(0)) {
                 return operator;
             }
-            if (compound.isNot() && ConstantOperator.FALSE.equals(children.get(0))) {
+            boolean ofAnd = negation.getChild(0) instanceof CompoundPredicateOperator inner && inner.isAnd();
+            if (ConstantOperator.FALSE.equals(child) && !ofAnd) {
                 // A prefix no value can have is false on every value of x and NULL on NULL, so its negation is
-                // true exactly on the rows where x is not NULL.
+                // true exactly on the rows where x is not NULL. A conjunction that is false for such a part is false
+                // on the rows with x NULL only when its other parts are, so its negation is not this.
                 return new IsNullPredicateOperator(true, entry.getColumn());
             }
-            return new CompoundPredicateOperator(compound.getCompoundType(), children);
+            return new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.NOT, child);
         }
-        ScalarOperator rewritten = rewriteAtom(operator, entry, rule, cache);
-        if (rewritten == null || !Utils.extractColumnRef(rewritten).stream().allMatch(entry.getColumn()::equals)) {
+        ScalarOperator rewritten = rewriteWritableAtom(operator, entry, rule, cache);
+        if (rewritten == null) {
             return operator;
+        }
+        return reads(rewritten, entry) && !budget.take() ? operator : rewritten;
+    }
+
+    // The atom written over x, or null when it cannot be written over x alone.
+    private static ScalarOperator rewriteWritableAtom(ScalarOperator atom, ScanExpressionStatistics.Entry entry,
+                                                      PrefixDerivationRule rule, ExpressionStatisticsCache cache) {
+        ScalarOperator rewritten = rewriteAtom(atom, entry, rule, cache);
+        if (rewritten == null || !Utils.extractColumnRef(rewritten).stream().allMatch(entry.getColumn()::equals)) {
+            return null;
         }
         return rewritten;
     }
 
+    private static boolean reads(ScalarOperator operator, ScanExpressionStatistics.Entry entry) {
+        return Utils.extractColumnRef(operator).contains(entry.getColumn());
+    }
+
+    // Whether a part was written as false: a prefix no value can have, which is false on every value of x.
+    private static boolean isWrittenFalse(ScalarOperator written, ScalarOperator part) {
+        return written != part && ConstantOperator.FALSE.equals(written);
+    }
+
     /**
-     * An OR with its parts written. The estimate of an OR adds up its parts in their order, and it keeps the
+     * An OR or an AND with its parts written. The estimate of an OR adds up its parts in their order, and it keeps the
      * statistics of x after the first part. We want the same estimate whatever order the query lists the parts in,
      * and the statistics of x to be those of the parts over x, so when some parts read x and some do not, the parts
      * over x go first, each group in the order of the query.
+     *
+     * The atoms of one axis are one set before they are paid: the atoms of an OR that are values of x or prefixes of
+     * x, and the negations of them in an AND, see AxisSets. The set costs one atom of the budget, and when the budget
+     * cannot pay it the atoms stay as they are. A compound part pays its own atoms.
+     *
+     * A part written as false adds no row to an OR, so it is left out; an OR of only such parts is false. We fear the
+     * estimate of the OR taking the rows of the part that is false among the rows of the others. An AND with a part
+     * written as false is false.
      */
-    private static ScalarOperator rewriteOr(ScalarOperator operator, ScanExpressionStatistics.Entry entry,
-                                            PrefixDerivationRule rule, ExpressionStatisticsCache cache) {
-        List<ScalarOperator> parts = Utils.extractDisjunctive(operator);
-        List<ScalarOperator> rewritten = new ArrayList<>(parts.size());
-        boolean changed = false;
+    private static ScalarOperator rewriteChain(ScalarOperator operator, boolean or, ScanExpressionStatistics.Entry entry,
+                                               PrefixDerivationRule rule, ExpressionStatisticsCache cache,
+                                               AtomBudget budget) {
+        List<ScalarOperator> parts = or ? Utils.extractDisjunctive(operator) : Utils.extractConjuncts(operator);
+        int size = parts.size();
+        ColumnRefOperator x = entry.getColumn();
+        ScalarOperator[] written = new ScalarOperator[size];
+        boolean[] atom = new boolean[size];
+        Map<AxisSets.Axis, List<Integer>> axes = new LinkedHashMap<>();
+        Map<Integer, AxisSets.Member> members = new HashMap<>();
+        for (int i = 0; i < size; i++) {
+            ScalarOperator part = parts.get(i);
+            if (part instanceof CompoundPredicateOperator) {
+                written[i] = rewritePart(part, entry, rule, cache, budget);
+                continue;
+            }
+            atom[i] = true;
+            ScalarOperator rewritten = rewriteWritableAtom(part, entry, rule, cache);
+            written[i] = rewritten == null ? part : rewritten;
+            Optional<AxisSets.Member> member = rewritten == null ? Optional.empty()
+                    : AxisSets.memberOf(rewritten, x, !or);
+            if (member.isPresent()) {
+                members.put(i, member.get());
+                axes.computeIfAbsent(member.get().axis(), axis -> new ArrayList<>()).add(i);
+            }
+        }
+        // The atoms of one axis are one set at the place of the first of them.
+        Set<Integer> merged = new HashSet<>();
+        Map<Integer, List<Integer>> sets = new HashMap<>();
+        for (List<Integer> indexes : axes.values()) {
+            if (indexes.size() > 1) {
+                ScalarOperator set = AxisSets.setOf(members.get(indexes.get(0)).axis(),
+                        indexes.stream().map(members::get).toList(), x, !or);
+                if (set != null) {
+                    sets.put(indexes.get(0), indexes);
+                    written[indexes.get(0)] = set;
+                    merged.addAll(indexes.subList(1, indexes.size()));
+                }
+            }
+        }
+        // The atoms are paid in the order of the parts. What the budget cannot pay stays as it is: a set stays as its atoms.
+        for (int i = 0; i < size; i++) {
+            if (!atom[i] || merged.contains(i) || written[i] == parts.get(i) || !reads(written[i], entry)
+                    || budget.take()) {
+                continue;
+            }
+            written[i] = parts.get(i);
+            List<Integer> set = sets.remove(i);
+            if (set != null) {
+                set.forEach(other -> {
+                    written[other] = parts.get(other);
+                    merged.remove(other);
+                });
+            }
+        }
+        boolean changed = !merged.isEmpty();
+        boolean dropped = false;
+        List<ScalarOperator> kept = new ArrayList<>(size);
         int readX = 0;
-        for (ScalarOperator part : parts) {
-            ScalarOperator written = rewritePart(part, entry, rule, cache);
-            changed |= written != part;
-            readX += Utils.extractColumnRef(written).contains(entry.getColumn()) ? 1 : 0;
-            rewritten.add(written);
+        for (int i = 0; i < size; i++) {
+            if (merged.contains(i)) {
+                continue;
+            }
+            changed |= written[i] != parts.get(i);
+            if (isWrittenFalse(written[i], parts.get(i))) {
+                if (!or) {
+                    return ConstantOperator.FALSE;
+                }
+                dropped = true;
+                continue;
+            }
+            readX += reads(written[i], entry) ? 1 : 0;
+            kept.add(written[i]);
         }
         if (!changed) {
             return operator;
         }
-        if (readX == 0 || readX == parts.size()) {
-            return rebuildOr(operator, rewritten.iterator());
+        if (kept.isEmpty()) {
+            return ConstantOperator.FALSE;
         }
-        List<ScalarOperator> ordered = new ArrayList<>(rewritten.size());
-        for (ScalarOperator part : rewritten) {
-            if (Utils.extractColumnRef(part).contains(entry.getColumn())) {
+        boolean sameParts = merged.isEmpty() && !dropped;
+        if (!or || readX == 0 || readX == kept.size()) {
+            return sameParts ? rebuildChain(operator, or, kept.iterator()) : compound(or, kept);
+        }
+        List<ScalarOperator> ordered = new ArrayList<>(kept.size());
+        for (ScalarOperator part : kept) {
+            if (reads(part, entry)) {
                 ordered.add(part);
             }
         }
-        for (ScalarOperator part : rewritten) {
-            if (!Utils.extractColumnRef(part).contains(entry.getColumn())) {
+        for (ScalarOperator part : kept) {
+            if (!reads(part, entry)) {
                 ordered.add(part);
             }
         }
         return Utils.compoundOr(ordered);
     }
 
-    // The tree of ORs of the original with its parts taken in turn from the written ones.
-    private static ScalarOperator rebuildOr(ScalarOperator original, Iterator<ScalarOperator> parts) {
-        if (original instanceof CompoundPredicateOperator && ((CompoundPredicateOperator) original).isOr()) {
-            ScalarOperator first = rebuildOr(original.getChild(0), parts);
-            ScalarOperator second = rebuildOr(original.getChild(1), parts);
-            return new CompoundPredicateOperator(CompoundPredicateOperator.CompoundType.OR, first, second);
+    private static ScalarOperator compound(boolean or, List<ScalarOperator> parts) {
+        return or ? Utils.compoundOr(parts) : Utils.compoundAnd(parts);
+    }
+
+    // The tree of ORs or ANDs of the original with its parts taken in turn from the written ones.
+    private static ScalarOperator rebuildChain(ScalarOperator original, boolean or, Iterator<ScalarOperator> parts) {
+        if (original instanceof CompoundPredicateOperator compound && !compound.isNot() && compound.isOr() == or) {
+            ScalarOperator first = rebuildChain(original.getChild(0), or, parts);
+            ScalarOperator second = rebuildChain(original.getChild(1), or, parts);
+            return new CompoundPredicateOperator(compound.getCompoundType(), first, second);
         }
         return parts.next();
     }

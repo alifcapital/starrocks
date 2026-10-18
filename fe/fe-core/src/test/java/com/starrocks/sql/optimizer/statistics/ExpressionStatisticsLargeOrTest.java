@@ -45,7 +45,9 @@ import java.util.TreeMap;
 /**
  * An OR of hundreds of parts, over the virtual column x = left(c, 8) of a head of 600 values, over c and over columns
  * with a head of their own. The estimate of an OR filters the MCV distributions by the OR of its first i parts for
- * every i, and each filter evaluates the OR on the head, so the work must not grow with the square of the parts.
+ * every i, and each filter evaluates the OR on the head, so the work must not grow with the square of the parts. Each
+ * atom over x filters the head of x, so the atoms written over x in the ORs of a predicate are counted, and an OR that
+ * would pass the budget of the matcher is estimated without x, in milliseconds.
  *
  * The table has 600,000 rows, c is a string of 500,000 values, x has the head of 600 values of 1000 rows each:
  * 00000000, 00000001, 00001000 and so on, two values for each prefix of 5 characters. e has a head of its own, and d
@@ -120,6 +122,30 @@ public class ExpressionStatisticsLargeOrTest {
                         group.getNullCounts())));
     }
 
+    private static final ColumnRefOperator X5 = new ColumnRefOperator(-2, VarcharType.VARCHAR, "expr#2", true);
+
+    // The statistics on x = left(c, 8) and on x5 = left(c, 5), whose head holds the 300 prefixes of 2000 rows each; the
+    // entry of x5 comes last, after the one that loses the choice.
+    private static ScanExpressionStatistics twoExpressions() {
+        List<MultiColumnCombinedStats.McvEntry> entries = new ArrayList<>();
+        for (int p = 0; p < HEAD / 2; p++) {
+            entries.add(new MultiColumnCombinedStats.McvEntry(List.of(String.format("%05d", p)), 2000, List.of(2000L)));
+        }
+        ExternalMcvStatistics.Group group = new ExternalMcvStatistics.Group(List.of("x"), (long) ROWS, HEAD / 2, entries,
+                List.of(), List.of(0L));
+        group.prepare(VarcharType.VARCHAR);
+        ColumnStatistic statistic = group.columnStatistic(VarcharType.VARCHAR, ColumnStatistic.unknown()).orElseThrow();
+        ScalarOperator canonical = ExpressionStatisticsCanonicalizer.canonicalize(left(5));
+        ScanExpressionStatistics wide = expressions();
+        List<ScanExpressionStatistics.Entry> both = new ArrayList<>(wide.getEntries());
+        both.add(new ScanExpressionStatistics.Entry(canonical, ExpressionStatisticsCanonicalizer.keyOf(canonical), X5,
+                statistic));
+        Map<Set<ColumnRefOperator>, MultiColumnCombinedStats> groups = new java.util.LinkedHashMap<>(wide.getGroups());
+        groups.put(Set.of(X5), new MultiColumnCombinedStats(HEAD / 2, (long) ROWS, List.of(X5), group.getMcv(),
+                group.getNullCounts()));
+        return new ScanExpressionStatistics("t", both, groups);
+    }
+
     private static Statistics scan() {
         List<MultiColumnCombinedStats.McvEntry> head = List.of(
                 new MultiColumnCombinedStats.McvEntry(List.of("v"), 300_000, List.of(300_000L)),
@@ -189,41 +215,362 @@ public class ExpressionStatisticsLargeOrTest {
         return (System.nanoTime() - start) / 1_000_000;
     }
 
+    private static final int LIMIT = ExpressionStatisticsMatcher.MAX_ATOMS_OVER_X;
+
+    private static double plainRows(ScalarOperator or) {
+        return PredicateStatisticsCalculator.statisticsCalculate(or, scan(), true).getOutputRowCount();
+    }
+
+    // left(c, 5) IN (the prefixes 0 to count - 1): the prefixes of the parts of an OR of equalities, in one set.
+    private static ScalarOperator prefixesIn(int count) {
+        String[] prefixes = new String[count];
+        for (int p = 0; p < count; p++) {
+            prefixes[p] = String.format("%05d", p);
+        }
+        return in(left(5), prefixes);
+    }
+
     @Test
     public void testOrOfOnlyPartsOverXHoldsTheRowsOfTheirUnion() {
         // The head holds every row, so the rows of the union are the rows of its values: 2 values of 1000 rows for each
-        // of the prefixes, and the values of x are in the prefixes.
-        Assertions.assertEquals(40_000, rows(partsOnlyOverX(20)), 1e-6);
-        Assertions.assertEquals(100_000, rows(partsOnlyOverX(50)), 1e-6);
-        Assertions.assertEquals(200_000, rows(partsOnlyOverX(100)), 1e-6);
-        Assertions.assertEquals(400_000, rows(partsOnlyOverX(200)), 1e-6);
-        Assertions.assertEquals(400_000, rows(partsOnlyOverX(400)), 1e-6);
-        Assertions.assertEquals(400_000, rows(partsOnlyOverX(600)), 1e-6);
+        // of the prefixes, and the values of x are in the prefixes. The atoms of one axis are one set, so the count of
+        // the parts does not matter: 65 parts and 600 parts are as exact as 20.
+        for (int count : new int[] {20, 50, LIMIT, LIMIT + 1, 100, 200, 400, 600}) {
+            Assertions.assertEquals(2000.0 * Math.min(count, 200), rows(partsOnlyOverX(count)), 1e-6,
+                    String.valueOf(count));
+        }
     }
 
     @Test
     public void testMixedOrKeepsItsRows() {
-        // The values are those of the estimate of the OR part by part: the parts over x go first, and each part over e
-        // takes the rows of its value less the rows among the earlier parts.
-        Assertions.assertEquals(44_732.034250, rows(mixed(10)), 1e-6);
-        Assertions.assertEquals(145_008.883115, rows(mixed(50)), 1e-6);
-        Assertions.assertEquals(207_056.883249, rows(mixed(200)), 1e-6);
-        Assertions.assertEquals(208_320.017069, rows(mixed(300)), 1e-6);
+        // The values are those of the estimate of the OR part by part: the parts over x go first as the sets of their
+        // axes, and each part over e takes the rows of its value less the rows among the earlier parts. The parts over x
+        // are equalities of values of x and of prefixes of 5 characters.
+        Assertions.assertEquals(44_733.494675, rows(mixed(10)), 1e-6);
+        Assertions.assertEquals(145_011.368977, rows(mixed(50)), 1e-6);
+        // The same parts as the two sets they are: the prefixes of 5 characters and the values of x.
+        for (int count : new int[] {10, 50, 200, 300}) {
+            int prefixes = (count + 2) / 3;
+            int values = (count + 1) / 3;
+            List<ScalarOperator> sets = new ArrayList<>();
+            sets.add(prefixesIn(prefixes));
+            if (values > 0) {
+                String[] head = new String[values];
+                for (int p = 0; p < values; p++) {
+                    head[p] = headValue(p);
+                }
+                sets.add(in(left(8), head));
+            }
+            sets.addAll(partsOverE(count));
+            Assertions.assertEquals(rows(sets), rows(mixed(count)), 1e-6, String.valueOf(count));
+        }
     }
 
     @Test
-    public void testOrOfSixHundredPartsTakesTimeInProportionToTheParts() {
-        // 600 parts over x, and 300 over x with 300 over e. The planner stops at 3 seconds, and we fear that the work
-        // of the filters of the OR grows with the square of the parts, so we compare 600 parts with 150.
-        long mixed = millis(mixed(300));
-        long onlyX = millis(partsOnlyOverX(600));
-        long quarter = millis(partsOnlyOverX(150));
-        System.out.println("OR of 300 + 300 parts " + mixed + " ms, 600 parts over x " + onlyX + " ms, 150 parts over x "
-                + quarter + " ms");
-        Assertions.assertTrue(mixed < 500, mixed + " ms");
-        Assertions.assertTrue(onlyX < 5000, onlyX + " ms");
-        // Four times the parts take about five times the time, and sixteen times for the square.
-        Assertions.assertTrue(onlyX < 10L * Math.max(quarter, 20), onlyX + " ms for 600 parts, " + quarter + " ms for 150");
+    public void testOrOfEqualitiesAndRegexpOfOneAxisIsTheInAndTakesMilliseconds() {
+        for (int count : new int[] {LIMIT + 1, 800}) {
+            ScalarOperator in = prefixesIn(count);
+            double expected = estimate(in).getOutputRowCount();
+            List<ScalarOperator> equalities = new ArrayList<>();
+            List<String> regexp = new ArrayList<>();
+            for (int p = 0; p < count; p++) {
+                equalities.add(eq(left(5), text(String.format("%05d", p))));
+                regexp.add(String.format("^%05d", p));
+            }
+            ScalarOperator or = Utils.compoundOr(equalities);
+            ScalarOperator regexpOr = new LikePredicateOperator(LikePredicateOperator.LikeType.REGEXP, C,
+                    text(String.join("|", regexp)));
+            for (ScalarOperator predicate : List.of(or, regexpOr)) {
+                estimate(predicate);
+                long start = System.nanoTime();
+                double rows = estimate(predicate).getOutputRowCount();
+                long millis = (System.nanoTime() - start) / 1_000_000;
+                Assertions.assertEquals(expected, rows, 1e-6, count + " " + predicate.getClass().getSimpleName());
+                Assertions.assertTrue(millis < 200, count + ": " + millis + " ms");
+            }
+        }
+    }
+
+    @Test
+    public void testAndOfInequalitiesAndNegatedOrOfOneAxisIsTheNotInAndTakesMilliseconds() {
+        for (int count : new int[] {LIMIT + 1, 400, 800}) {
+            List<ScalarOperator> inequalities = new ArrayList<>();
+            List<ScalarOperator> equalities = new ArrayList<>();
+            String[] prefixes = new String[count];
+            for (int p = 0; p < count; p++) {
+                prefixes[p] = String.format("%05d", p);
+                inequalities.add(new BinaryPredicateOperator(BinaryType.NE, left(5), text(prefixes[p])));
+                equalities.add(eq(left(5), text(prefixes[p])));
+            }
+            List<ScalarOperator> children = new ArrayList<>();
+            children.add(left(5));
+            for (String prefix : prefixes) {
+                children.add(text(prefix));
+            }
+            ScalarOperator expected = new InPredicateOperator(true, children.toArray(new ScalarOperator[0]));
+            double rows = estimate(expected).getOutputRowCount();
+            for (ScalarOperator predicate : List.of(Utils.compoundAnd(inequalities),
+                    not(Utils.compoundOr(equalities)))) {
+                estimate(predicate);
+                long start = System.nanoTime();
+                double estimated = estimate(predicate).getOutputRowCount();
+                long millis = (System.nanoTime() - start) / 1_000_000;
+                Assertions.assertEquals(rows, estimated, 1e-6, count + " " + predicate);
+                Assertions.assertTrue(millis < 500, count + ": " + millis + " ms");
+            }
+            // The inequalities inside an OR, next to a condition on another column, are the one set as well.
+            ScalarOperator other = eq(D, ConstantOperator.createInt(3));
+            Assertions.assertEquals(estimate(Utils.compoundOr(expected, other)).getOutputRowCount(),
+                    estimate(Utils.compoundOr(Utils.compoundAnd(inequalities), other)).getOutputRowCount(), 1e-6,
+                    String.valueOf(count));
+        }
+    }
+
+    @Test
+    public void testOrWithinTheBudgetTakesTimeInProportionToTheParts() {
+        // The planner stops at 3 seconds, and we fear that the work of the filters grows with the square of the atoms,
+        // so we compare the atoms of the budget with a quarter of them. The atoms of the form x >= p are not a set.
+        long limit = millis(ofForm("ge", LIMIT));
+        long quarter = millis(ofForm("ge", LIMIT / 4));
+        System.out.println("MEASURED: OR of " + LIMIT + " atoms x >= p " + limit + " ms, " + LIMIT / 4 + " atoms " + quarter
+                + " ms; AND of " + LIMIT + " atoms " + millis(andOfForm("ge", LIMIT)) + " ms");
+        Assertions.assertTrue(limit < 500, limit + " ms");
+        // Four times the atoms take about five times the time, and sixteen times for the square.
+        Assertions.assertTrue(limit < 10L * Math.max(quarter, 20), limit + " ms for " + LIMIT + " atoms, " + quarter
+                + " ms for " + LIMIT / 4);
+    }
+
+    private static List<ScalarOperator> ofForm(String form, int count) {
+        List<ScalarOperator> parts = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            parts.add(part(form, i));
+        }
+        return parts;
+    }
+
+    private static List<ScalarOperator> andOfForm(String form, int count) {
+        return List.of(Utils.compoundAnd(ofForm(form, count)));
+    }
+
+    // The parts of an OR of one form, i over x unless the form says another column.
+    private static ScalarOperator part(String form, int i) {
+        String prefix = String.format("%05d", i);
+        switch (form) {
+            case "eq":
+                return eq(left(5), text(prefix));
+            case "ne":
+                return new BinaryPredicateOperator(BinaryType.NE, left(5), text(prefix));
+            case "ge":
+                return new BinaryPredicateOperator(BinaryType.GE, left(5), text(prefix));
+            case "lt":
+                return new BinaryPredicateOperator(BinaryType.LT, left(5), text(prefix));
+            case "not":
+                return not(Utils.compoundOr(eq(left(5), text(prefix)), eq(D, ConstantOperator.createInt(3))));
+            case "like":
+                return new LikePredicateOperator(LikePredicateOperator.LikeType.LIKE, left(5), text(prefix + "%"));
+            case "regexp":
+                return new LikePredicateOperator(LikePredicateOperator.LikeType.REGEXP, C, text("^" + prefix));
+            case "column":
+                return new BinaryPredicateOperator(BinaryType.GE, C, text(prefix));
+            case "in":
+                return in(left(5), prefix, String.format("%05d", i + 1));
+            default:
+                throw new IllegalArgumentException(form);
+        }
+    }
+
+    private static final List<String> FORMS = List.of("eq", "ne", "ge", "lt", "not", "like", "regexp", "column", "in",
+            "mixed");
+
+    // count parts over x of a form; the form mixed has as many parts over e next to the parts over x
+    private static ScalarOperator or(String form, int count) {
+        List<ScalarOperator> parts = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            parts.add(part(form.equals("mixed") ? "ne" : form, i));
+            if (form.equals("mixed")) {
+                parts.add(eq(E, text("u" + i)));
+            }
+        }
+        return Utils.compoundOr(parts);
+    }
+
+    private static ExpressionStatisticsMatcher.Result match(ScalarOperator predicate) {
+        return ExpressionStatisticsMatcher.match(EstimatePredicateNormalizer.normalize(predicate, scan()), expressions(),
+                scan());
+    }
+
+    private static long readingX(ScalarOperator predicate) {
+        return Utils.extractDisjunctive(predicate).stream().filter(part -> Utils.extractColumnRef(part).contains(X)).count();
+    }
+
+    @Test
+    public void testAtomsOfDifferentKindsPastTheBudgetStayOneByOne() {
+        // The first atoms of an OR are written over x while the budget lasts, and the atom past it stays as it is: the
+        // OR is not left without x as a whole.
+        ScalarOperator within = or("ge", LIMIT);
+        ExpressionStatisticsMatcher.Result written = match(within);
+        Assertions.assertNotNull(written);
+        Assertions.assertEquals(LIMIT, readingX(written.getPredicate()));
+        List<ScalarOperator> parts = ofForm("ge", LIMIT + 1);
+        ScalarOperator past = Utils.compoundOr(parts);
+        ExpressionStatisticsMatcher.Result result = match(past);
+        Assertions.assertNotNull(result);
+        List<ScalarOperator> after = Utils.extractDisjunctive(result.getPredicate());
+        Assertions.assertEquals(LIMIT + 1, after.size());
+        Assertions.assertEquals(LIMIT, readingX(result.getPredicate()));
+        Assertions.assertTrue(after.stream().anyMatch(part -> part == parts.get(LIMIT)));
+        // The estimate differs from the one of the atoms of the budget by the share of the atom that stays: the rows of
+        // an OR are the rows of its parts so far and at most the rows of the atom more.
+        double atoms = estimate(within).getOutputRowCount();
+        double all = estimate(past).getOutputRowCount();
+        double alone = plainRows(parts.get(LIMIT));
+        Assertions.assertTrue(all >= atoms - 1e-6, atoms + " " + all);
+        Assertions.assertTrue(all <= atoms + alone + 1e-6, atoms + " + " + alone + " " + all);
+        // The same in an AND: the first atoms are written, the others are the conjuncts of the query.
+        List<ScalarOperator> conjuncts = ofForm("ge", 100);
+        ExpressionStatisticsMatcher.Result and = match(Utils.compoundAnd(conjuncts));
+        Assertions.assertNotNull(and);
+        List<ScalarOperator> written2 = Utils.extractConjuncts(and.getPredicate());
+        Assertions.assertEquals(100, written2.size());
+        for (int i = 0; i < 100; i++) {
+            if (i < LIMIT) {
+                Assertions.assertTrue(Utils.extractColumnRef(written2.get(i)).contains(X), String.valueOf(i));
+            } else {
+                Assertions.assertSame(conjuncts.get(i), written2.get(i), String.valueOf(i));
+            }
+        }
+    }
+
+    @Test
+    public void testTheBudgetIsPaidByTheExpressionThatIsChosen() {
+        // The atoms of both expressions of the column are candidates, and the one with the shorter prefix is chosen. The
+        // atoms the other would write are not paid, so the chosen one writes all of them.
+        ScalarOperator or = or("ge", LIMIT);
+        ExpressionStatisticsMatcher.Result result = ExpressionStatisticsMatcher.match(
+                EstimatePredicateNormalizer.normalize(or, scan()), twoExpressions(), scan());
+        Assertions.assertNotNull(result);
+        Assertions.assertEquals(Set.of(X5), result.getUsedColumns());
+        Assertions.assertEquals(LIMIT, Utils.extractDisjunctive(result.getPredicate()).stream()
+                .filter(part -> Utils.extractColumnRef(part).contains(X5)).count());
+    }
+
+    @Test
+    public void testOrWithinTheBudgetKeepsItsRows() {
+        Assertions.assertEquals(64, LIMIT);
+        // 60 atoms over x: the rows of the estimate over the head, not of the ordinary one.
+        Assertions.assertEquals(120_000, rows(List.of(or("eq", 60))), 1e-6);
+        Assertions.assertEquals(600_000, rows(List.of(or("ne", 60))), 1e-6);
+        Assertions.assertEquals(600_000, rows(List.of(or("ge", 60))), 1e-6);
+        Assertions.assertEquals(118_000, rows(List.of(or("lt", 60))), 1e-6);
+        Assertions.assertEquals(120_000, rows(List.of(or("like", 60))), 1e-6);
+        Assertions.assertEquals(122_000, rows(List.of(or("in", 60))), 1e-6);
+        Assertions.assertEquals(327_253.381858, rows(List.of(or("mixed", 60))), 1e-6);
+    }
+
+    @Test
+    public void testTheBudgetIsForTheAtomsOfTheWholePredicate() {
+        ScalarOperator d = eq(D, ConstantOperator.createInt(3));
+        // The atoms are paid in the order of the conjuncts, wherever they stand: the 60 atoms of an OR, the atom under a
+        // NOT, the 3 of the OR after it fill the budget of 64, and the atom after them stays as it is.
+        ScalarOperator first = Utils.compoundOr(ofForm("ge", 60));
+        ScalarOperator negated = not(part("ge", 1000));
+        ScalarOperator third = Utils.compoundOr(List.of(part("lt", 2000), part("lt", 2001), part("lt", 2002)));
+        ScalarOperator last = part("ge", 3000);
+        ExpressionStatisticsMatcher.Result result = match(Utils.compoundAnd(List.of(first, negated, third, last, d)));
+        Assertions.assertNotNull(result);
+        List<ScalarOperator> conjuncts = Utils.extractConjuncts(result.getPredicate());
+        Assertions.assertEquals(5, conjuncts.size());
+        for (int i = 0; i < 3; i++) {
+            Assertions.assertTrue(Utils.extractColumnRef(conjuncts.get(i)).contains(X), String.valueOf(i));
+        }
+        Assertions.assertSame(last, conjuncts.get(3));
+        // The conjuncts that are negations of one axis are one set at the place of the first, and cost one atom.
+        List<ScalarOperator> inequalities = new ArrayList<>();
+        for (int p = 0; p < 800; p++) {
+            inequalities.add(part("ne", p));
+        }
+        List<ScalarOperator> others = ofForm("ge", 70);
+        List<ScalarOperator> all = new ArrayList<>(inequalities);
+        all.addAll(others);
+        ExpressionStatisticsMatcher.Result sets = match(Utils.compoundAnd(all));
+        Assertions.assertNotNull(sets);
+        List<ScalarOperator> after = Utils.extractConjuncts(sets.getPredicate());
+        Assertions.assertEquals(71, after.size());
+        List<ScalarOperator> setChildren = new ArrayList<>();
+        setChildren.add(PrefixDerivationRule.substr(X, 1, 5));
+        for (int p = 0; p < 800; p++) {
+            setChildren.add(text(String.format("%05d", p)));
+        }
+        Assertions.assertEquals(not(new InPredicateOperator(false, setChildren.toArray(new ScalarOperator[0]))),
+                after.get(0));
+        for (int i = 0; i < 70; i++) {
+            if (i < LIMIT - 1) {
+                Assertions.assertTrue(Utils.extractColumnRef(after.get(i + 1)).contains(X), String.valueOf(i));
+            } else {
+                Assertions.assertSame(others.get(i), after.get(i + 1), String.valueOf(i));
+            }
+        }
+        // The negations of a set past the budget are estimated each as they are, and the budget they did not spend
+        // is the next conjunct's.
+        List<ScalarOperator> first64 = new ArrayList<>(ofForm("ge", LIMIT));
+        List<ScalarOperator> withInequalities = new ArrayList<>(first64);
+        withInequalities.add(part("ne", 1));
+        withInequalities.add(part("ne", 2));
+        ExpressionStatisticsMatcher.Result unpaid = match(Utils.compoundAnd(withInequalities));
+        Assertions.assertNotNull(unpaid);
+        List<ScalarOperator> kept = Utils.extractConjuncts(unpaid.getPredicate());
+        Assertions.assertEquals(LIMIT + 2, kept.size());
+        Assertions.assertSame(withInequalities.get(LIMIT), kept.get(LIMIT));
+        Assertions.assertSame(withInequalities.get(LIMIT + 1), kept.get(LIMIT + 1));
+        // The set of an OR that the budget cannot pay stays as its atoms.
+        List<ScalarOperator> full = new ArrayList<>(ofForm("ge", LIMIT));
+        ScalarOperator equalities = Utils.compoundOr(part("eq", 1), part("eq", 2));
+        full.add(equalities);
+        ExpressionStatisticsMatcher.Result unpaidSet = match(Utils.compoundAnd(full));
+        Assertions.assertNotNull(unpaidSet);
+        Assertions.assertSame(equalities, Utils.extractConjuncts(unpaidSet.getPredicate()).get(LIMIT));
+    }
+
+    @Test
+    public void testOrOfHundredsOfAtomsOfAnyFormTakesMilliseconds() {
+        for (String form : FORMS) {
+            for (int count : new int[] {800, 1000}) {
+                ScalarOperator or = or(form, count);
+                estimate(or);
+                long start = System.nanoTime();
+                estimate(or);
+                long millis = (System.nanoTime() - start) / 1_000_000;
+                Assertions.assertTrue(millis < 500, form + " " + count + ": " + millis + " ms");
+            }
+            // The atoms of the budget are estimated over x in less than the 3 seconds of the planner, with room for a
+            // slower machine and the rest of the plan.
+            ScalarOperator limit = or(form, LIMIT);
+            estimate(limit);
+            long start = System.nanoTime();
+            estimate(limit);
+            long millis = (System.nanoTime() - start) / 1_000_000;
+            Assertions.assertTrue(millis < 3000, form + " " + LIMIT + ": " + millis + " ms");
+        }
+        // The same atoms in an AND, 800 of them: the negations are one set, the others are written within the budget.
+        for (String form : List.of("ne", "ge", "lt", "not", "like", "column", "in")) {
+            ScalarOperator and = Utils.compoundAnd(ofForm(form, 800));
+            estimate(and);
+            long start = System.nanoTime();
+            estimate(and);
+            long millis = (System.nanoTime() - start) / 1_000_000;
+            Assertions.assertTrue(millis < 500, "AND of 800 " + form + ": " + millis + " ms");
+        }
+        // Four ORs of 200 atoms in one predicate.
+        List<ScalarOperator> big = new ArrayList<>();
+        for (String form : List.of("eq", "ne", "ge", "not")) {
+            big.add(or(form, 200));
+        }
+        ScalarOperator and = Utils.compoundAnd(big);
+        estimate(and);
+        long start = System.nanoTime();
+        estimate(and);
+        long millis = (System.nanoTime() - start) / 1_000_000;
+        Assertions.assertTrue(millis < 500, "four ORs of 200 atoms: " + millis + " ms");
     }
 
     // The columns, the groups and the row count of statistics as text, to tell two of them apart.

@@ -154,10 +154,10 @@ public class PrefixDerivationRuleTest {
 
     @Test
     public void testOrOfPrefixes() {
-        // 600 + 300 rows less the one row the estimate of an OR takes for the rows of the second part in the first.
-        Assertions.assertEquals(899, rows(Utils.compoundOr(like(left(5), "103%"), like(left(5), "104%"))), 1e-6);
+        // 600 + 300 rows: no string starts with both prefixes, so the second part has no row among those of the first.
+        Assertions.assertEquals(900, rows(Utils.compoundOr(like(left(5), "103%"), like(left(5), "104%"))), 1e-6);
         // The prefix of the first part and a LIKE on c itself in the other: both go over x.
-        Assertions.assertEquals(899, rows(Utils.compoundOr(like(left(5), "103%"), like(C, "104%"))), 1e-6);
+        Assertions.assertEquals(900, rows(Utils.compoundOr(like(left(5), "103%"), like(C, "104%"))), 1e-6);
     }
 
     @Test
@@ -387,6 +387,16 @@ public class PrefixDerivationRuleTest {
         Assertions.assertNull(written(in(true, "1040000000")));
     }
 
+    // substr(x, 1, n) IN (prefixes of n characters)
+    private static ScalarOperator prefixIn(int length, String... prefixes) {
+        List<ScalarOperator> children = new ArrayList<>();
+        children.add(PrefixDerivationRule.substr(X, 1, length));
+        for (String prefix : prefixes) {
+            children.add(ConstantOperator.createVarchar(prefix));
+        }
+        return new InPredicateOperator(false, children.toArray(new ScalarOperator[0]));
+    }
+
     @Test
     public void testRegexpOfAnchoredPrefixesIsTheOrOfTheirLikeConditions() {
         ScalarOperator one = regexp(C, "^104");
@@ -396,13 +406,13 @@ public class PrefixDerivationRuleTest {
         Assertions.assertEquals(X, onX.getChild(0));
         Assertions.assertEquals(rows(like(C, "104%")), rows(one), 1e-6);
         Assertions.assertEquals(300, rows(one), 1e-6);
-        // Two prefixes: 600 + 300 rows less the one row the estimate of an OR takes for the rows of the second part in
-        // the first, as for the OR of the two LIKE conditions.
+        // Two prefixes: 600 + 300 rows, as for the OR of the two LIKE conditions, whose parts have no row in common.
         ScalarOperator two = regexp(C, "^103|^104");
         ScalarOperator likes = Utils.compoundOr(like(C, "103%"), like(C, "104%"));
-        Assertions.assertEquals(899, rows(likes), 1e-6);
+        Assertions.assertEquals(900, rows(likes), 1e-6);
         Assertions.assertEquals(rows(likes), rows(two), 1e-6);
-        Assertions.assertEquals(2, Utils.extractDisjunctive(written(two)).size());
+        // The LIKE conditions of prefixes of 3 characters are the one set of them: the prefix IN.
+        Assertions.assertEquals(prefixIn(3, "103", "104"), written(two));
         // The prefix of the column, the one that no value has, and the one longer than x.
         Assertions.assertEquals(rows(Utils.compoundOr(like(left(5), "103%"), like(left(5), "104%"))),
                 rows(regexp(left(5), "^103|^104")), 1e-6);
@@ -415,6 +425,55 @@ public class PrefixDerivationRuleTest {
         // NOT keeps the rows that are not NULL, as for the LIKE.
         Assertions.assertEquals(rows(not(like(C, "104%"))), rows(not(one)), 1e-6);
         Assertions.assertEquals(600, rows(not(one)), 1e-6);
+    }
+
+    @Test
+    public void testOrOfLikeConditionsOverXAddsTheRowsOfPrefixesThatDoNotStartOneWithAnother() {
+        // The head: 600 rows of 10312345 and 300 of 10400000. Prefixes that do not start one with another have no row in
+        // common: 103 and 104 are 600 + 300, and 103 and the string 104 of x are 600 + 1, the one row of an estimate that
+        // finds none.
+        Assertions.assertEquals(900, rows(Utils.compoundOr(like(C, "103%"), like(C, "104%"))), 1e-6);
+        Assertions.assertEquals(900, rows(Utils.compoundOr(like(C, "104%"), like(C, "103%"))), 1e-6);
+        Assertions.assertEquals(601, rows(Utils.compoundOr(like(C, "103%"), compare(BinaryType.EQ, "104"))), 1e-6);
+        // 103 is a prefix of 1031, and the string 103 starts with 103: the second part has rows among those of the first.
+        Assertions.assertEquals(600, rows(Utils.compoundOr(like(C, "103%"), like(C, "1031%"))), 1e-6);
+        Assertions.assertEquals(600, rows(Utils.compoundOr(like(C, "1031%"), like(C, "103%"))), 1e-6);
+        Assertions.assertEquals(600, rows(Utils.compoundOr(like(C, "103%"), compare(BinaryType.EQ, "103"))), 1e-6);
+    }
+
+    @Test
+    public void testPartsWrittenAsFalseAreLeftOut() {
+        ScalarOperator no = ConstantOperator.createBoolean(false);
+        // A prefix longer than the 5 characters of the left side is no value of it, false on every value of x, and adds
+        // no row to the OR: the REGEXP is the one LIKE of the other prefix, wherever the false part stands.
+        ScalarOperator regexp = regexp(left(5), "^103|^1031234567");
+        Assertions.assertEquals(like(X, "103%"), written(regexp));
+        Assertions.assertEquals(like(X, "103%"), written(regexp(left(5), "^1031234567|^103")));
+        Assertions.assertEquals(prefixIn(3, "103", "104"), written(regexp(left(5), "^103|^1031234567|^104")));
+        Assertions.assertEquals(600, rows(like(left(5), "103%")), 1e-6);
+        Assertions.assertEquals(600, rows(regexp), 1e-6);
+        Assertions.assertEquals(900, rows(regexp(left(5), "^103|^1031234567|^104")), 1e-6);
+        // An OR of only false parts is false, and its negation holds on the rows where x is not NULL.
+        ScalarOperator onlyFalse = regexp(left(3), "^1031|^1032");
+        Assertions.assertEquals(no, written(onlyFalse));
+        Assertions.assertEquals(1, rows(onlyFalse), 1e-6);
+        ScalarOperator negated = written(not(onlyFalse));
+        Assertions.assertTrue(negated instanceof IsNullPredicateOperator && ((IsNullPredicateOperator) negated).isNotNull());
+        Assertions.assertEquals(900, rows(not(onlyFalse)), 1e-6);
+        // The false parts of an OR with a part on the column, and of an OR of LIKE conditions.
+        Assertions.assertEquals(like(X, "104%"), written(Utils.compoundOr(like(left(3), "1031%"), like(C, "104%"))));
+        // A conjunction with a false part is false, and is left out of the OR as a false part.
+        ScalarOperator falseAnd = Utils.compoundAnd(like(left(3), "1031%"), like(C, "104%"));
+        Assertions.assertEquals(like(X, "103%"), written(Utils.compoundOr(falseAnd, like(C, "103%"))));
+        Assertions.assertEquals(prefixIn(3, "103", "104"),
+                written(Utils.compoundOr(Utils.compoundOr(falseAnd, like(C, "103%")), like(C, "104%"))));
+        Assertions.assertEquals(600, rows(Utils.compoundOr(falseAnd, like(C, "103%"))), 1e-6);
+        // The negation of a conjunction with a false part is not the rows where x is not NULL: on the rows where x is
+        // NULL it holds when the other part is false, so it stays the negation of false.
+        Assertions.assertEquals(not(no), written(not(falseAnd)));
+        // Nothing false: the parts are written, and the prefixes of 3 characters are the one set of them.
+        Assertions.assertEquals(prefixIn(3, "103", "104"),
+                written(Utils.compoundOr(like(left(5), "103%"), like(C, "104%"))));
     }
 
     @Test
@@ -439,7 +498,7 @@ public class PrefixDerivationRuleTest {
                         .build()).build();
         ScalarOperator likes = Utils.compoundOr(like(C, "103%"), like(C, "104%"));
         double expected = PredicateStatisticsCalculator.statisticsCalculate(likes, column).getOutputRowCount();
-        Assertions.assertEquals(899, expected, 1e-6);
+        Assertions.assertEquals(900, expected, 1e-6);
         Assertions.assertEquals(expected, PredicateStatisticsCalculator.statisticsCalculate(regexp(C, "^103|^104"), column)
                 .getOutputRowCount(), 1e-6);
         Assertions.assertEquals(300, PredicateStatisticsCalculator.statisticsCalculate(regexp(C, "^104"), column)
@@ -487,13 +546,9 @@ public class PrefixDerivationRuleTest {
         Assertions.assertEquals(PredicateStatisticsCalculator.statisticsCalculate(likes, numbers, true)
                 .getOutputRowCount(), PredicateStatisticsCalculator.statisticsCalculate(regexp, numbers, true)
                 .getOutputRowCount(), 1e-6);
-        // Written over x as the OR of the two prefixes.
+        // Written over x as the one set of the two prefixes of 5 characters: the prefix IN.
         ExpressionStatisticsMatcher.Result result = ExpressionStatisticsMatcher.match(
                 EstimatePredicateNormalizer.normalize(regexp, numbers), numberExpressions(), numbers);
-        List<ScalarOperator> parts = Utils.extractDisjunctive(result.getPredicate());
-        Assertions.assertEquals(2, parts.size());
-        for (ScalarOperator part : parts) {
-            Assertions.assertEquals(X, part.getChild(0));
-        }
+        Assertions.assertEquals(prefixIn(5, "42894", "40406"), result.getPredicate());
     }
 }
