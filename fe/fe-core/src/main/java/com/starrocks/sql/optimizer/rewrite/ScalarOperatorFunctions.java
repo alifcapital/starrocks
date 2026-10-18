@@ -44,6 +44,7 @@ import com.starrocks.authorization.AuthorizationMgr;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.common.Config;
 import com.starrocks.common.Pair;
+import com.starrocks.common.util.DateFormatModel;
 import com.starrocks.common.util.DateUtils;
 import com.starrocks.common.util.TimeUtils;
 import com.starrocks.common.util.UnicodeCase;
@@ -441,18 +442,18 @@ public class ScalarOperatorFunctions {
             @ConstantFunction(name = "date_format", argTypes = {DATE, VARCHAR}, returnType = VARCHAR, isMonotonic = true)
     })
     public static ConstantOperator dateFormat(ConstantOperator date, ConstantOperator fmtLiteral) {
-        String format = fmtLiteral.getVarchar();
-        if (format.isEmpty()) {
-            return ConstantOperator.createNull(VarcharType.VARCHAR);
-        }
-        // unix style
-        if (!SUPPORT_JAVA_STYLE_DATETIME_FORMATTER.contains(format.trim())) {
-            DateTimeFormatter builder = DateUtils.unixDatetimeFormatter(fmtLiteral.getVarchar());
-            return ConstantOperator.createVarchar(builder.format(date.getDatetime()));
-        } else {
-            String result = date.getDatetime().format(DateTimeFormatter.ofPattern(fmtLiteral.getVarchar()));
-            return ConstantOperator.createVarchar(result);
-        }
+        return renderDate(DateFormatModel.Renderer.DATE_FORMAT, date, fmtLiteral);
+    }
+
+    // The folded string is a bound, an image or a constant of a plan, so we fear that it differs from the string of a
+    // row. We take it from the model of the format, which reads the format as the BE does and gives NULL where the BE
+    // does. The BE renders a DATE as its midnight, and the call stays for the BE when the model cannot give the string.
+    private static ConstantOperator renderDate(DateFormatModel.Renderer renderer, ConstantOperator date,
+                                               ConstantOperator fmtLiteral) {
+        LocalDateTime time = date.getType().isDate() ? date.getDatetime().truncatedTo(ChronoUnit.DAYS) : date.getDatetime();
+        return DateFormatModel.of(fmtLiteral.getVarchar()).fold(renderer, time)
+                .map(ConstantOperator::createVarchar)
+                .orElseGet(() -> ConstantOperator.createNull(VarcharType.VARCHAR));
     }
 
     @ConstantFunction.List(list = {
@@ -807,7 +808,7 @@ public class ScalarOperatorFunctions {
         }
         ConstantOperator dl = ConstantOperator.createDatetime(
                 LocalDateTime.ofInstant(Instant.ofEpochSecond(value), TimeUtils.getTimeZone().toZoneId()));
-        return dateFormat(dl, fmtLiteral);
+        return renderDate(DateFormatModel.Renderer.FROM_UNIXTIME, dl, fmtLiteral);
     }
 
     @ConstantFunction.List(list = {
@@ -831,7 +832,7 @@ public class ScalarOperatorFunctions {
         ConstantOperator dl = ConstantOperator.createDatetime(
                 LocalDateTime.ofInstant(Instant.ofEpochSecond(value),
                 TimeUtils.getOrSystemTimeZone(timezone.getVarchar()).toZoneId()));
-        return dateFormat(dl, fmtLiteral);
+        return renderDate(DateFormatModel.Renderer.FROM_UNIXTIME, dl, fmtLiteral);
     }
 
     @ConstantFunction(name = "to_datetime", argTypes = {BIGINT, INT}, returnType = DATETIME, isMonotonic = true)

@@ -126,6 +126,25 @@ public class ConstantExpressionTest extends PlanTestBase {
                 "select date_format(date_sub('2018-07-24 07:16:19',1),'yyyyMMdd');",
                 "'20180723'");
 
+        // The BE writes a % that ends the format and takes a Java style format as it is, with no trimming.
+        testFragmentPlanContainsConstExpr(
+                "select date_format('2020-02-19 16:01:12','%Y%');",
+                "'2020%'");
+
+        testFragmentPlanContainsConstExpr(
+                "select date_format('2020-02-19 16:01:12',' yyyyMMdd');",
+                "' yyyyMMdd'");
+
+        // The BE gives NULL for a string that does not fit its buffer of 128 bytes.
+        testFragmentPlanContainsConstExpr(
+                "select date_format('2020-02-19 16:01:12','" + "a".repeat(128) + "');",
+                "NULL");
+
+        // The FE does not render the week %u of the BE, so the call stays for the BE.
+        testFragmentPlanContains(
+                "select date_format('2026-01-05 16:01:12','%u');",
+                "date_format");
+
         testFragmentPlanContainsConstExpr(
                 "select year('2018-07-24')*12 + month('2018-07-24');",
                 "24223");

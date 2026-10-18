@@ -112,6 +112,12 @@ public class SelectConstTest extends PlanTestBase {
         assertPlanContains("select from_unixtime(32678)", "'1970-01-01 17:04:38'");
         assertPlanContains("select from_unixtime(102400000)", "'1973-03-31 12:26:40'");
         assertPlanContains("select from_unixtime(253402243100)", "'9999-12-31 15:58:20'");
+        // The BE writes a % that ends the format and takes a Java style format as it is, with no trimming.
+        assertPlanContains("select from_unixtime(10, '%Y%')", "'1970%'");
+        assertPlanContains("select from_unixtime(10, ' yyyy-MM-dd')", "' yyyy-MM-dd'");
+        // The BE fails to prepare a constant format of more than 100 bytes, so the call is not folded.
+        assertPlanContains("select from_unixtime(10, '%Y" + "x".repeat(99) + "')", "from_unixtime");
+        assertPlanContains("select from_unixtime(10, '%Y" + "x".repeat(98) + "')", "'1970" + "x".repeat(20));
     }
 
     @Test

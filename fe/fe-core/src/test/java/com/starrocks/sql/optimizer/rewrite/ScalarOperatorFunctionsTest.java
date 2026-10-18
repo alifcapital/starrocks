@@ -368,7 +368,7 @@ public class ScalarOperatorFunctionsTest {
                                 ConstantOperator.createVarchar("%Y-%m-%d"))
                         .getVarchar());
         assertEquals("123000", ScalarOperatorFunctions
-                .dateFormat(ConstantOperator.createDate(LocalDateTime.of(2022, 3, 13, 0, 0, 0, 123000000)),
+                .dateFormat(ConstantOperator.createDatetime(LocalDateTime.of(2022, 3, 13, 0, 0, 0, 123000000)),
                         ConstantOperator.createVarchar("%f")).getVarchar());
 
         assertEquals("asdfafdfsçv",
@@ -419,6 +419,159 @@ public class ScalarOperatorFunctionsTest {
         assertEquals("  ",
                 ScalarOperatorFunctions.dateFormat(testDate, ConstantOperator.createVarchar("  "))
                         .getVarchar());
+    }
+
+    private static String renderDate(ConstantOperator date, String format) {
+        ConstantOperator result = ScalarOperatorFunctions.dateFormat(date, ConstantOperator.createVarchar(format));
+        return result.isNull() ? null : result.getVarchar();
+    }
+
+    private static String renderEpoch(long epoch, String format) throws AnalysisException {
+        ConstantOperator result = ScalarOperatorFunctions.fromUnixTime(ConstantOperator.createBigint(epoch),
+                ConstantOperator.createVarchar(format), ConstantOperator.createVarchar("UTC"));
+        return result.isNull() ? null : result.getVarchar();
+    }
+
+    private static int bytes(String value) {
+        return value.getBytes(StandardCharsets.UTF_8).length;
+    }
+
+    // We fear that a fold which reads a format otherwise than the BE puts a string into the plan that no row has. The BE
+    // compares the format with the three Java style formats as they are, so a format that differs by a space or a control
+    // character is a text without a specifier, and the BE writes it as it is.
+    @Test
+    public void dateFormatDoesNotTrimTheJavaStyleFormats() throws AnalysisException {
+        ConstantOperator date = ConstantOperator.createDatetime(LocalDateTime.of(2001, 1, 9, 13, 4, 5));
+        for (String format : new String[] {" yyyy-MM-dd", "yyyy-MM-dd ", "\tyyyyMMdd", "yyyyMMdd\n", " yyyy-MM-dd HH:mm:ss",
+                "yyyy-MM-dd HH:mm:ss "}) {
+            assertEquals(format, renderDate(date, format));
+            assertEquals(format, renderEpoch(1000000000L, format));
+            assertEquals(format, ScalarOperatorFunctions.fromUnixTime(O_BI_10, ConstantOperator.createVarchar(format))
+                    .getVarchar());
+        }
+        assertEquals("2001-01-09", renderDate(date, "yyyy-MM-dd"));
+        assertEquals("20010109", renderDate(date, "yyyyMMdd"));
+        assertEquals("2001-01-09 13:04:05", renderDate(date, "yyyy-MM-dd HH:mm:ss"));
+        assertEquals("2001-09-09 01:46:40", renderEpoch(1000000000L, "yyyy-MM-dd HH:mm:ss"));
+    }
+
+    // The BE writes a % that ends the format as a character of the string, and %% as one %.
+    @Test
+    public void dateFormatWritesAPercentThatEndsTheFormat() throws AnalysisException {
+        ConstantOperator date = ConstantOperator.createDatetime(LocalDateTime.of(2001, 1, 9, 13, 4, 5));
+        assertEquals("%", renderDate(date, "%"));
+        assertEquals("a%", renderDate(date, "a%"));
+        assertEquals("2001%", renderDate(date, "%Y%"));
+        assertEquals("2001-01-09%", renderDate(date, "%Y-%m-%d%"));
+        assertEquals("%", renderDate(date, "%%"));
+        assertEquals("%%", renderDate(date, "%%%"));
+        assertEquals("%d", renderDate(date, "%%d"));
+        assertEquals("1970%", renderEpoch(10, "%Y%"));
+        assertEquals("%", renderEpoch(10, "%"));
+    }
+
+    // The BE writes the byte after a %, when it is no specifier: a letter, a digit, a % or a byte of a longer character.
+    // The zero byte stays in the string, as the model of the format keeps such a format out of every bound.
+    @Test
+    public void dateFormatWritesTheCharacterAfterAPercentThatIsNoSpecifier() throws AnalysisException {
+        ConstantOperator date = ConstantOperator.createDatetime(LocalDateTime.of(2001, 1, 9, 13, 4, 5));
+        assertEquals("q", renderDate(date, "%q"));
+        assertEquals("4", renderDate(date, "%4"));
+        assertEquals("azb", renderDate(date, "a%zb"));
+        assertEquals("é", renderDate(date, "%é"));
+        assertEquals("😀", renderDate(date, "%😀"));
+        assertEquals("é2001年", renderDate(date, "é%Y年"));
+        assertEquals("日本語-01-", renderDate(date, "日本語-%m-"));
+        assertEquals("\0", renderDate(date, "%\0"));
+        assertEquals("2001-01-09\0x", renderDate(date, "%Y-%m-%d\0x"));
+        assertEquals("2001-01-09\0x", renderEpoch(1000000000L, "2001-01-09\0x"));
+        assertEquals("é", renderEpoch(10, "%é"));
+        assertTrue(ScalarOperatorFunctions.dateFormat(date, ConstantOperator.createVarchar("")).isNull());
+    }
+
+    // The BE writes into a buffer of 128 bytes and gives NULL when a byte of the format has no room left, or when a
+    // specifier does not fit below the last byte. We fear that the FE folds a string that the BE gives NULL for, so a
+    // constant or a bound of a plan would hold a string that no row has. The cases count bytes, not characters.
+    @Test
+    public void dateFormatGivesNullWhereTheBackendHasNoRoom() throws AnalysisException {
+        ConstantOperator date = ConstantOperator.createDatetime(LocalDateTime.of(2023, 10, 11, 0, 0, 1, 30_000_000));
+        String head = "%Y-%m-%d %H:%i:%s.";
+        assertEquals(126, bytes(renderDate(date, head + "t".repeat(100) + "%f")));
+        Assertions.assertNull(renderDate(date, head + "t".repeat(101) + "%f"));
+        assertEquals(127, bytes(renderDate(date, "a".repeat(127))));
+        Assertions.assertNull(renderDate(date, "a".repeat(128)));
+        assertEquals(126, bytes(renderDate(date, "a".repeat(122) + "%Y")));
+        Assertions.assertNull(renderDate(date, "a".repeat(123) + "%Y"));
+        assertEquals(127, bytes(renderDate(date, "%Y" + "a".repeat(123))));
+        Assertions.assertNull(renderDate(date, "%Y" + "a".repeat(124)));
+        // a character after a % needs one byte more than the same character in the text
+        assertEquals(127, bytes(renderDate(date, "a".repeat(126) + "q")));
+        Assertions.assertNull(renderDate(date, "a".repeat(126) + "%q"));
+        assertEquals(126, bytes(renderDate(date, "a".repeat(125) + "%q")));
+        Assertions.assertNull(renderDate(date, "a".repeat(126) + "%%"));
+        // %% writes one byte for two of the format, so a format of 128 bytes can fit
+        assertEquals("%".repeat(64), renderDate(date, "%%".repeat(64)));
+        assertEquals(126, bytes(renderDate(date, "é".repeat(63))));
+        Assertions.assertNull(renderDate(date, "é".repeat(64)));
+        // from_unixtime has the same buffer
+        assertEquals(120, bytes(renderEpoch(1000000000L, "%T".repeat(15))));
+        Assertions.assertNull(renderEpoch(1000000000L, "%T".repeat(16)));
+        assertEquals(126, bytes(renderEpoch(1000000000L, "%T".repeat(15) + "%f")));
+        Assertions.assertNull(renderEpoch(1000000000L, "%T".repeat(15) + "%f%y"));
+    }
+
+    // A DATE is its midnight for the BE, which renders a DATE column as a datetime at 00:00:00.
+    @Test
+    public void dateFormatRendersADateAsItsMidnight() {
+        ConstantOperator day = ConstantOperator.createDate(LocalDateTime.of(2022, 3, 13, 5, 6, 7, 123_000_000));
+        assertEquals("2022-03-13 00:00:00.000000", renderDate(day, "%Y-%m-%d %H:%i:%s.%f"));
+        assertEquals("12 AM-00-0", renderDate(day, "%h AM-%H-%k"));
+        ConstantOperator time = ConstantOperator.createDatetime(LocalDateTime.of(2022, 3, 13, 5, 6, 7, 123_000_000));
+        assertEquals("2022-03-13 05:06:07.123000", renderDate(time, "%Y-%m-%d %H:%i:%s.%f"));
+    }
+
+    // The BE prints the year of the date, so the year 0000 is 0000 and %y of it is 00. The library of the FE counts the
+    // year of the era, which is 1 for the year 0, and prints 0001 and 01. That is the library behind the Java style forms.
+    @Test
+    public void dateFormatPrintsTheYearZeroAsTheBackendDoes() {
+        ConstantOperator zero = ConstantOperator.createDatetime(LocalDateTime.of(0, 1, 1, 0, 0, 0));
+        assertEquals("00", renderDate(zero, "%y"));
+        assertEquals("0000-01-01", renderDate(zero, "%Y-%m-%d"));
+        assertEquals("0000-01-01", renderDate(zero, "yyyy-MM-dd"));
+        assertEquals("00000101", renderDate(zero, "yyyyMMdd"));
+        assertEquals("0000-01-01 00:00:00", renderDate(zero, "yyyy-MM-dd HH:mm:ss"));
+        assertEquals("99", renderDate(ConstantOperator.createDatetime(LocalDateTime.of(1999, 5, 1, 0, 0, 0)), "%y"));
+        assertEquals("05", renderDate(ConstantOperator.createDatetime(LocalDateTime.of(2005, 5, 1, 0, 0, 0)), "%y"));
+    }
+
+    // The week %u of the BE is 0..53 with the weeks that start on a Monday and have four days in the year. The library of
+    // the FE has no such week, so we fear a string that is not the string of the row, and the call stays in the plan for
+    // the BE, as the calls with the other weeks do. The ISO week %v is the week of the BE.
+    @Test
+    public void dateFormatLeavesTheWeekOfTheBackendToTheBackend() {
+        ConstantOperator monday = ConstantOperator.createDatetime(LocalDateTime.of(2026, 1, 5, 0, 0, 0));
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () -> renderDate(monday, "%u"));
+        assertEquals("%u not supported in date format string", e.getMessage());
+        assertThrows(IllegalArgumentException.class, () -> renderDate(monday, "%Y-%u"));
+        assertEquals("02", renderDate(monday, "%v"));
+    }
+
+    // from_unixtime fails to prepare a constant format of more than 100 bytes, while date_format renders it. We fear that
+    // a fold returns a string where the BE returns an error, so the FE leaves such a call to the BE.
+    @Test
+    public void fromUnixTimeDoesNotFoldAFormatThatTheBackendFailsOn() throws AnalysisException {
+        String fits = "%Y" + "x".repeat(98);
+        String tooLong = "%Y" + "x".repeat(99);
+        assertEquals("2001" + "x".repeat(98), renderEpoch(1000000000L, fits));
+        assertThrows(IllegalArgumentException.class, () -> renderEpoch(1000000000L, tooLong));
+        assertThrows(IllegalArgumentException.class, () -> ScalarOperatorFunctions.fromUnixTime(O_BI_10,
+                ConstantOperator.createVarchar(tooLong)));
+        // bytes, not characters
+        assertEquals(100, bytes(renderEpoch(1000000000L, "é".repeat(50))));
+        assertThrows(IllegalArgumentException.class, () -> renderEpoch(1000000000L, "é".repeat(51)));
+        // date_format renders the same format
+        ConstantOperator date = ConstantOperator.createDatetime(LocalDateTime.of(2001, 1, 9, 13, 4, 5));
+        assertEquals("2001" + "x".repeat(99), renderDate(date, tooLong));
     }
 
     @Test

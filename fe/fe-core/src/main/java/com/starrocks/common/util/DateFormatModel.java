@@ -23,6 +23,7 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
+import java.time.temporal.IsoFields;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HashMap;
@@ -43,7 +44,9 @@ import java.util.function.Function;
  * of the date cut to its resolution, so the periods of the resolution in a range of dates are at least the strings;
  * <li>the number of values that the fields give, and the length of the longest string and of the format;
  * <li>whether the strings sort in the order of their dates (ordered), whether the BE reads them as the dates they hold
- * or as the start of their period, and whether the BE renders every row (exact), which a bound on the strings needs.
+ * or as the start of their period, and whether the BE renders every row (exact), which a bound on the strings needs;
+ * <li>the string that the BE gives for one date, see fold: the FE folds a constant with it, so the strings of the ends of
+ * a range, which an image and a bound are made of, are the strings of the rows.
  * </ul>
  * The BE compares the format with the three Java style formats as they are, without trimming it, and reads every other
  * format as a pattern with percent signs: %% is a percent sign, a single % at the end is a character, and a character
@@ -166,12 +169,18 @@ public final class DateFormatModel {
     private static final char[] ORDERED_SYMBOLS = {'Y', 'm', 'd', 'H', 'i', 's', 'f'};
     private static final int[] ORDERED_WIDTHS = {4, 2, 2, 2, 2, 2, 6};
 
-    // The BE writes at most 127 bytes of a string and gives NULL for a longer one, and for every row when the format is
-    // 128 bytes or longer
+    // The BE writes at most 127 bytes of a string and gives NULL when the string needs more room. A format of 128 bytes or
+    // longer renders row by row with the same result, and we expect such a format to hold a long text, so we do not call it
+    // exact.
     private static final int MAX_RENDERED_LENGTH = 127;
     private static final int MAX_FORMAT_LENGTH = 128;
     // The shortest string that never fits the buffer of the BE: it holds 127 bytes and the terminating zero
     private static final int NEVER_FITS_LENGTH = 128;
+
+    // The specifiers that the FE does not render: the names, the English suffix of %D, the weeks and the years of the
+    // weeks. We fear that a string which differs from the string of the BE gets into a plan as the string of a row, and the
+    // library of the FE has no rendering of these that matches the BE. So the call with such a specifier stays for the BE.
+    private static final String NOT_FOLDED = "aDbMprUuVWwXx";
 
     // Times with different digits in every field. A string of only digits whose length is not 4, 8 or 14 and more reads
     // in the BE with a year of two digits, and 2012 and 2001 make such a reading a valid date of another day.
@@ -368,10 +377,11 @@ public final class DateFormatModel {
      * a string of 127 bytes as not fitting, because the BE also gives NULL a few bytes before the end of the buffer for
      * the names of the days and months. We take a format of 128 bytes or more as not exact too: the BE renders it row
      * by row, and we expect such a format to hold a long text. We take a format with a zero byte as not exact, because the
-     * BE cuts its strings there, see hasZeroByte. A bound on the strings is right only for an exact format.
+     * BE cuts its strings there, see hasZeroByte. The BE gives NULL for every row of the empty format, so that format is not
+     * exact either, see isNullOnAllRows. A bound on the strings is right only for an exact format.
      */
     public boolean isExactOnAllRows() {
-        return !zeroByte && maxRenderedLength < MAX_RENDERED_LENGTH && formatLength < MAX_FORMAT_LENGTH;
+        return formatLength > 0 && !zeroByte && maxRenderedLength < MAX_RENDERED_LENGTH && formatLength < MAX_FORMAT_LENGTH;
     }
 
     /**
@@ -551,6 +561,100 @@ public final class DateFormatModel {
             case 5 -> time.getSecond();
             default -> time.getNano() / 1000;
         };
+    }
+
+    /**
+     * The string that the function gives for a time, or empty where it gives NULL. We fear that a constant, a bound or an
+     * image of a plan holds a string which no row has, so the FE follows the BE over the bytes of the format, because the
+     * buffer of the BE counts bytes. It has 127 bytes and a terminating zero, and the steps are those of the tokenizer
+     * above, see DateTimeValue::to_format_string:
+     * <ul>
+     * <li>an empty format gives NULL, and a Java style form is the format with percent signs that renders the same;
+     * <li>a byte of the format is copied, a % that ends the format included, and the BE gives NULL when the buffer
+     * already holds 127 bytes and the format has more;
+     * <li>a specifier needs its width and one byte more below the 127 bytes, or the BE gives NULL;
+     * <li>the byte after a % is copied when it is no specifier, a % included, and it needs one byte more below the 127
+     * bytes than the same byte as text.
+     * </ul>
+     * The BE renders a DATE as its midnight, so the caller passes the time of a DATE cut to the day.
+     *
+     * @throws IllegalArgumentException when the FE cannot give the string of the BE, and the call stays for the BE: the
+     *         function fails on the format, a specifier is one that the FE does not render, or the year is outside of
+     *         0000..9999
+     */
+    public Optional<String> fold(Renderer renderer, LocalDateTime time) {
+        if (!isTakenBy(renderer)) {
+            throw new IllegalArgumentException(
+                    renderer + " does not take a format of more than " + renderer.maxFormatLength + " bytes");
+        }
+        if (time.getYear() < 0 || time.getYear() > 9999) {
+            throw new IllegalArgumentException("the year " + time.getYear() + " is outside of the range of the BE");
+        }
+        if (formatLength == 0) {
+            return Optional.empty();
+        }
+        byte[] pattern = JAVA_STYLE.getOrDefault(format, format).getBytes(StandardCharsets.UTF_8);
+        byte[] out = new byte[MAX_RENDERED_LENGTH];
+        int size = 0;
+        int i = 0;
+        while (i < pattern.length) {
+            if (size == MAX_RENDERED_LENGTH) {
+                return Optional.empty();
+            }
+            byte current = pattern[i++];
+            if (current != '%' || i == pattern.length) {
+                out[size++] = current;
+                continue;
+            }
+            byte symbol = pattern[i++];
+            Specifier specifier = symbol > 0 ? SPECIFIERS.get((char) symbol) : null;
+            if (specifier == null) {
+                if (size + 1 >= MAX_RENDERED_LENGTH) {
+                    return Optional.empty();
+                }
+                out[size++] = symbol;
+                continue;
+            }
+            if (NOT_FOLDED.indexOf(symbol) >= 0) {
+                throw new IllegalArgumentException(String.format("%%%s not supported in date format string", (char) symbol));
+            }
+            String text = renderField((char) symbol, time);
+            if (size + specifier.width() >= MAX_RENDERED_LENGTH) {
+                return Optional.empty();
+            }
+            for (int k = 0; k < text.length(); k++) {
+                out[size++] = (byte) text.charAt(k);
+            }
+        }
+        return Optional.of(new String(out, 0, size, StandardCharsets.UTF_8));
+    }
+
+    private static String renderField(char symbol, LocalDateTime time) {
+        int hour12 = (time.getHour() + 11) % 12 + 1;
+        return switch (symbol) {
+            case 'Y' -> pad(time.getYear(), 4);
+            case 'y' -> pad(time.getYear() % 100, 2);
+            case 'm' -> pad(time.getMonthValue(), 2);
+            case 'c' -> Integer.toString(time.getMonthValue());
+            case 'd' -> pad(time.getDayOfMonth(), 2);
+            case 'e' -> Integer.toString(time.getDayOfMonth());
+            case 'j' -> pad(time.getDayOfYear(), 3);
+            case 'v' -> pad(time.get(IsoFields.WEEK_OF_WEEK_BASED_YEAR), 2);
+            case 'H' -> pad(time.getHour(), 2);
+            case 'k' -> Integer.toString(time.getHour());
+            case 'h', 'I' -> pad(hour12, 2);
+            case 'l' -> Integer.toString(hour12);
+            case 'i' -> pad(time.getMinute(), 2);
+            case 's', 'S' -> pad(time.getSecond(), 2);
+            case 'T' -> pad(time.getHour(), 2) + ":" + pad(time.getMinute(), 2) + ":" + pad(time.getSecond(), 2);
+            case 'f' -> pad(time.getNano() / 1000, 6);
+            default -> throw new IllegalArgumentException(String.format("%%%s not supported in date format string", symbol));
+        };
+    }
+
+    private static String pad(int value, int width) {
+        String digits = Integer.toString(value);
+        return digits.length() >= width ? digits : "0".repeat(width - digits.length()) + digits;
     }
 
     /**

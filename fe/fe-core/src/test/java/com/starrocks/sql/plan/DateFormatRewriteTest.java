@@ -114,6 +114,26 @@ public class DateFormatRewriteTest extends PlanTestBase {
     }
 
     @Test
+    public void testPartitionsAreCutByTheStringsThatTheBackendWrites() throws Exception {
+        // The FE cuts the partitions by the strings of their ends, so we fear that a fold which reads the format otherwise
+        // than the BE drops a partition whose rows pass. The BE writes a % that ends the format, and takes a format that
+        // differs from a Java style form by a space as a text: date_format(ts, 'x%') is 'x%' on every row.
+        String[][] formats = {
+                {"'x%'", "'x%'"}, {"'%'", "'%'"}, {"' yyyy-MM-dd'", "' yyyy-MM-dd'"},
+                {"'yyyyMMdd '", "'yyyyMMdd '"}, {"'\\t yyyy-MM-dd HH:mm:ss'", "'\\t yyyy-MM-dd HH:mm:ss'"}};
+        for (String[] format : formats) {
+            String plan = getFragmentPlan("select * from df_time where date_format(ts, " + format[0] + ") = " + format[1]);
+            assertContains(plan, "partitions=4/4");
+            plan = getFragmentPlan("select * from df_day where date_format(d, " + format[0] + ") = " + format[1]);
+            assertContains(plan, "partitions=4/4");
+        }
+        // the ordered format renders the character, and the inverse replaces the condition
+        String plan = getFragmentPlan("select * from df_time where date_format(ts, '%Y-%m-%d%') >= '2026-08-01%'");
+        assertContains(plan, "partitions=2/4");
+        assertNotContains(plan, "date_format");
+    }
+
+    @Test
     public void testCastOfADateFormatThatTheBackendReadsOtherwiseHasNoBounds() throws Exception {
         // 10 digits are read with a year of two digits, and a month without a day gives NULL: the cast is not the start
         // of the period of the string, so nothing of it prunes, whatever the inverse of the string says

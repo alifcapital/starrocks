@@ -258,6 +258,37 @@ public class MonotonicImageTest {
         assertTrue(MonotonicImage.imageRange(dateFormat("ab"), dtCol, domain).isPresent());
     }
 
+    // The image holds the strings of the folded ends, so we fear that a fold which reads the format otherwise than the BE
+    // bounds the rows by strings that no row has. A % that ends the format is a character of the string, a format that
+    // differs from a Java style form by a space is a text, and a string that does not fit the buffer of the BE is NULL on
+    // every row of the format and has no image.
+    @Test
+    public void testImageHoldsTheStringsThatTheBackendWrites() {
+        MinMax domain = datetimeDomain(LocalDateTime.of(2024, 3, 5, 6, 30, 15), LocalDateTime.of(2024, 3, 7, 10, 20, 30));
+        String[][] cases = {
+                {"%Y-%m-%d%", "2024-03-05%", "2024-03-07%"}, {"%Y%", "2024%", "2024%"}, {"%", "%", "%"},
+                {"ab%", "ab%", "ab%"}, {" yyyy-MM-dd", " yyyy-MM-dd", " yyyy-MM-dd"},
+                {"yyyyMMdd ", "yyyyMMdd ", "yyyyMMdd "}};
+        for (String[] image : cases) {
+            Range<ConstantOperator> range = MonotonicImage.imageRange(dateFormat(image[0]), dtCol, domain).orElseThrow();
+            assertEquals(image[1], range.lowerEndpoint().getVarchar(), image[0]);
+            assertEquals(image[2], range.upperEndpoint().getVarchar(), image[0]);
+        }
+        assertTrue(MonotonicImage.imageRange(dateFormat("a".repeat(127)), dtCol, domain).isPresent());
+        assertFalse(MonotonicImage.imageRange(dateFormat("a".repeat(128)), dtCol, domain).isPresent());
+        assertTrue(MonotonicImage.imageRange(dateFormat("%Y" + "a".repeat(123)), dtCol, domain).isPresent());
+        assertFalse(MonotonicImage.imageRange(dateFormat("%Y" + "a".repeat(124)), dtCol, domain).isPresent());
+
+        Function fn = new Function(new FunctionName("from_unixtime"),
+                new Type[] {IntegerType.BIGINT, VarcharType.VARCHAR}, VarcharType.VARCHAR, false);
+        CallOperator render = new CallOperator("from_unixtime", VarcharType.VARCHAR,
+                ImmutableList.of(epochCol, ConstantOperator.createVarchar("%Y-%m-%d%")), fn);
+        Range<ConstantOperator> range = MonotonicImage.imageRange(render, epochCol, epochDomain(1717200000L, 1719800000L))
+                .orElseThrow();
+        assertEquals("2024-06-01%", range.lowerEndpoint().getVarchar());
+        assertEquals("2024-07-01%", range.upperEndpoint().getVarchar());
+    }
+
     // from_unixtime fails to prepare a constant format of more than 100 bytes, and a plan that prunes by the image could
     // return no rows where the BE returns an error. date_format renders the same format row by row and has an image.
     @Test

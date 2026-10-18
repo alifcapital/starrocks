@@ -16,14 +16,18 @@ package com.starrocks.common.util;
 
 import com.starrocks.common.util.DateFormatModel.Field;
 import com.starrocks.common.util.DateFormatModel.Renderer;
+import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
+import com.starrocks.sql.optimizer.rewrite.ScalarOperatorFunctions;
 import com.starrocks.sql.optimizer.statistics.StatisticsDatetimeParser;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -107,8 +111,10 @@ public class DateFormatModelTest {
             Assertions.assertFalse(model.isKnown(), format);
             Assertions.assertFalse(model.isOrdered(), format);
         }
+        // The BE gives NULL for every row of the empty format, so it renders no row
         Assertions.assertTrue(DateFormatModel.of("").hasNoFields());
-        Assertions.assertTrue(DateFormatModel.of("").isExactOnAllRows());
+        Assertions.assertFalse(DateFormatModel.of("").isExactOnAllRows());
+        Assertions.assertTrue(DateFormatModel.of("").isNullOnAllRows());
     }
 
     // The BE returns the string up to the first zero byte of the format. A zero byte reaches the string from the text, or
@@ -185,6 +191,51 @@ public class DateFormatModelTest {
             // the order of the strings is not the order of the dates, or the BE writes a specifier it does not know as text
             for (String format : List.of("%d.%m.%Y", "%y-%m", "%W", "%Y-%q", "%z")) {
                 Assertions.assertFalse(DateFormatModel.of(format).isMonotonicFor(renderer), format);
+            }
+        }
+    }
+
+    // We fear that two readers of one format drift apart, so the FE folds a constant to the string that the model describes:
+    // an ordered format renders as the model renders it and keeps the order of the dates, no string is longer than the
+    // model says, a format that the model gives NULL on every row folds to NULL, and a format of an exact model renders.
+    @Test
+    public void testFoldOfAConstantIsTheStringOfTheModel() {
+        String[] pieces = {"%Y", "%m", "%d", "%H", "%i", "%s", "%S", "%f", "-", ":", "T", " ", "Z", "%%", "%", "%q", "é", "t"};
+        List<String> formats = new ArrayList<>(List.of("yyyy-MM-dd", "yyyyMMdd", "yyyy-MM-dd HH:mm:ss", " yyyy-MM-dd",
+                "yyyyMMdd ", "yyyy-MM-dd HH:mm:ss\t", ""));
+        for (String first : pieces) {
+            formats.add(first);
+            for (String second : pieces) {
+                formats.add(first + second);
+                for (String third : pieces) {
+                    formats.add(first + second + third);
+                }
+            }
+        }
+        List<LocalDateTime> times = List.of(LocalDateTime.of(0, 1, 1, 0, 0, 0),
+                LocalDateTime.of(2012, 3, 5, 7, 8, 9, 123_456_000), LocalDateTime.of(2024, 12, 31, 23, 59, 58, 999_999_000));
+        for (String format : formats) {
+            DateFormatModel model = DateFormatModel.of(format);
+            String previous = null;
+            for (LocalDateTime time : times) {
+                ConstantOperator folded = ScalarOperatorFunctions.dateFormat(ConstantOperator.createDatetime(time),
+                        ConstantOperator.createVarchar(format));
+                if (model.isNullOnAllRows()) {
+                    Assertions.assertTrue(folded.isNull(), format);
+                }
+                if (model.isExactOnAllRows()) {
+                    Assertions.assertFalse(folded.isNull(), format);
+                }
+                if (folded.isNull()) {
+                    continue;
+                }
+                String value = folded.getVarchar();
+                Assertions.assertTrue(value.getBytes(StandardCharsets.UTF_8).length <= model.maxRenderedLength(), format);
+                if (model.isOrdered()) {
+                    Assertions.assertEquals(model.render(time), value, format);
+                    Assertions.assertTrue(previous == null || previous.compareTo(value) <= 0, format);
+                    previous = value;
+                }
             }
         }
     }
