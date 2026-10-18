@@ -148,6 +148,24 @@ public class ExternalMcvStatistics {
         /** The column names of expression elements are their element texts, see ExpressionTemplate#elementText. */
         public Group(List<String> columnNames, long rowCount, long ndv, List<MultiColumnCombinedStats.McvEntry> mcv,
                      List<List<String>> buckets, List<Long> nullCounts, List<Expression> expressions) {
+            this(columnNames, rowCount, ndv, mcv, buckets, nullCounts, expressions, true);
+        }
+
+        /**
+         * The distribution of a column that a filter derives from another: a group of one column, whose views of the
+         * head are built when they are first read, as they are for any group. A group a cache loads builds them when it
+         * is made, so that the planners do not; the groups a filter derives are many and most are read for their rows
+         * only, so we fear that building the views of each costs the time of the filter again.
+         */
+        static Group derived(List<String> columnNames, long rowCount, long ndv,
+                             List<MultiColumnCombinedStats.McvEntry> mcv, List<Long> nullCounts) {
+            return new Group(columnNames, rowCount, ndv, mcv, List.of(), nullCounts,
+                    Collections.nCopies(columnNames.size(), null), false);
+        }
+
+        private Group(List<String> columnNames, long rowCount, long ndv, List<MultiColumnCombinedStats.McvEntry> mcv,
+                      List<List<String>> buckets, List<Long> nullCounts, List<Expression> expressions,
+                      boolean prepareViews) {
             if (expressions.size() != columnNames.size()) {
                 throw new IllegalArgumentException("Invalid MCV expressions");
             }
@@ -161,11 +179,13 @@ public class ExternalMcvStatistics {
             this.rowCount = rowCount;
             this.ndv = ndv;
             this.mcv = PreparedMcvTuples.copyOf(mcv, columnNames.size(), rowCount, nullCounts);
-            this.mcv.getComponentCounts();
+            if (prepareViews) {
+                this.mcv.getComponentCounts();
+            }
             this.buckets = buckets.stream().map(StoredBucket::new).toList();
             this.nullCounts = List.copyOf(nullCounts);
             this.headRows = this.mcv.getTotalRowsLong();
-            Map<String, Long> values = new LinkedHashMap<>();
+            LinkedHashMap<String, Long> values = new LinkedHashMap<>();
             if (columnNames.size() == 1) {
                 for (MultiColumnCombinedStats.McvEntry entry : mcv) {
                     if (entry.getValues().get(0) != null) {
@@ -173,8 +193,10 @@ public class ExternalMcvStatistics {
                     }
                 }
             }
-            this.singleColumnMcv = McvDistribution.copyOf(values);
-            this.singleColumnMcv.prepareFrequencyOrder();
+            this.singleColumnMcv = McvDistribution.adopt(values);
+            if (prepareViews) {
+                this.singleColumnMcv.prepareFrequencyOrder();
+            }
         }
 
         public List<String> getColumnNames() {

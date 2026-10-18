@@ -14,8 +14,11 @@
 
 package com.starrocks.sql.optimizer.statistics;
 
+import com.starrocks.catalog.Function;
 import com.starrocks.sql.ast.expression.BinaryType;
+import com.starrocks.sql.ast.expression.ExprUtils;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
+import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
@@ -94,6 +97,127 @@ class McvPredicateEvaluatorTest {
         compare(VarcharType.VARCHAR, List.of(ConstantOperator.createVarchar("A"), ConstantOperator.createVarchar("😀"),
                         ConstantOperator.createVarchar("?")),
                 Arrays.asList(null, "A", "a", "😀", "\ud800", "?", "", "A "));
+    }
+
+    private static ScalarOperator call(String name, Type returnType, ScalarOperator... arguments) {
+        Type[] types = new Type[arguments.length];
+        for (int i = 0; i < arguments.length; i++) {
+            types[i] = arguments[i].getType();
+        }
+        Function function = ExprUtils.getBuiltinFunction(name, types, Function.CompareMode.IS_NONSTRICT_SUPERTYPE_OF);
+        return new CallOperator(name, returnType, List.of(arguments), function);
+    }
+
+    // The comparisons of the expression with each constant by each operator, on the values, against the plain evaluation.
+    private void expression(ColumnRefOperator column, ScalarOperator expression, List<ConstantOperator> constants,
+                            List<String> values) {
+        List<ScalarOperator> predicates = new ArrayList<>();
+        for (ConstantOperator constant : constants) {
+            for (BinaryType type : List.of(BinaryType.EQ, BinaryType.NE, BinaryType.LT, BinaryType.LE, BinaryType.GT,
+                    BinaryType.GE)) {
+                predicates.add(new BinaryPredicateOperator(type, expression, constant));
+            }
+        }
+        // The evaluators of one estimate share the values of the expression, and one evaluator reads them again.
+        McvPredicateEvaluator.within(() -> {
+            for (int round = 0; round < 3; round++) {
+                McvPredicateEvaluator evaluator = new McvPredicateEvaluator();
+                for (ScalarOperator predicate : predicates) {
+                    Assertions.assertSame(column, evaluator.column(predicate));
+                    for (String value : values) {
+                        Assertions.assertEquals(MultiColumnMcvEstimator.matchesComponent(predicate, column, value),
+                                evaluator.matchesComponent(predicate, column, value, null, -1),
+                                predicate + " / " + value + " / round " + round);
+                    }
+                }
+            }
+            return null;
+        });
+        // Outside of an estimate, with an evaluator of its own.
+        McvPredicateEvaluator evaluator = new McvPredicateEvaluator();
+        for (ScalarOperator predicate : predicates) {
+            for (String value : values) {
+                Assertions.assertEquals(MultiColumnMcvEstimator.matchesComponent(predicate, column, value),
+                        evaluator.matchesComponent(predicate, column, value, null, -1), predicate + " / " + value);
+            }
+        }
+    }
+
+    @Test
+    void comparisonOfAnExpressionOfTheColumnIsThePlainEvaluation() {
+        // A time shifted by a function: the key of the order is the number of the text of the time.
+        ColumnRefOperator created = new ColumnRefOperator(1, DateType.DATETIME, "created", true);
+        expression(created, call("hours_add", DateType.DATETIME, created, ConstantOperator.createInt(5)),
+                List.of(ConstantOperator.createDatetime(LocalDateTime.of(2026, 8, 1, 0, 0)),
+                        ConstantOperator.createDatetime(LocalDateTime.of(2026, 1, 2, 8, 4, 5)),
+                        ConstantOperator.createVarchar("2026-08-01 00:00:00"), ConstantOperator.createInt(7)),
+                Arrays.asList(null, "2026-01-02 03:04:05", "2026-01-02 03:04:00", "2026-07-31 19:00:00",
+                        "2026-08-01 00:00:00", "0000-00-00 00:00:00", "bad", ""));
+        // A part of a string: the bytes of the text are compared.
+        ColumnRefOperator name = new ColumnRefOperator(2, VarcharType.VARCHAR, "name", true);
+        expression(name, call("substr", VarcharType.VARCHAR, name, ConstantOperator.createInt(1), ConstantOperator.createInt(3)),
+                List.of(ConstantOperator.createVarchar("abc"), ConstantOperator.createVarchar("ab"),
+                        ConstantOperator.createVarchar("😀"), ConstantOperator.createVarchar("")),
+                Arrays.asList(null, "abcdef", "ab", "abd", "a", "", "😀x", "ABC"));
+        // A cast of the text to numbers of every kind of order: whole, exact, double, boolean.
+        for (Type type : List.of(IntegerType.BIGINT, IntegerType.INT, FloatType.DOUBLE, BooleanType.BOOLEAN,
+                new DecimalType(PrimitiveType.DECIMAL128, 38, 4))) {
+            ColumnRefOperator text = new ColumnRefOperator(3, VarcharType.VARCHAR, "text", true);
+            ConstantOperator one = type.isBoolean() ? ConstantOperator.createBoolean(true)
+                    : type.isDecimalV3() ? ConstantOperator.createDecimal(new BigDecimal("1.5000"), type)
+                    : type.isFloatingPointType() ? ConstantOperator.createDouble(1.5) : castOf(type);
+            expression(text, new CastOperator(type, text), List.of(one),
+                    Arrays.asList(null, "1", "1.5", "1.50", "2", "-1", "0", "true", "false", "bad", "", " 1 ",
+                            "9223372036854775808", "1e2"));
+        }
+    }
+
+    private static ConstantOperator castOf(Type type) {
+        return type.isBigint() ? ConstantOperator.createBigint(1) : ConstantOperator.createInt(1);
+    }
+
+    @Test
+    void valuesOfAnExpressionObjectAreNotReadForAnotherColumn() {
+        // The value of the head is cast to the type of the column given: the same expression object on a column of another
+        // type is a value of its own. The text of a time cast to a number is a number or not by the type it was read as.
+        ColumnRefOperator time = new ColumnRefOperator(1, DateType.DATETIME, "created", true);
+        ColumnRefOperator text = new ColumnRefOperator(2, VarcharType.VARCHAR, "created", true);
+        ScalarOperator number = new CastOperator(IntegerType.BIGINT, time);
+        BinaryPredicateOperator predicate = new BinaryPredicateOperator(BinaryType.GE, number,
+                ConstantOperator.createBigint(1));
+        String value = "2026-08-01 00:00:00";
+        Assertions.assertNotEquals(MultiColumnMcvEstimator.matchesComponent(predicate, time, value),
+                MultiColumnMcvEstimator.matchesComponent(predicate, text, value));
+        McvPredicateEvaluator.within(() -> {
+            McvPredicateEvaluator evaluator = new McvPredicateEvaluator();
+            for (ColumnRefOperator column : List.of(time, text, time, text)) {
+                Assertions.assertEquals(MultiColumnMcvEstimator.matchesComponent(predicate, column, value),
+                        evaluator.matchesComponent(predicate, column, value, null, -1), column.getType().toString());
+            }
+            return null;
+        });
+    }
+
+    @Test
+    void valuesOfAnExpressionAreKeptByTheExpressionAndNotByTheCondition() {
+        ColumnRefOperator created = new ColumnRefOperator(1, DateType.DATETIME, "created", true);
+        ScalarOperator shifted = call("hours_add", DateType.DATETIME, created, ConstantOperator.createInt(5));
+        // Another object of the same expression, as the planner builds one for each condition, and another expression.
+        ScalarOperator again = call("hours_add", DateType.DATETIME, created, ConstantOperator.createInt(5));
+        ScalarOperator other = call("hours_add", DateType.DATETIME, created, ConstantOperator.createInt(6));
+        String value = "2026-08-01 00:00:00";
+        McvPredicateEvaluator.within(() -> {
+            McvPredicateEvaluator evaluator = new McvPredicateEvaluator();
+            for (int hours = 0; hours < 100; hours++) {
+                ConstantOperator bound = ConstantOperator.createDatetime(LocalDateTime.of(2026, 8, 1, 0, 0).plusHours(hours));
+                for (ScalarOperator expression : List.of(shifted, again, other)) {
+                    BinaryPredicateOperator predicate = new BinaryPredicateOperator(BinaryType.GE, expression, bound);
+                    Assertions.assertEquals(MultiColumnMcvEstimator.matchesComponent(predicate, created, value),
+                            evaluator.matchesComponent(predicate, created, value, null, -1), predicate.toString());
+                }
+            }
+            return null;
+        });
     }
 
     @Test

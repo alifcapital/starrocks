@@ -454,7 +454,8 @@ public class PredicateStatisticsCalculator {
     }
 
     private static Statistics estimate(ScalarOperator predicate, Statistics statistics, boolean useMcv) {
-        return finishEstimate(predicate, statistics, visit(predicate, statistics, useMcv), useMcv);
+        return McvPredicateEvaluator.within(
+                () -> finishEstimate(predicate, statistics, visit(predicate, statistics, useMcv), useMcv));
     }
 
     /**
@@ -470,8 +471,9 @@ public class PredicateStatisticsCalculator {
         }
         ImpliedRanges implied = ImpliedRanges.find(predicate);
         ScalarOperator estimated = implied == null ? predicate : implied.stripped();
-        return visit(EstimatePredicateNormalizer.normalize(estimated, statistics), statistics, false)
-                .getOutputRowCount();
+        return McvPredicateEvaluator.within(
+                () -> visit(EstimatePredicateNormalizer.normalize(estimated, statistics), statistics, false)
+                        .getOutputRowCount());
     }
 
     private static Statistics visit(ScalarOperator predicate, Statistics statistics, boolean useMcv) {

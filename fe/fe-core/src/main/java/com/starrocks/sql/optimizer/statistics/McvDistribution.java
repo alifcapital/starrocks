@@ -43,6 +43,20 @@ public final class McvDistribution extends AbstractMap<String, Long> {
         totalRows = sum;
     }
 
+    private McvDistribution(LinkedHashMap<String, Long> owned) {
+        long sum = 0;
+        for (Entry<String, Long> entry : owned.entrySet()) {
+            sum += Objects.requireNonNull(entry.getValue());
+        }
+        values = Collections.unmodifiableMap(owned);
+        totalRows = sum;
+    }
+
+    /** The distribution of a map that the caller does not use again: it is wrapped, and not copied. */
+    static McvDistribution adopt(LinkedHashMap<String, Long> owned) {
+        return owned.isEmpty() ? EMPTY : new McvDistribution(owned);
+    }
+
     private static final class FrequencyOrder {
         private final String[] keys;
         private final long[] counts;

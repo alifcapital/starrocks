@@ -60,6 +60,28 @@ class McvDistributionTest {
     }
 
     @Test
+    void adoptedMapIsTheDistributionOfTheCopiedOne() {
+        LinkedHashMap<String, Long> owned = new LinkedHashMap<>();
+        for (int i = 0; i < 50; i++) {
+            owned.put("value" + i, (long) (i % 7) + 1);
+        }
+        owned.put("large", Long.MAX_VALUE);
+        McvDistribution copied = McvDistribution.copyOf(new LinkedHashMap<>(owned));
+        McvDistribution adopted = McvDistribution.adopt(owned);
+        assertEquals(copied, adopted);
+        assertEquals(List.copyOf(copied.entrySet()), List.copyOf(adopted.entrySet()));
+        assertEquals(copied.getTotalRows(), adopted.getTotalRows());
+        assertEquals(Long.MIN_VALUE + 196, adopted.getTotalRows());
+        for (int rank = 0; rank < copied.size(); rank++) {
+            assertEquals(copied.getKeyByFrequency(rank), adopted.getKeyByFrequency(rank));
+            assertEquals(copied.getCountByFrequency(rank), adopted.getCountByFrequency(rank));
+        }
+        assertThrows(UnsupportedOperationException.class, () -> adopted.put("new", 1L));
+        assertSame(McvDistribution.copyOf(Map.of()), McvDistribution.adopt(new LinkedHashMap<>()));
+        assertSame(adopted, McvDistribution.copyOf(adopted));
+    }
+
+    @Test
     void concurrentPreparationHasStableWeightAndOrder() throws Exception {
         McvDistribution prepared = McvDistribution.copyOf(Map.of("a", 1L, "b", 9L));
         long bytes = prepared.retainedBytesExcludingKeys();

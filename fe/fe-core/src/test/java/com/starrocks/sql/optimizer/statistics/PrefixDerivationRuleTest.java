@@ -142,6 +142,30 @@ public class PrefixDerivationRuleTest {
     }
 
     @Test
+    public void testNegationLeavesTheHeadOfXWithoutTheValuesOfThePrefix() {
+        // NOT of the prefix 103 leaves the value 10400000 of 300 rows in the head of x, and the NULL rows are gone.
+        Statistics result = PredicateStatisticsCalculator.statisticsCalculate(not(like(left(5), "103%")), scan(), true,
+                expressions());
+        ColumnStatistic x = result.getScanExpressionStatistics().getEntries().get(0).getStatistic();
+        Assertions.assertEquals(Map.of("10400000", 300L), x.getHistogram().getMCV());
+        Assertions.assertEquals(0, x.getNullsFraction(), 0);
+    }
+
+    @Test
+    public void testNegatedStatisticOfXKeepsTheHeadWithoutTheValuesOfTheCondition() {
+        // The head of x is the one the statistic of x holds, whatever the statistics after the negation hold of it.
+        ColumnStatistic statistic = expressions().getEntries().get(0).getStatistic();
+        Statistics input = Statistics.builder().setOutputRowCount(1000).addColumnStatistic(X, statistic).build();
+        Statistics negated = Statistics.builder().setOutputRowCount(300).addColumnStatistic(X, statistic).build();
+        Statistics result = ExpressionStatisticsEstimator.withNegatedVirtualColumn(like(X, "103%"), input, negated);
+        ColumnStatistic after = result.getColumnStatistics().get(X);
+        Assertions.assertEquals(Map.of("10400000", 300L), after.getHistogram().getMCV());
+        Assertions.assertEquals(0, after.getNullsFraction(), 0);
+        Assertions.assertEquals(1, after.getDistinctValuesCount(), 0);
+        Assertions.assertEquals(300, result.getOutputRowCount(), 0);
+    }
+
+    @Test
     public void testPrefixLongerThanTheValueHasNoRows() {
         // A string of 3 characters does not start with 4 characters.
         ScalarOperator like = like(left(3), "1031%");

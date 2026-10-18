@@ -442,7 +442,9 @@ public class StatisticsEstimateUtils {
                 applied.add(new BinaryPredicateOperator(BinaryType.EQ, column, value)));
         Statistics equalityFilteredStats = filteredStatsBuilder.build();
         if (!applied.isEmpty()) {
-            equalityFilteredStats = McvStatisticsPropagation.filter(Utils.compoundAnd(applied),
+            // The shares of the conjuncts were multiplied above, as of conjuncts independent of each other, so the
+            // distribution of a group is filtered by its own conjuncts: the remainder reads it.
+            equalityFilteredStats = McvStatisticsPropagation.filterIndependent(Utils.compoundAnd(applied),
                     inputStats, equalityFilteredStats);
         }
 

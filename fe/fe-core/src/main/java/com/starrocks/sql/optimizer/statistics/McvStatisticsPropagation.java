@@ -181,7 +181,7 @@ final class McvStatisticsPropagation {
 
         /** The filter of the rows by the OR of the parts added so far. */
         Statistics filter(Statistics output) {
-            return McvStatisticsPropagation.filter(disjunction, input, output, parts.size() < 2 ? null : this);
+            return McvStatisticsPropagation.filter(disjunction, input, output, parts.size() < 2 ? null : this, false);
         }
 
         // The truth of the OR of the parts so far on each head tuple of a group and on its NULL tuple. A part that
@@ -256,12 +256,25 @@ final class McvStatisticsPropagation {
     }
 
     static Statistics filter(ScalarOperator predicate, Statistics input, Statistics output) {
-        return filter(predicate, input, output, null);
+        return filter(predicate, input, output, null, false);
+    }
+
+    /**
+     * The filter of the conjuncts that the estimate of a conjunction took as independent of each other: those of one
+     * MCV group, those of another, and the equalities of columns that have none. We expect a conjunct of other columns
+     * not to change the distribution of a group, as the estimate that multiplied their shares took it, so a group is
+     * filtered by its own conjuncts alone, and its tuples and tail are scaled to the rows of the output, as the other
+     * statistics of it describe those rows. The filter of any other conjunction does not take it so: a NOT NULL check
+     * of a column with NULLs may correlate with the group.
+     */
+    static Statistics filterIndependent(ScalarOperator predicate, Statistics input, Statistics output) {
+        return filter(predicate, input, output, null, true);
     }
 
     // disjunction: the parts of the predicate, which is their OR, with the truths of the OR kept; null otherwise
+    // independent: whether the conjuncts of other columns than the group are independent of it, see filterIndependent
     private static Statistics filter(ScalarOperator predicate, Statistics input, Statistics output,
-                                     DisjunctionFilter disjunction) {
+                                     DisjunctionFilter disjunction, boolean independent) {
         if (input.getMultiColumnCombinedStats().isEmpty() || input.getOutputRowCount() <= 0) {
             return output;
         }
@@ -309,10 +322,23 @@ final class McvStatisticsPropagation {
                     builder.addColumnStatistic(column, ColumnStatistic.buildFrom(after).setHistogram(null).build());
                 }
             }
-            if (!item.getKey().containsAll(used)) {
-                // The correlation with a predicate outside the group is unknown. Retaining the old
-                // head here would incorrectly claim that its unconditional frequencies still hold.
-                continue;
+            // The correlation with a predicate outside the group is unknown. Retaining the old head here would
+            // incorrectly claim that its unconditional frequencies still hold. When the conjuncts are independent of
+            // each other, see filterIndependent, the head is filtered by the conjuncts of the group alone, but a
+            // conjunct that reads a column of the group and a column outside it is still of unknown correlation.
+            boolean partial = !item.getKey().containsAll(used);
+            double ownRows = -1;
+            if (partial) {
+                ScalarOperator own = independent && disjunction == null ? withinGroup(groupPredicate, item.getKey()) : null;
+                if (own == null) {
+                    continue;
+                }
+                groupPredicate = own;
+                // The estimate of the conjuncts of the group is made a second time: the value of an expression on a tuple
+                // of the head is evaluated once for the estimate that runs, see McvPredicateEvaluator#within. On a head
+                // of 1000 timestamps the bounds of a period on hours_add(created, 5) next to a group take 11 ms more for 2
+                // bounds and 165 ms more for 64 bounds (22 and 354 ms in all, McvPlanningTimeTest).
+                ownRows = PredicateStatisticsCalculator.statisticsCalculate(own, input).getOutputRowCount();
             }
             List<MultiColumnCombinedStats.McvEntry> surviving = new ArrayList<>();
             double oldHead = group.getMcvDistribution().getSequentialTotalRows();
@@ -337,12 +363,26 @@ final class McvStatisticsPropagation {
                 continue;
             }
             double oldTail = Math.max(0, group.getRowCount() - oldHead);
-            double rows = group.getRowCount() * output.getOutputRowCount() / input.getOutputRowCount();
+            double rows = group.getRowCount() * (partial ? ownRows : output.getOutputRowCount())
+                    / input.getOutputRowCount();
             double tail = Math.min(oldTail, Math.max(0, rows - head));
             // A complete head gives both the exact filtered mass and exact filtered NDV.
             rows = head + tail;
             if (rows <= 0) {
                 continue;
+            }
+            if (partial) {
+                // The group describes the rows of its own conjuncts, while the rest of the statistics describe those of
+                // the output. We expect the conjuncts of other columns not to change the shares of the tuples, so the
+                // head and the tail are scaled to the rows of the output, and the group is the distribution of them.
+                double target = output.getOutputRowCount();
+                // A complete head stays complete: its counts add up to the rows. A head that is not still leaves a tail.
+                long headTarget = tail == 0 ? Math.round(target)
+                        : Math.min(Math.round(head * target / rows), (long) Math.ceil(target) - 1);
+                surviving = scaledTo(surviving, head, headTarget);
+                head = headTarget;
+                tail = tail == 0 ? 0 : target - headTarget;
+                rows = head + tail;
             }
             long tailNdv = Math.max(0, group.getNdv() - group.getMcv().size());
             if (group.getColumns().size() == 1 && !group.getNullCounts().isEmpty()
@@ -374,13 +414,17 @@ final class McvStatisticsPropagation {
                         counts.add(marginals.get(i).get(entry.getValues().get(i)));
                     }
                 }
-                // With an unknown residual, the old exact marginal counts are no longer exact.
-                headEntries.add(new MultiColumnCombinedStats.McvEntry(entry.getValues(), entry.getCount(), counts));
+                // With an unknown residual, the old exact marginal counts are no longer exact. A tuple whose counts are
+                // those it has is the same tuple: entries are not changed.
+                headEntries.add(counts.equals(entry.getComponentCounts()) ? entry
+                        : new MultiColumnCombinedStats.McvEntry(entry.getValues(), entry.getCount(), counts));
             }
             List<Long> nullCounts = tail == 0
                     ? marginals.stream().map(counts -> counts.getOrDefault(null, 0L)).toList() : List.of();
             long distinct = (long) Math.min(surviving.size() + tailNdv, distinctBound(groupPredicate, group.getColumns()));
-            if (tail == 0) {
+            // With conjuncts of other columns the statistics of the columns are those of the output, which they also
+            // filtered: the distributions of the group alone would count rows that the output does not have.
+            if (!partial && tail == 0) {
                 for (int i = 0; i < group.getColumns().size(); i++) {
                     ColumnRefOperator column = group.getColumns().get(i);
                     if (column == null || !output.getColumnStatistics().containsKey(column)) {
@@ -389,15 +433,15 @@ final class McvStatisticsPropagation {
                     List<MultiColumnCombinedStats.McvEntry> values = new ArrayList<>();
                     marginals.get(i).forEach((value, count) -> values.add(new MultiColumnCombinedStats.McvEntry(
                             java.util.Collections.singletonList(value), count, List.of(count))));
-                    ExternalMcvStatistics.Group marginal = new ExternalMcvStatistics.Group(List.of(column.getName()),
-                            (long) rows, values.size(), values, List.of(), List.of(nullCounts.get(i)));
+                    ExternalMcvStatistics.Group marginal = ExternalMcvStatistics.Group.derived(List.of(column.getName()),
+                            (long) rows, values.size(), values, List.of(nullCounts.get(i)));
                     marginal.columnStatistic(column.getType(), output.getColumnStatistic(column))
                             .ifPresent(statistic -> {
                                 builder.addColumnStatistic(column, statistic);
                                 exactColumns.add(column);
                             });
                 }
-            } else if (group.getColumns().size() == 1) {
+            } else if (!partial && group.getColumns().size() == 1) {
                 ColumnRefOperator column = group.getColumns().get(0);
                 ColumnStatistic before = input.getColumnStatistics().get(column);
                 ColumnStatistic after = output.getColumnStatistics().get(column);
@@ -413,7 +457,7 @@ final class McvStatisticsPropagation {
             MultiColumnCombinedStats conditional = new MultiColumnCombinedStats(Math.max(surviving.size(), distinct),
                     rows, group.getColumns(), headEntries, nullCounts, group.getMcvDistribution());
             groups.put(item.getKey(), conditional);
-            if (group.getColumns().size() > 1) {
+            if (!partial && group.getColumns().size() > 1) {
                 for (ColumnRefOperator column : item.getKey()) {
                     conditionalMarginal(conditional, column, groupPredicate, output).ifPresent(marginal ->
                             conditionalMarginals.merge(Set.of(column), marginal,
@@ -441,13 +485,71 @@ final class McvStatisticsPropagation {
                     .build();
             if (marginal.getMcvDistribution().getTotalRowsLong()
                     == marginal.getRowCount()) {
-                updated = new ExternalMcvStatistics.Group(List.of(column.getName()), (long) marginal.getRowCount(),
-                        marginal.getNdv(), marginal.getMcv(), List.of(), marginal.getNullCounts())
+                updated = ExternalMcvStatistics.Group.derived(List.of(column.getName()), (long) marginal.getRowCount(),
+                        marginal.getNdv(), marginal.getMcv(), marginal.getNullCounts())
                         .columnStatistic(column.getType(), updated).orElse(updated);
             }
             builder.addColumnStatistic(column, updated);
         });
         return builder.setMultiColumnStatistics(groups).build();
+    }
+
+    /**
+     * The tuples with counts in proportion to their own that add up to the target: the counts are rounded down and the
+     * rest is given one by one to the counts with the largest remainders. The counts rounded one by one would not add up
+     * to the rows of a complete head, and the head would then be taken for one that is not. The tuples that are left
+     * with no row are not kept.
+     */
+    private static List<MultiColumnCombinedStats.McvEntry> scaledTo(List<MultiColumnCombinedStats.McvEntry> entries,
+                                                                    double total, long target) {
+        if (entries.isEmpty()) {
+            return entries;
+        }
+        double factor = target / total;
+        long[] counts = new long[entries.size()];
+        double[] remainders = new double[entries.size()];
+        long sum = 0;
+        for (int i = 0; i < counts.length; i++) {
+            double exact = entries.get(i).getCount() * factor;
+            counts[i] = (long) Math.floor(exact);
+            remainders[i] = exact - counts[i];
+            sum += counts[i];
+        }
+        Integer[] order = new Integer[counts.length];
+        for (int i = 0; i < order.length; i++) {
+            order[i] = i;
+        }
+        java.util.Arrays.sort(order, (left, right) -> Double.compare(remainders[right], remainders[left]));
+        for (int k = 0; sum < target && k < order.length; k++, sum++) {
+            counts[order[k]]++;
+        }
+        List<MultiColumnCombinedStats.McvEntry> scaled = new ArrayList<>(entries.size());
+        for (int i = 0; i < counts.length; i++) {
+            // A tuple that has no row in the output is no tuple of the group: its consumers count the tuples, as the
+            // groups of an aggregate, the entries of a skewed join and the NDV.
+            if (counts[i] > 0) {
+                scaled.add(new MultiColumnCombinedStats.McvEntry(entries.get(i).getValues(), counts[i], List.of()));
+            }
+        }
+        return scaled;
+    }
+
+    // The conjuncts of the predicate that read columns of the group, joined, when each reads only columns of it; the
+    // conjuncts that read none are left out. Null when a conjunct reads a column of the group and one outside it, and
+    // when none reads a column of it.
+    private static ScalarOperator withinGroup(ScalarOperator predicate, Set<ColumnRefOperator> group) {
+        List<ScalarOperator> within = new ArrayList<>();
+        for (ScalarOperator conjunct : Utils.extractConjuncts(predicate)) {
+            List<ColumnRefOperator> columns = Utils.extractColumnRef(conjunct);
+            if (columns.stream().noneMatch(group::contains)) {
+                continue;
+            }
+            if (!group.containsAll(columns)) {
+                return null;
+            }
+            within.add(conjunct);
+        }
+        return Utils.compoundAnd(within);
     }
 
     private static Optional<MultiColumnCombinedStats> conditionalMarginal(MultiColumnCombinedStats group,

@@ -41,6 +41,14 @@ import java.util.concurrent.ConcurrentHashMap;
  * and the derivations of one query match the head of x with it again, so its preparation and its result on each
  * value are kept in the cache of the query.
  *
+ * A comparison of an expression of a column with a constant, such as hours_add(created, 5) >= '2026-08-01', reads the
+ * value of the expression on a value of the head once for all the conditions on that expression, and keeps it, with its
+ * key of order, for the estimate that runs: the estimate of a conjunction of n conditions filters the head at each
+ * of its n AND nodes by the conditions below it. We fear the evaluation of the expression on a value, which folds its call
+ * through the rewriter of the optimizer, being repeated for each condition at each node, so it is the product of the
+ * conditions, the nodes and the values of the head. The value is the same one that the plain evaluation gives, and so
+ * is the result, see MultiColumnMcvEstimator#matchesComponent.
+ *
  * A condition on a column itself is matched with the values of a head converted once to the type of the column, which
  * the head keeps, see TypedValue and PreparedMcvTuples#typedValue, and with its constants converted once when it is
  * prepared. The conversions are the ones of MultiColumnMcvEstimator#compare and #evaluate, so the result is the same;
@@ -61,9 +69,101 @@ final class McvPredicateEvaluator {
     // A comparison of keys that compare() would not evaluate.
     private static final int NO_ORDER = Integer.MIN_VALUE;
 
+    // The most values of expressions that an estimate keeps, about 130 bytes each: a head of 1000 tuples and a hundred
+    // expressions. The values past it are evaluated each time they are read.
+    private static final int MAX_EXPRESSION_VALUES = 1 << 17;
+
+    // The values of the expressions of the estimate that runs on this thread, see within().
+    private static final ThreadLocal<ExpressionValues> SCOPE = new ThreadLocal<>();
+
     // ScalarOperator.hashCode/equals can themselves walk a long IN list. Identity is sufficient here.
     private final Map<ScalarOperator, Local> predicates = new IdentityHashMap<>();
     private final ExpressionStatisticsCache cache = ExpressionStatisticsCache.current();
+    // The expression of a condition is small: it is told by equals, once for each condition, and not for each value.
+    private final ExpressionValues expressionValues;
+
+    McvPredicateEvaluator() {
+        ExpressionValues scope = SCOPE.get();
+        expressionValues = scope != null ? scope : new ExpressionValues();
+    }
+
+    /**
+     * Runs an estimate whose evaluators share the values of the expressions of the head they evaluate: the estimate of a
+     * conjunction makes an evaluator at each of its nodes. The thread holds them only while the estimate runs, and the
+     * estimate nested in it takes the same ones.
+     */
+    static <T> T within(java.util.function.Supplier<T> estimate) {
+        if (SCOPE.get() != null) {
+            return estimate.get();
+        }
+        SCOPE.set(new ExpressionValues());
+        try {
+            return estimate.get();
+        } finally {
+            SCOPE.remove();
+        }
+    }
+
+    /** The values of expressions of a column on the values of its head, by the expression and the column. */
+    private static final class ExpressionValues {
+        private final Map<ExpressionKey, Map<String, ExpressionValue>> byExpression = new java.util.HashMap<>();
+        // The values of an expression object, found without walking the expression: a condition is read on each value of
+        // the head, and the expression of it is told by equals only the first time.
+        private final Map<ScalarOperator, Resolved> byObject = new IdentityHashMap<>();
+        private int values;
+
+        private Map<String, ExpressionValue> of(ScalarOperator expression, ColumnRefOperator column) {
+            Resolved resolved = byObject.get(expression);
+            if (resolved != null && resolved.column.equals(column)) {
+                return resolved.values;
+            }
+            Map<String, ExpressionValue> found = byExpression.computeIfAbsent(new ExpressionKey(expression, column),
+                    key -> new java.util.HashMap<>());
+            byObject.put(expression, new Resolved(column, found));
+            return found;
+        }
+
+        /** The value of the expression on a value of the head that is not NULL, evaluated once. */
+        ExpressionValue valueOf(ScalarOperator expression, ColumnRefOperator column, String value) {
+            Map<String, ExpressionValue> known = of(expression, column);
+            ExpressionValue result = known.get(value);
+            if (result == null) {
+                result = ExpressionValue.of(expression, column, value);
+                if (values < MAX_EXPRESSION_VALUES) {
+                    known.put(value, result);
+                    values++;
+                }
+            }
+            return result;
+        }
+    }
+
+    private record Resolved(ColumnRefOperator column, Map<String, ExpressionValue> values) {
+    }
+
+    private record ExpressionKey(ScalarOperator expression, ColumnRefOperator column) {
+    }
+
+    /**
+     * The value of an expression on a value of the head, as the plain evaluation reads it: the operand it gives (see
+     * #operand), and the key of order that compare() gives its text.
+     */
+    private record ExpressionValue(byte operand, Object key) {
+        static ExpressionValue of(ScalarOperator expression, ColumnRefOperator column, String value) {
+            Optional<ConstantOperator> result = MultiColumnMcvEstimator.evaluate(expression, column, value);
+            if (result.isEmpty()) {
+                return new ExpressionValue(OPERAND_EMPTY, null);
+            }
+            if (result.get().isNull()) {
+                return new ExpressionValue(OPERAND_NULL, null);
+            }
+            byte operand = result.get().getType().isBoolean()
+                    ? result.get().getBoolean() ? OPERAND_TRUE : OPERAND_FALSE : OPERAND_VALUE;
+            Type type = expression.getType();
+            return new ExpressionValue(operand,
+                    TypedValue.orderKey(orderOf(type), type, MultiColumnMcvEstimator.constantText(result.get())));
+        }
+    }
 
     // A prepared condition with the work budget its LIKE spends in this derivation, over the values in their order.
     private record Local(Prepared prepared, LikePatternEstimator.Work work) {
@@ -135,7 +235,7 @@ final class McvPredicateEvaluator {
         }
 
         // The left side of MultiColumnMcvEstimator#compare.
-        private static Object orderKey(Order order, Type type, String value) {
+        static Object orderKey(Order order, Type type, String value) {
             switch (order) {
                 case BOOLEAN:
                     return booleanValue(value);
@@ -260,6 +360,10 @@ final class McvPredicateEvaluator {
                 }
             }
         }
+        ExpressionValues scope = SCOPE.get();
+        if (scope != null && value != null && !expression.isColumnRef()) {
+            return scope.valueOf(expression, column, value).operand();
+        }
         Optional<ConstantOperator> result = MultiColumnMcvEstimator.evaluate(expression, column, value);
         if (result.isEmpty()) {
             return OPERAND_EMPTY;
@@ -273,9 +377,9 @@ final class McvPredicateEvaluator {
         return OPERAND_VALUE;
     }
 
-    private static Optional<Boolean> match(Prepared prepared, ScalarOperator predicate, ColumnRefOperator column,
-                                           String value, LikePatternEstimator.Work work, PreparedMcvTuples head,
-                                           int position) {
+    private Optional<Boolean> match(Prepared prepared, ScalarOperator predicate, ColumnRefOperator column,
+                                    String value, LikePatternEstimator.Work work, PreparedMcvTuples head,
+                                    int position) {
         if (head != null && value != null && predicate.getChild(0).isColumnRef()) {
             try {
                 if (prepared.comparison != null && prepared.comparison.type.equals(column.getType())) {
@@ -290,6 +394,9 @@ final class McvPredicateEvaluator {
                 // We do not expect the converted values to fail, but the plain evaluation below does not need them.
             }
         }
+        if (prepared.expressionComparison != null && value != null) {
+            return expressionMatch(prepared.expressionComparison, predicate.getChild(0), column, value);
+        }
         if (prepared.membership == null && prepared.like == null) {
             return MultiColumnMcvEstimator.matchesComponent(predicate, column, value, work);
         }
@@ -303,6 +410,20 @@ final class McvPredicateEvaluator {
         }
         return prepared.like != null ? value == null ? Optional.of(false) : prepared.like.tryMatch(value, work)
                 : prepared.membership.matches(value);
+    }
+
+    /**
+     * As MultiColumnMcvEstimator#matchesComponent for a comparison of an expression with a constant on a value that is
+     * not NULL: the expression is evaluated on the value once, and its text is read once as compare() reads it.
+     */
+    private Optional<Boolean> expressionMatch(Comparison comparison, ScalarOperator expression, ColumnRefOperator column,
+                                              String value) {
+        ExpressionValue known = expressionValues.valueOf(expression, column, value);
+        if (known.operand() == OPERAND_EMPTY) {
+            return Optional.empty();
+        }
+        // A NULL value of the expression satisfies no comparison, see MultiColumnMcvEstimator#matches.
+        return known.operand() == OPERAND_NULL ? Optional.of(false) : comparison.matches(known.key());
     }
 
     private Local local(ScalarOperator predicate) {
@@ -336,6 +457,8 @@ final class McvPredicateEvaluator {
         private final LikePatternEstimator.LikePattern like;
         // A comparison of the column itself with a constant, with the constant converted once; null otherwise.
         private final Comparison comparison;
+        // A comparison of an expression of the column with a constant, with the constant converted once; null otherwise.
+        private final Comparison expressionComparison;
         // The result on each value, kept for a condition on a virtual column in the cache of a query only. The
         // result of a LIKE depends on the budget the derivation has left, so it is not kept.
         private final Map<String, Optional<Boolean>> results;
@@ -348,6 +471,8 @@ final class McvPredicateEvaluator {
                     ? LikePatternEstimator.pattern(pattern).orElse(null) : null;
             comparison = column != null && predicate instanceof BinaryPredicateOperator binary
                     && binary.getChild(0).isColumnRef() ? Comparison.of(binary, column.getType()) : null;
+            expressionComparison = column != null && predicate instanceof BinaryPredicateOperator binary
+                    && !binary.getChild(0).isColumnRef() ? Comparison.of(binary, binary.getChild(0).getType()) : null;
             results = kept && !(predicate instanceof LikePredicateOperator) ? new ConcurrentHashMap<>() : null;
         }
     }

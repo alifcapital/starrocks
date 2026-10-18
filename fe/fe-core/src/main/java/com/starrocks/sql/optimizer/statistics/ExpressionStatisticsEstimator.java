@@ -205,7 +205,7 @@ final class ExpressionStatisticsEstimator {
     // NDV left; null when the condition cannot be evaluated on a head value.
     private static Core negatedCore(ScalarOperator condition, ColumnRefOperator column, ColumnStatistic statistic) {
         Histogram histogram = statistic.getHistogram();
-        Map<String, Long> head = new LinkedHashMap<>();
+        LinkedHashMap<String, Long> head = new LinkedHashMap<>();
         McvPredicateEvaluator evaluator = new McvPredicateEvaluator();
         List<String> prefixes = prefixesOf(condition);
         List<String> likePrefixes = column.getType().isStringType() ? likePrefixes(condition) : null;
@@ -221,7 +221,7 @@ final class ExpressionStatisticsEstimator {
             }
         }
         Histogram remaining = Histogram.forStrings(prefixes.isEmpty() ? histogram.getBuckets()
-                : withoutPrefixes(histogram.getBuckets(), prefixes), head);
+                : withoutPrefixes(histogram.getBuckets(), prefixes), McvDistribution.adopt(head));
         long removedHead = histogram.getMCV().size() - head.size();
         long removedBuckets = distinctOf(histogram.getBuckets()) - distinctOf(remaining.getBuckets());
         double distinct = Math.max(head.size(), statistic.getDistinctValuesCount() - removedHead - removedBuckets);
