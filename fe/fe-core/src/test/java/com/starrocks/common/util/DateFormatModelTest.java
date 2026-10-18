@@ -117,8 +117,9 @@ public class DateFormatModelTest {
         Assertions.assertTrue(DateFormatModel.of("").isNullOnAllRows());
     }
 
-    // The BE returns the string up to the first zero byte of the format. A zero byte reaches the string from the text, or
-    // after a % as the character of an unknown specifier, so a format with one is outside of the model whatever its fields.
+    // A BE of an older version returns the string up to the first zero byte of the format. A zero byte reaches the string
+    // from the text, or after a % as the character of an unknown specifier, so a format with one is outside of the model
+    // whatever its fields.
     @Test
     public void testFormatWithAZeroByteIsOutsideTheModel() {
         for (String format : List.of("%Y-%m-%d\0x", "%Y-%m\0", "\0%Y", "%Y\0-%m", "%Y-%m-%d\0", "%Y-%m-%d %H:%i:%s\0",

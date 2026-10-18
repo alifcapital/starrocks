@@ -244,13 +244,14 @@ public class DateFormatStatisticsTest {
                 of(TIME, "%Y-%m-%d %H:00:00").getStringBounds());
     }
 
-    // The BE cuts the string at the first zero byte of the format. The cut joins strings and shortens them, so the periods,
-    // the values of the fields and the length of the format stay upper bounds, and the model gives no bounds of the strings.
+    // A BE of an older version cuts the string at the first zero byte of the format. The cut joins strings and shortens
+    // them, so the periods, the values of the fields and the length of the format stay upper bounds, and the model gives no
+    // bounds of the strings.
     @Test
     public void testFormatWithAZeroByteKeepsTheUpperBoundsAndHasNoBounds() {
         Assertions.assertEquals(89, distinct(DATE, "%Y-%m\0"));
         Assertions.assertEquals(89, distinct(DATE, "%Y-%m\0x"));
-        // the days after the zero byte are not in the string of the BE, and the estimate keeps them
+        // the days after the zero byte are not in the string of an older BE, and the estimate keeps them
         Assertions.assertTrue(distinct(DATE, "%Y-%m\0%d") >= 89);
         Assertions.assertEquals(1, distinct(DATE, "\0"));
         for (String format : new String[] {"%Y-%m-%d\0", "%Y-%m-01 00:00:00\0", "\0%Y-%m-%d", "%Y-%m-%d\0x"}) {

@@ -52,11 +52,12 @@ import java.util.function.Function;
  * format as a pattern with percent signs: %% is a percent sign, a single % at the end is a character, and a character
  * that is no specifier is text.
  * <p>
- * The BE writes the string into a buffer and takes it back as a C string, so it returns the string up to the first zero
- * byte. We fear that a bound on the strings of a format with a zero byte would replace a condition by another one, because
- * the model would hold the text after the zero byte as a part of every string. So such a format is outside of the model:
- * it is not ordered and not exact, see hasZeroByte. We expect no real format to have a zero byte, and the cut would need a
- * second view of every fact, as the BE still counts the bytes after the zero byte for its NULL rows.
+ * A BE of an older version writes the string into a buffer and takes it back as a C string, so it returns the string up to
+ * the first zero byte, while a newer BE returns the whole string, and a cluster holds both during an upgrade. We fear that a
+ * bound on the strings of a format with a zero byte would replace a condition by another one on an older BE, because the
+ * model would hold the text after the zero byte as a part of every string. So such a format is outside of the model: it is
+ * not ordered and not exact, see hasZeroByte. We expect no real format to have a zero byte, and the cut would need a second
+ * view of every fact, as the BE counts the bytes after the zero byte for its NULL rows too.
  */
 public final class DateFormatModel {
     /** The fields of a date, from the coarsest to the finest. */
@@ -323,11 +324,11 @@ public final class DateFormatModel {
     }
 
     /**
-     * Whether the format has a zero byte. The BE returns the string up to it, and the FE keeps the whole string, so no
-     * string of such a format is the rendering that the tokens of the model describe. The model gives no order and no
-     * exactness to the format. The distinct values, the lengths and the periods stay upper bounds, as the cut only joins
-     * and shortens strings. The NULL rows do not change: the BE counts the bytes after the zero byte, so isNullOnAllRows
-     * reads the whole format.
+     * Whether the format has a zero byte. A BE of an older version returns the string up to it, and the FE keeps the whole
+     * string, so no string of such a format is the rendering that the tokens of the model describe there. The model gives
+     * no order and no exactness to the format. The distinct values, the lengths and the periods stay upper bounds, as the
+     * cut only joins and shortens strings. The NULL rows do not change: the BE counts the bytes after the zero byte, so
+     * isNullOnAllRows reads the whole format.
      */
     public boolean hasZeroByte() {
         return zeroByte;
@@ -376,9 +377,9 @@ public final class DateFormatModel {
      * Whether the BE renders every row: it gives NULL for a string that does not fit its buffer of 128 bytes. We count
      * a string of 127 bytes as not fitting, because the BE also gives NULL a few bytes before the end of the buffer for
      * the names of the days and months. We take a format of 128 bytes or more as not exact too: the BE renders it row
-     * by row, and we expect such a format to hold a long text. We take a format with a zero byte as not exact, because the
-     * BE cuts its strings there, see hasZeroByte. The BE gives NULL for every row of the empty format, so that format is not
-     * exact either, see isNullOnAllRows. A bound on the strings is right only for an exact format.
+     * by row, and we expect such a format to hold a long text. We take a format with a zero byte as not exact, because a
+     * BE of an older version cuts its strings there, see hasZeroByte. The BE gives NULL for every row of the empty format,
+     * so that format is not exact either, see isNullOnAllRows. A bound on the strings is right only for an exact format.
      */
     public boolean isExactOnAllRows() {
         return formatLength > 0 && !zeroByte && maxRenderedLength < MAX_RENDERED_LENGTH && formatLength < MAX_FORMAT_LENGTH;
@@ -395,8 +396,8 @@ public final class DateFormatModel {
     /**
      * Whether the strings of the function follow the order of the dates, so the strings of the ends of a range of dates
      * bound the strings of the range. The FE folds the ends and the BE renders the rows, and a bound is right only when both
-     * give the same string. So we admit a format when it is known, has no zero byte (the FE keeps it in the string, the BE
-     * cuts the string there), is taken by the function, and has text only or is ordered.
+     * give the same string. So we admit a format when it is known, has no zero byte (the FE keeps it in the string, a BE of
+     * an older version cuts the string there), is taken by the function, and has text only or is ordered.
      */
     public boolean isMonotonicFor(Renderer renderer) {
         return known && !zeroByte && isTakenBy(renderer) && (fields.isEmpty() || isOrdered());

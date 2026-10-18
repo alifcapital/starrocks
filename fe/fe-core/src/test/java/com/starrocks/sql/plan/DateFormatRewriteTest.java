@@ -95,8 +95,9 @@ public class DateFormatRewriteTest extends PlanTestBase {
 
     @Test
     public void testFormatWithAZeroByteKeepsTheCondition() throws Exception {
-        // The BE takes the string of date_format up to the first zero byte of the format. date_format(ts, '%Y-%m-%d\0x') is
-        // '2026-08-01' and never equals '2026-08-01\0x': a range of ts would return the rows of the day.
+        // A BE of an older version takes the string of date_format up to the first zero byte of the format.
+        // date_format(ts, '%Y-%m-%d\0x') is '2026-08-01' and never equals '2026-08-01\0x': a range of ts would return the
+        // rows of the day.
         String plan = getFragmentPlan(
                 "select * from df_time where date_format(ts, '%Y-%m-%d\\0x') = '2026-08-01\\0x'");
         assertContains(plan, "date_format");

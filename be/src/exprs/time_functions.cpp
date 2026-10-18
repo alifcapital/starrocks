@@ -1885,12 +1885,15 @@ StatusOr<ColumnPtr> TimeFunctions::_t_from_unix_with_format_general(FunctionCont
 
         std::string new_fmt = convert_format(format);
 
+        // The format can hold a zero byte, and the string then holds it too. We expect a string that is cut at the first
+        // zero byte to differ from the string of the same row in a plan, so we take the length from the renderer.
         char buf[128];
-        if (!dtv.to_format_string((const char*)new_fmt.c_str(), new_fmt.size(), buf)) {
+        int length = 0;
+        if (!dtv.to_format_string((const char*)new_fmt.c_str(), new_fmt.size(), buf, &length)) {
             result.append_null();
             continue;
         }
-        result.append(Slice(buf));
+        result.append(Slice(buf, length));
     }
 
     return result.build(ColumnHelper::is_all_const(columns));
@@ -1926,11 +1929,12 @@ StatusOr<ColumnPtr> TimeFunctions::_t_from_unix_with_format_const(std::string& f
         }
 
         char buf[128];
-        if (!dtv.to_format_string((const char*)format_content.c_str(), format_content.size(), buf)) {
+        int length = 0;
+        if (!dtv.to_format_string((const char*)format_content.c_str(), format_content.size(), buf, &length)) {
             result.append_null();
             continue;
         }
-        result.append(Slice(buf));
+        result.append(Slice(buf, length));
     }
 
     return result.build(ColumnHelper::is_all_const(columns));
@@ -1979,11 +1983,12 @@ StatusOr<ColumnPtr> TimeFunctions::_t_from_unix_with_format_timezone(FunctionCon
         std::string new_fmt = convert_format(format);
 
         char buf[128];
-        if (!dtv.to_format_string((const char*)new_fmt.c_str(), new_fmt.size(), buf)) {
+        int length = 0;
+        if (!dtv.to_format_string((const char*)new_fmt.c_str(), new_fmt.size(), buf, &length)) {
             result.append_null();
             continue;
         }
-        result.append(Slice(buf));
+        result.append(Slice(buf, length));
     }
 
     return result.build(ColumnHelper::is_all_const(columns));
@@ -2024,11 +2029,12 @@ StatusOr<ColumnPtr> TimeFunctions::_t_from_unix_with_format_timezone_const(const
         }
 
         char buf[128];
-        if (!dtv.to_format_string((const char*)format_content.c_str(), format_content.size(), buf)) {
+        int length = 0;
+        if (!dtv.to_format_string((const char*)format_content.c_str(), format_content.size(), buf, &length)) {
             result.append_null();
             continue;
         }
-        result.append(Slice(buf));
+        result.append(Slice(buf, length));
     }
 
     return result.build(ColumnHelper::is_all_const(columns));
@@ -2829,11 +2835,13 @@ DEFINE_STRING_UNARY_FN_WITH_IMPL(to_iso8601Impl, v) {
     return timestamp::to_string<true>(((TimestampValue)v).timestamp());
 }
 
-bool standard_format_one_row(const TimestampValue& timestamp_value, char* buf, const std::string& fmt) {
+// The format can hold a zero byte, and the string then holds it too, so the caller takes the length of the string from
+// here and does not use strlen.
+bool standard_format_one_row(const TimestampValue& timestamp_value, char* buf, const std::string& fmt, int* length) {
     int year, month, day, hour, minute, second, microsecond;
     timestamp_value.to_timestamp(&year, &month, &day, &hour, &minute, &second, &microsecond);
     DateTimeValue dt(TIME_DATETIME, year, month, day, hour, minute, second, microsecond);
-    bool b = dt.to_format_string(fmt.c_str(), fmt.size(), buf);
+    bool b = dt.to_format_string(fmt.c_str(), fmt.size(), buf, length);
     return b;
 }
 
@@ -2854,10 +2862,11 @@ StatusOr<ColumnPtr> standard_format(const std::string& fmt, int len, const starr
             result.append_null();
         } else {
             auto ts = (TimestampValue)ts_viewer.value(i);
-            if (!standard_format_one_row(ts, buf, fmt)) {
+            int length = 0;
+            if (!standard_format_one_row(ts, buf, fmt, &length)) {
                 result.append_null();
             } else {
-                result.append(Slice(buf));
+                result.append(Slice(buf, length));
             }
         }
     }
@@ -2907,10 +2916,11 @@ void common_format_process(ColumnViewer<Type>* viewer_date, ColumnViewer<TYPE_VA
     } else {
         char buf[128];
         auto ts = (TimestampValue)viewer_date->value(i);
-        if (!standard_format_one_row(ts, buf, viewer_format->value(i).to_string())) {
+        int length = 0;
+        if (!standard_format_one_row(ts, buf, viewer_format->value(i).to_string(), &length)) {
             builder->append_null();
         } else {
-            builder->append(Slice(buf));
+            builder->append(Slice(buf, length));
         }
     }
 }
@@ -3028,11 +3038,11 @@ Status TimeFunctions::jodatime_format_close(FunctionContext* context, FunctionCo
     return Status::OK();
 }
 
-bool joda_standard_format_one_row(const TimestampValue& timestamp_value, char* buf, std::string_view fmt) {
+bool joda_standard_format_one_row(const TimestampValue& timestamp_value, char* buf, std::string_view fmt, int* length) {
     int year, month, day, hour, minute, second, microsecond;
     timestamp_value.to_timestamp(&year, &month, &day, &hour, &minute, &second, &microsecond);
     DateTimeValue dt(TIME_DATETIME, year, month, day, hour, minute, second, microsecond);
-    bool b = dt.to_joda_format_string(fmt.data(), fmt.size(), buf);
+    bool b = dt.to_joda_format_string(fmt.data(), fmt.size(), buf, length);
     return b;
 }
 
@@ -3053,10 +3063,11 @@ StatusOr<ColumnPtr> joda_standard_format(const std::string& fmt, int len, const 
             result.append_null();
         } else {
             auto ts = (TimestampValue)ts_viewer.value(i);
-            if (!joda_standard_format_one_row(ts, buf, fmt)) {
+            int length = 0;
+            if (!joda_standard_format_one_row(ts, buf, fmt, &length)) {
                 result.append_null();
             } else {
-                result.append(Slice(buf));
+                result.append(Slice(buf, length));
             }
         }
     }
@@ -3106,10 +3117,11 @@ void common_joda_format_process(ColumnViewer<Type>* viewer_date, ColumnViewer<TY
     } else {
         char buf[128];
         auto ts = (TimestampValue)viewer_date->value(i);
-        if (!joda_standard_format_one_row(ts, buf, format)) {
+        int length = 0;
+        if (!joda_standard_format_one_row(ts, buf, format, &length)) {
             builder->append_null();
         } else {
-            builder->append(Slice(buf));
+            builder->append(Slice(buf, length));
         }
     }
 }

@@ -181,10 +181,10 @@ public class DateFormatInverseTest {
         assertSame(predicate, rule.apply(predicate, null));
     }
 
-    // The BE returns the string up to the first zero byte of the format: date_format(ts, '%Y-%m-%d\0x') is '2026-08-01' and
-    // never equals '2026-08-01\0x', and date_format(ts, '%Y-%m\0') is '2026-08', which is below '2026-08\0'. A period of ts
-    // would return the rows of a day for the first and cut the partition of August for the second, so no condition of such a
-    // format is replaced, whatever the constant is, the cut string included.
+    // A BE of an older version returns the string up to the first zero byte of the format: date_format(ts, '%Y-%m-%d\0x')
+    // is '2026-08-01' and never equals '2026-08-01\0x', and date_format(ts, '%Y-%m\0') is '2026-08', which is below
+    // '2026-08\0'. A period of ts would return the rows of a day for the first and cut the partition of August for the
+    // second, so no condition of such a format is replaced, whatever the constant is, the cut string included.
     @Test
     public void testFormatWithAZeroByteKeepsTheCondition() {
         ColumnRefOperator day = new ColumnRefOperator(3, DateType.DATE, "d", true);

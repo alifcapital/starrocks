@@ -221,11 +221,13 @@ public:
     // DATETIME:  format 'YYYY-MM-DD hh:mm:ss.xxxxxx'
     char* to_string(char* to) const;
 
-    // Convert this datetime value to string by the format string
-    bool to_format_string(const char* format, int len, char* to) const;
+    // Convert this datetime value to string by the format string.
+    // The format can hold a zero byte and the string then holds it too, so a caller that returns the string
+    // gets its length from out_len, the number of bytes before the terminating zero, and does not use strlen.
+    bool to_format_string(const char* format, int len, char* to, int* out_len = nullptr) const;
 
-    // Convert this datetime value to string by the joda format string
-    bool to_joda_format_string(const char* format, int len, char* to) const;
+    // Convert this datetime value to string by the joda format string, see to_format_string for out_len
+    bool to_joda_format_string(const char* format, int len, char* to, int* out_len = nullptr) const;
 
     // compute the length of data format pattern
     static int compute_format_len(const char* format, int len);

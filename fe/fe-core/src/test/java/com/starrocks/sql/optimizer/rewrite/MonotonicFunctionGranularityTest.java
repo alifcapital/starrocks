@@ -136,8 +136,9 @@ public class MonotonicFunctionGranularityTest {
         Assertions.assertTrue(period(call("date_format", VarcharType.VARCHAR, DAY, text("%H"))).orElseThrow().isSingle());
         Assertions.assertTrue(period(call("date_format", VarcharType.VARCHAR, TIME, text("no fields"))).orElseThrow()
                 .isSingle());
-        // The BE cuts the string at a zero byte of the format. The strings are a function of the fields before it, so the
-        // period of all the fields is an upper bound of the strings, and a count of periods is never below them
+        // A BE of an older version cuts the string at a zero byte of the format. The strings are a function of the fields
+        // before it, so the period of all the fields is an upper bound of the strings, and a count of periods is never
+        // below them
         assertSame(unit("day"), call("date_format", VarcharType.VARCHAR, TIME, text("%Y-%m\0%d")));
         Assertions.assertTrue(period(call("date_format", VarcharType.VARCHAR, TIME, text("\0"))).orElseThrow().isSingle());
         // the fraction of a second has no period to count, and the format must be a text for a date

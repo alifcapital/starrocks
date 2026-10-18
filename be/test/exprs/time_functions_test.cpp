@@ -19,6 +19,9 @@
 #include <gtest/gtest.h>
 
 #include <cstring>
+#include <memory>
+#include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -2378,6 +2381,322 @@ TEST_F(TimeFunctionsTest, jodatime_format) {
         auto v = ColumnHelper::cast_to<TYPE_VARCHAR>(result);
         ASSERT_EQ(Slice("abcd 202006"), v->get_data()[0]);
     }
+}
+
+namespace {
+
+std::string repeat(const std::string& text, int times) {
+    std::string result;
+    for (int i = 0; i < times; ++i) {
+        result += text;
+    }
+    return result;
+}
+
+// The string of the first row, or nothing where the row is NULL. A zero byte is a byte of the string.
+std::optional<std::string> first_row(const ColumnPtr& result) {
+    if (result->only_null()) {
+        return std::nullopt;
+    }
+    ColumnViewer<TYPE_VARCHAR> viewer(result);
+    if (viewer.is_null(0)) {
+        return std::nullopt;
+    }
+    return viewer.value(0).to_string();
+}
+
+ColumnPtr one_datetime(int usec) {
+    auto column = TimestampColumn::create();
+    column->append(TimestampValue::create(2020, 6, 25, 15, 58, 21, usec));
+    return column;
+}
+
+ColumnPtr one_date() {
+    auto column = DateColumn::create();
+    column->append(DateValue::create(2020, 6, 25));
+    return column;
+}
+
+// date_format of a DATE, or datetime_format of a DATETIME, with the format as a constant, which prepares the function
+// as the planner does, or as a column.
+std::optional<std::string> format_one_row(bool datetime, bool constant_format, const std::string& format,
+                                          int usec = 0) {
+    std::unique_ptr<FunctionContext> ctx(FunctionContext::create_test_context());
+    ColumnPtr format_column;
+    if (constant_format) {
+        format_column = ColumnHelper::create_const_column<TYPE_VARCHAR>(Slice(format), 1);
+    } else {
+        auto column = BinaryColumn::create();
+        column->append(Slice(format));
+        format_column = column;
+    }
+    Columns columns;
+    columns.emplace_back(datetime ? one_datetime(usec) : one_date());
+    columns.emplace_back(format_column);
+    ctx->set_constant_columns(columns);
+    TimeFunctions::format_prepare(ctx.get(), FunctionContext::FunctionStateScope::FRAGMENT_LOCAL);
+    ColumnPtr result = datetime ? TimeFunctions::datetime_format(ctx.get(), columns).value()
+                                : TimeFunctions::date_format(ctx.get(), columns).value();
+    TimeFunctions::format_close(ctx.get(), FunctionContext::FunctionStateScope::FRAGMENT_LOCAL);
+    return first_row(result);
+}
+
+std::optional<std::string> joda_format_one_row(bool datetime, bool constant_format, const std::string& format) {
+    std::unique_ptr<FunctionContext> ctx(FunctionContext::create_test_context());
+    ColumnPtr format_column;
+    if (constant_format) {
+        format_column = ColumnHelper::create_const_column<TYPE_VARCHAR>(Slice(format), 1);
+    } else {
+        auto column = BinaryColumn::create();
+        column->append(Slice(format));
+        format_column = column;
+    }
+    Columns columns;
+    columns.emplace_back(datetime ? one_datetime(0) : one_date());
+    columns.emplace_back(format_column);
+    ctx->set_constant_columns(columns);
+    TimeFunctions::jodatime_format_prepare(ctx.get(), FunctionContext::FunctionStateScope::FRAGMENT_LOCAL);
+    ColumnPtr result = datetime ? TimeFunctions::jodadatetime_format(ctx.get(), columns).value()
+                                : TimeFunctions::jodadate_format(ctx.get(), columns).value();
+    TimeFunctions::jodatime_format_close(ctx.get(), FunctionContext::FunctionStateScope::FRAGMENT_LOCAL);
+    return first_row(result);
+}
+
+// from_unixtime of 2020-06-25 15:58:21 UTC, which is the same day in the zone of the test, by the four ways that the
+// planner calls it: a 32 bit or a 64 bit epoch, with a constant or a column format, and with a time zone.
+enum class FromUnixPath { CONST_32, COLUMN_64, ZONE_CONST, ZONE_COLUMN };
+
+std::optional<std::string> from_unix_one_row(FunctionContext* ctx, FromUnixPath path, const std::string& format) {
+    constexpr int32_t epoch = 1593100701;
+    Columns columns;
+    ColumnPtr result;
+    switch (path) {
+    case FromUnixPath::CONST_32: {
+        auto epoch_column = Int32Column::create();
+        epoch_column->append(epoch);
+        columns.emplace_back(epoch_column);
+        columns.emplace_back(ColumnHelper::create_const_column<TYPE_VARCHAR>(Slice(format), 1));
+        ctx->set_constant_columns(columns);
+        EXPECT_TRUE(TimeFunctions::from_unix_prepare(ctx, FunctionContext::FunctionStateScope::FRAGMENT_LOCAL).ok());
+        result = TimeFunctions::from_unix_to_datetime_with_format_32(ctx, columns).value();
+        EXPECT_TRUE(TimeFunctions::from_unix_close(ctx, FunctionContext::FunctionStateScope::FRAGMENT_LOCAL).ok());
+        break;
+    }
+    case FromUnixPath::COLUMN_64: {
+        auto epoch_column = Int64Column::create();
+        epoch_column->append(epoch);
+        auto format_column = BinaryColumn::create();
+        format_column->append(Slice(format));
+        columns.emplace_back(epoch_column);
+        columns.emplace_back(format_column);
+        ctx->set_constant_columns(columns);
+        EXPECT_TRUE(TimeFunctions::from_unix_prepare(ctx, FunctionContext::FunctionStateScope::FRAGMENT_LOCAL).ok());
+        result = TimeFunctions::from_unix_to_datetime_with_format_64(ctx, columns).value();
+        EXPECT_TRUE(TimeFunctions::from_unix_close(ctx, FunctionContext::FunctionStateScope::FRAGMENT_LOCAL).ok());
+        break;
+    }
+    case FromUnixPath::ZONE_CONST: {
+        auto epoch_column = Int64Column::create();
+        epoch_column->append(epoch);
+        columns.emplace_back(epoch_column);
+        columns.emplace_back(ColumnHelper::create_const_column<TYPE_VARCHAR>(Slice(format), 1));
+        columns.emplace_back(ColumnHelper::create_const_column<TYPE_VARCHAR>(Slice("UTC"), 1));
+        ctx->set_constant_columns(columns);
+        EXPECT_TRUE(TimeFunctions::from_unix_timezone_prepare(ctx, FunctionContext::FunctionStateScope::FRAGMENT_LOCAL)
+                            .ok());
+        result = TimeFunctions::from_unix_to_datetime_with_format_timezone(ctx, columns).value();
+        EXPECT_TRUE(
+                TimeFunctions::from_unix_timezone_close(ctx, FunctionContext::FunctionStateScope::FRAGMENT_LOCAL).ok());
+        break;
+    }
+    case FromUnixPath::ZONE_COLUMN: {
+        auto epoch_column = Int64Column::create();
+        epoch_column->append(epoch);
+        auto format_column = BinaryColumn::create();
+        format_column->append(Slice(format));
+        auto zone_column = BinaryColumn::create();
+        zone_column->append(Slice("UTC"));
+        columns.emplace_back(epoch_column);
+        columns.emplace_back(format_column);
+        columns.emplace_back(zone_column);
+        ctx->set_constant_columns(columns);
+        EXPECT_TRUE(TimeFunctions::from_unix_timezone_prepare(ctx, FunctionContext::FunctionStateScope::FRAGMENT_LOCAL)
+                            .ok());
+        result = TimeFunctions::from_unix_to_datetime_with_format_timezone(ctx, columns).value();
+        EXPECT_TRUE(
+                TimeFunctions::from_unix_timezone_close(ctx, FunctionContext::FunctionStateScope::FRAGMENT_LOCAL).ok());
+        break;
+    }
+    }
+    return first_row(result);
+}
+
+void expect_string(const std::optional<std::string>& actual, const std::optional<std::string>& expected,
+                   const std::string& what) {
+    ASSERT_EQ(expected.has_value(), actual.has_value()) << what;
+    if (expected.has_value()) {
+        ASSERT_EQ(expected->size(), actual->size()) << what;
+        ASSERT_EQ(*expected, *actual) << what;
+    }
+}
+
+} // namespace
+
+// The format can hold a zero byte, and the string then holds it too. We fear that a function takes the string back as a C
+// string: it cuts the string at the first zero byte of the format, and the row differs from the plan that folds the same
+// call. So the length of the string comes from the renderer, and a format without a zero byte renders as it did.
+TEST_F(TimeFunctionsTest, date_format_keeps_zero_bytes) {
+    const std::vector<std::pair<std::string, std::string>> cases = {
+            {std::string("%Y-%m-%d\0x", 10), std::string("2020-06-25\0x", 12)},
+            {std::string("\0%Y", 3), std::string("\0"
+                                                 "2020",
+                                                 5)},
+            {std::string("%Y\0%m", 5), std::string("2020\0"
+                                                   "06",
+                                                   7)},
+            {std::string("%\0", 2), std::string("\0", 1)},
+            {std::string("a\0", 2), std::string("a\0", 2)},
+            {std::string("\0", 1), std::string("\0", 1)},
+            {std::string("%Y-%m-%d %H:%i:%s\0", 18), std::string("2020-06-25 15:58:21\0", 20)},
+            {"%Y-%m-%d", "2020-06-25"},
+            {"%d,%m,%Y", "25,06,2020"},
+            {"yyyyMMdd", "20200625"},
+            {"yyyy-MM-dd", "2020-06-25"},
+            {"%Y-%m-%d %H:%i:%s", "2020-06-25 15:58:21"},
+            {"abc", "abc"}};
+    for (const auto& [format, expected] : cases) {
+        for (bool constant_format : {true, false}) {
+            std::string what = "datetime constant=" + std::to_string(constant_format) +
+                               " size=" + std::to_string(format.size()) + " " + format;
+            expect_string(format_one_row(true, constant_format, format), expected, what);
+        }
+    }
+    // a DATE is its midnight
+    for (bool constant_format : {true, false}) {
+        expect_string(format_one_row(false, constant_format, std::string("%Y-%m-%d %H\0x", 13)),
+                      std::string("2020-06-25 00\0x", 15), "date");
+    }
+}
+
+// The NULL where the string does not fit the buffer of 128 bytes stays as it was, with and without a zero byte.
+TEST_F(TimeFunctionsTest, date_format_buffer_limits) {
+    const std::string head = "%Y-%m-%d %H:%i:%s.";
+    const std::string zero("\0", 1);
+    const std::optional<std::string> null = std::nullopt;
+    const std::vector<std::pair<std::string, std::optional<std::string>>> cases = {
+            {head + repeat("t", 100) + "%f", "2020-06-25 15:58:21." + repeat("t", 100) + "030000"},
+            {head + repeat("t", 101) + "%f", null},
+            {repeat("a", 127), repeat("a", 127)},
+            {repeat("a", 128), null},
+            {repeat("a", 122) + "%Y", repeat("a", 122) + "2020"},
+            {repeat("a", 123) + "%Y", null},
+            {"%Y" + repeat("a", 123), "2020" + repeat("a", 123)},
+            {"%Y" + repeat("a", 124), null},
+            {repeat("a", 126) + "q", repeat("a", 126) + "q"},
+            {repeat("a", 126) + "%q", null},
+            {repeat("a", 125) + "%q", repeat("a", 125) + "q"},
+            {repeat("a", 126) + "%%", null},
+            {repeat("%%", 64), repeat("%", 64)},
+            {repeat("é", 63), repeat("é", 63)},
+            {repeat("é", 64), null},
+            {repeat("a", 125) + zero + "b", repeat("a", 125) + zero + "b"},
+            {repeat("a", 126) + zero + "b", null},
+            {repeat("a", 125) + "%" + zero, repeat("a", 125) + zero},
+            {repeat("a", 126) + "%" + zero, null},
+            {zero + repeat("a", 127), null}};
+    for (const auto& [format, expected] : cases) {
+        for (bool constant_format : {true, false}) {
+            std::string what = "constant=" + std::to_string(constant_format) + " size=" + std::to_string(format.size());
+            expect_string(format_one_row(true, constant_format, format, 30000), expected, what);
+        }
+    }
+}
+
+// The year of the week %x writes four digits, and asked for no room: a format of 32 of them wrote 128 bytes and a zero byte
+// into a buffer of 128 bytes. We expect NULL, as for %X.
+TEST_F(TimeFunctionsTest, date_format_year_of_week_needs_room) {
+    expect_string(format_one_row(true, false, repeat("%x", 31)), repeat("2020", 31), "31");
+    expect_string(format_one_row(true, false, repeat("%x", 32)), std::nullopt, "32");
+    expect_string(format_one_row(true, true, repeat("%x", 32)), std::nullopt, "32 constant");
+    expect_string(format_one_row(true, false, repeat("%X", 32)), std::nullopt, "32 X");
+}
+
+TEST_F(TimeFunctionsTest, from_unixtime_keeps_zero_bytes) {
+    FunctionContext* ctx = _utils->get_fn_ctx();
+    const std::vector<std::pair<std::string, std::string>> cases = {
+            {std::string("%Y-%m-%d\0x", 10), std::string("2020-06-25\0x", 12)},
+            {std::string("\0%Y", 3), std::string("\0"
+                                                 "2020",
+                                                 5)},
+            {std::string("%Y\0%m", 5), std::string("2020\0"
+                                                   "06",
+                                                   7)},
+            {std::string("%\0", 2), std::string("\0", 1)},
+            {std::string("\0", 1), std::string("\0", 1)},
+            {std::string("yyyy-MM-dd\0", 11), std::string("yyyy-MM-dd\0", 11)},
+            {"%Y-%m-%d", "2020-06-25"},
+            {"yyyyMMdd", "20200625"},
+            {"yyyy-MM-dd", "2020-06-25"},
+            {"abc", "abc"}};
+    for (const auto& [format, expected] : cases) {
+        for (FromUnixPath path :
+             {FromUnixPath::CONST_32, FromUnixPath::COLUMN_64, FromUnixPath::ZONE_CONST, FromUnixPath::ZONE_COLUMN}) {
+            std::string what =
+                    "path=" + std::to_string(static_cast<int>(path)) + " size=" + std::to_string(format.size());
+            expect_string(from_unix_one_row(ctx, path, format), expected, what);
+        }
+    }
+}
+
+// from_unixtime has the same buffer, and takes a constant format of at most 100 bytes. The zone of the test is
+// America/Los_Angeles, which is seven hours behind UTC in June.
+TEST_F(TimeFunctionsTest, from_unixtime_buffer_limits) {
+    FunctionContext* ctx = _utils->get_fn_ctx();
+    for (FromUnixPath path :
+         {FromUnixPath::CONST_32, FromUnixPath::COLUMN_64, FromUnixPath::ZONE_CONST, FromUnixPath::ZONE_COLUMN}) {
+        const std::string clock =
+                (path == FromUnixPath::ZONE_CONST || path == FromUnixPath::ZONE_COLUMN) ? "15:58:21" : "08:58:21";
+        const std::vector<std::pair<std::string, std::optional<std::string>>> cases = {
+                {repeat("%T", 15), repeat(clock, 15)},
+                {repeat("%T", 16), std::nullopt},
+                {repeat("%T", 15) + "%f", repeat(clock, 15) + "000000"},
+                {repeat("%T", 15) + "%f%y", std::nullopt},
+                {repeat("a", 100), repeat("a", 100)}};
+        for (const auto& [format, expected] : cases) {
+            std::string what =
+                    "path=" + std::to_string(static_cast<int>(path)) + " size=" + std::to_string(format.size());
+            expect_string(from_unix_one_row(ctx, path, format), expected, what);
+        }
+    }
+}
+
+TEST_F(TimeFunctionsTest, jodatime_format_keeps_zero_bytes) {
+    const std::vector<std::pair<std::string, std::string>> cases = {{std::string("yyyy\0MM", 7), std::string("2020\0"
+                                                                                                             "06",
+                                                                                                             7)},
+                                                                    {std::string("\0", 1), std::string("\0", 1)},
+                                                                    {std::string("\0\0yyyy", 6), std::string("\0\0"
+                                                                                                             "2020",
+                                                                                                             6)},
+                                                                    {std::string("dd\0", 3), std::string("25\0", 3)},
+                                                                    {"yyyyMMdd", "20200625"},
+                                                                    {"yyyy-MM-dd", "2020-06-25"},
+                                                                    {"ttt", "ttt"}};
+    for (const auto& [format, expected] : cases) {
+        for (bool constant_format : {true, false}) {
+            std::string what = "constant=" + std::to_string(constant_format) + " size=" + std::to_string(format.size());
+            expect_string(joda_format_one_row(true, constant_format, format), expected, what);
+        }
+    }
+}
+
+// The minute of a joda format writes as many digits as the letters of the run, and checked the room for two: a run of ten
+// after 120 bytes wrote 130 bytes into a buffer of 128 bytes. We expect NULL.
+TEST_F(TimeFunctionsTest, jodatime_format_minutes_need_room) {
+    expect_string(joda_format_one_row(true, false, repeat("t", 120) + "mm"), repeat("t", 120) + "58", "mm");
+    expect_string(joda_format_one_row(true, false, repeat("t", 120) + "mmmm"), repeat("t", 120) + "0058", "mmmm");
+    expect_string(joda_format_one_row(true, false, repeat("t", 120) + repeat("m", 10)), std::nullopt, "m x 10");
+    expect_string(joda_format_one_row(true, true, repeat("t", 120) + repeat("m", 10)), std::nullopt, "m x 10 constant");
 }
 
 TEST_F(TimeFunctionsTest, trino_str_to_jodatime) {

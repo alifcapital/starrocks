@@ -244,8 +244,8 @@ public class MonotonicImageTest {
         }
     }
 
-    // The FE folds the ends of the range and keeps a zero byte in the string, while the BE returns the string up to it, so
-    // the strings of the ends are not the strings of the rows, even for a format with text only
+    // The FE folds the ends of the range and keeps a zero byte in the string, while a BE of an older version returns the
+    // string up to it, so the strings of the ends are not the strings of the rows, even for a format with text only
     @Test
     public void testFormatWithAZeroByteHasNoImage() {
         MinMax domain = datetimeDomain(LocalDateTime.of(2024, 3, 5, 6, 30, 15), LocalDateTime.of(2024, 3, 7, 10, 20, 30));

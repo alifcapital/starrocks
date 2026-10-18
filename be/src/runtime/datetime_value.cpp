@@ -1094,77 +1094,14 @@ static char* append_with_suffix(const char* str, int str_len, char suffix, int f
     return to;
 }
 
-int DateTimeValue::compute_format_len(const char* format, int len) {
-    int size = 0;
-    const char* ptr = format;
-    const char* end = format + len;
-
-    while (ptr < end) {
-        if (*ptr != '%' || (ptr + 1) < end) {
-            size++;
-            ptr++;
-            continue;
-        }
-        switch (*++ptr) {
-        case 'M':
-        case 'W':
-            size += 10;
-            break;
-        case 'D':
-        case 'Y':
-        case 'x':
-        case 'X':
-            size += 4;
-            break;
-        case 'a':
-        case 'b':
-            size += 10;
-            break;
-        case 'j':
-            size += 3;
-            break;
-        case 'u':
-        case 'U':
-        case 'v':
-        case 'V':
-        case 'y':
-        case 'm':
-        case 'd':
-        case 'h':
-        case 'i':
-        case 'I':
-        case 'l':
-        case 'p':
-        case 'S':
-        case 's':
-        case 'c':
-        case 'e':
-            size += 2;
-            break;
-        case 'k':
-        case 'H':
-            size += 7;
-            break;
-        case 'r':
-            size += 11;
-            break;
-        case 'T':
-            size += 8;
-            break;
-        case 'f':
-            size += 6;
-            break;
-        case 'w':
-        case '%':
-        default:
-            size++;
-            break;
-        }
-    }
-    return size;
+// The callers compare the length with the buffer of 128 bytes of the renderers and take every byte of the format as one
+// byte. We fear that a format which ends with a % makes the length read the byte after the format as the specifier of
+// that %, so the length is the number of bytes of the format and reads nothing of it.
+int DateTimeValue::compute_format_len(const char*, int len) {
+    return len;
 }
 
-bool DateTimeValue::to_joda_format_string(const char* format, int len, char* to) const {
+bool DateTimeValue::to_joda_format_string(const char* format, int len, char* to, int* out_len) const {
     // max buffer size is 128
     // we need write a terminal zero
     constexpr int buffer_size = 127;
@@ -1396,7 +1333,7 @@ bool DateTimeValue::to_joda_format_string(const char* format, int len, char* to)
             pos = int_to_str(_minute, buf);
             buf_size = pos - buf;
             actual_size = std::max(buf_size, same_ch_size);
-            if (write_size + 2 >= buffer_size) return false;
+            if (write_size + actual_size >= buffer_size) return false;
             to = append_with_prefix(buf, pos - buf, '0', actual_size, to);
             break;
         case 's':
@@ -1438,11 +1375,14 @@ bool DateTimeValue::to_joda_format_string(const char* format, int len, char* to)
 
         ptr = next_ch_ptr;
     }
+    if (out_len != nullptr) {
+        *out_len = to - buffer_start;
+    }
     *to++ = '\0';
     return true;
 }
 
-bool DateTimeValue::to_format_string(const char* format, int len, char* to) const {
+bool DateTimeValue::to_format_string(const char* format, int len, char* to, int* out_len) const {
     // max buffer size is 128
     // we need write a terminal zero
     constexpr int buffer_size = 127;
@@ -1685,6 +1625,7 @@ bool DateTimeValue::to_format_string(const char* format, int len, char* to) cons
         case 'x': {
             // Year for the week, where Monday is the first day of the week,
             // numeric, four digits; used with %v
+            if (write_size + 4 >= buffer_size) return false;
             if (_type == TIME_TIME) {
                 return false;
             }
@@ -1724,6 +1665,9 @@ bool DateTimeValue::to_format_string(const char* format, int len, char* to) cons
             *to++ = ch;
             break;
         }
+    }
+    if (out_len != nullptr) {
+        *out_len = to - buffer_start;
     }
     *to++ = '\0';
     return true;

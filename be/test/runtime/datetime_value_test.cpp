@@ -37,7 +37,10 @@
 #include <gtest/gtest-param-test.h>
 #include <gtest/gtest.h>
 
+#include <cstring>
+#include <memory>
 #include <string>
+#include <vector>
 
 #include "common/logging.h"
 #include "testutil/assert.h"
@@ -580,6 +583,19 @@ TEST_F(DateTimeValueTest, from_date_format_str_invalid) {
     ASSERT_FALSE(
             value.from_date_format_str(format_str.c_str(), format_str.size(), value_str.c_str(), value_str.size()));
 }
+// A % that ends the format has no specifier after it. We fear that the length reads the byte after the format as that
+// specifier, so every format lives in a buffer of exactly its bytes, and AddressSanitizer stops a read past the end.
+TEST_F(DateTimeValueTest, compute_format_len_reads_only_the_format) {
+    const std::vector<std::string> formats = {"%",     "a%",       "%Y%",   "%%",  "%M%", "%Y-%m-%d%",
+                                              "yyyy%", "%Y-%m-%d", "%H:%i", "abc", "%q",  std::string("\0%", 2)};
+    for (const std::string& format : formats) {
+        std::unique_ptr<char[]> exact(new char[format.size()]);
+        memcpy(exact.get(), format.data(), format.size());
+        ASSERT_EQ(format.size(), DateTimeValue::compute_format_len(exact.get(), format.size())) << format;
+    }
+    ASSERT_EQ(0, DateTimeValue::compute_format_len("", 0));
+}
+
 // Calculate format
 TEST_F(DateTimeValueTest, format_str) {
     // Used to check
