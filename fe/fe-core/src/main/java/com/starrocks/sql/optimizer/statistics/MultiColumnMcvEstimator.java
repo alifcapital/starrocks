@@ -710,31 +710,46 @@ public class MultiColumnMcvEstimator {
      * substr(s, pos, len) of the built-in function over a VARCHAR and two INT constants, folded by the FE function
      * the constant folding reaches for it. We expect the head of a statistic on substr to be evaluated on every
      * estimate, so this call skips the scalar rewrite the folding runs around it; any other call takes the rewrite.
+     *
+     * left(s, len) and strleft(s, len) are folded here as well, as substr(s, 1, len), which is what the BE computes
+     * for them. The constant folding has no function for them, so without this fold the condition cannot be
+     * evaluated on a value of the head, and the estimate drops the whole group. They are NULL when s or len is NULL.
      */
     private static Optional<ConstantOperator> foldSubstring(CallOperator call, List<ScalarOperator> children) {
         String name = call.getFnName();
-        if (children.size() != 3 || !(FunctionSet.SUBSTR.equalsIgnoreCase(name)
-                || FunctionSet.SUBSTRING.equalsIgnoreCase(name))) {
+        boolean prefix = children.size() == 2 && (FunctionSet.LEFT.equalsIgnoreCase(name)
+                || FunctionSet.STRLEFT.equalsIgnoreCase(name));
+        boolean range = children.size() == 3 && (FunctionSet.SUBSTR.equalsIgnoreCase(name)
+                || FunctionSet.SUBSTRING.equalsIgnoreCase(name));
+        if (!prefix && !range) {
             return Optional.empty();
         }
         com.starrocks.catalog.Function function = call.getFunction();
-        if (function == null || function.isUdf() || function.getArgs().length != 3
-                || !function.getArgs()[0].isVarchar() || !function.getArgs()[1].isInt() || !function.getArgs()[2].isInt()) {
+        if (function == null || function.isUdf() || function.getArgs().length != children.size()
+                || !function.getArgs()[0].isVarchar() || !function.getArgs()[1].isInt()
+                || (range && !function.getArgs()[2].isInt())) {
             return Optional.empty();
         }
         ConnectContext context = ConnectContext.get();
         if (context != null && context.getSessionVariable().isDisableFunctionFoldConstants()) {
             return Optional.empty();
         }
-        for (int i = 0; i < 3; i++) {
+        boolean hasNull = false;
+        for (int i = 0; i < children.size(); i++) {
             ConstantOperator constant = (ConstantOperator) children.get(i);
-            if (constant.isNull() || (i == 0 ? !constant.getType().isVarchar() : !constant.getType().isInt())) {
+            if (!constant.isNull() && (i == 0 ? !constant.getType().isVarchar() : !constant.getType().isInt())) {
                 return Optional.empty();
             }
+            hasNull |= constant.isNull();
         }
+        if (hasNull) {
+            // The folding of substr leaves a NULL argument to the scalar rewrite; left has no fold there.
+            return prefix ? Optional.of(ConstantOperator.createNull(call.getType())) : Optional.empty();
+        }
+        ConstantOperator start = prefix ? ConstantOperator.createInt(1) : (ConstantOperator) children.get(1);
+        ConstantOperator length = (ConstantOperator) children.get(prefix ? 1 : 2);
         return Optional.of(com.starrocks.sql.optimizer.rewrite.ScalarOperatorFunctions.substring(
-                (ConstantOperator) children.get(0), (ConstantOperator) children.get(1),
-                (ConstantOperator) children.get(2)));
+                (ConstantOperator) children.get(0), start, length));
     }
 
     private static boolean isNonNullConstant(ScalarOperator operator) {

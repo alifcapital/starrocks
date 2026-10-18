@@ -43,14 +43,19 @@ public class ExpressionStatisticsPlanTest extends ConnectorPlanTestBase {
     }
 
     private static ExternalMcvStatistics prefixStatistics() {
+        return prefixStatistics("103", "104");
+    }
+
+    // 600 of the 1000 rows start with the first prefix and 400 with the second.
+    private static ExternalMcvStatistics prefixStatistics(String first, String second) {
         Table table = customer();
         ExpressionTemplate template = ExpressionTemplate.parse(TEXT, table, connectContext);
         ExternalMcvStatistics.Expression expression = new ExternalMcvStatistics.Expression(TEXT,
                 template.getType().toSql(), List.of(new ExternalMcvStatistics.StoredSource("c_phone",
                 table.getColumn("c_phone").getType().toSql(), null)), template);
         ExternalMcvStatistics.Group group = new ExternalMcvStatistics.Group(List.of("expr:1:" + TEXT), 1000, 2,
-                List.of(new MultiColumnCombinedStats.McvEntry(List.of("103"), 600, List.of(600L)),
-                        new MultiColumnCombinedStats.McvEntry(List.of("104"), 400, List.of(400L))),
+                List.of(new MultiColumnCombinedStats.McvEntry(List.of(first), 600, List.of(600L)),
+                        new MultiColumnCombinedStats.McvEntry(List.of(second), 400, List.of(400L))),
                 List.of(), List.of(0L), List.of(expression));
         group.prepare(template.getType());
         return new ExternalMcvStatistics(List.of(group));
@@ -155,6 +160,26 @@ public class ExpressionStatisticsPlanTest extends ConnectorPlanTestBase {
                 Assertions.assertEquals(2, cardinality(plan, "AGGREGATE"), item + "\n" + plan);
             });
         }
+    }
+
+    @Test
+    public void testLikeOnAShorterPrefixIsEstimatedOverTheExpression() throws Exception {
+        // 600 rows start with 103, 400 with 204: the first two characters tell them apart.
+        withExpressionStatistics(prefixStatistics("103", "204"), () -> {
+            double rows = cardinality(getCostExplain("select c_phone from hive0.tpch.customer"), "HdfsScanNode");
+            String sql = "select c_phone from hive0.tpch.customer where ";
+            Assertions.assertEquals(rows * 0.6, cardinality(getCostExplain(sql + "left(c_phone, 2) like '10%'"),
+                    "HdfsScanNode"), 1.0);
+            Assertions.assertEquals(rows * 0.4, cardinality(getCostExplain(sql + "left(c_phone, 2) not like '10%'"),
+                    "HdfsScanNode"), 1.0);
+            Assertions.assertEquals(rows * 0.4, cardinality(getCostExplain(sql + "strleft(c_phone, 1) like '2%'"),
+                    "HdfsScanNode"), 1.0);
+            // No string of two characters starts with three: no row, and its negation holds on every row.
+            Assertions.assertEquals(1, cardinality(getCostExplain(sql + "left(c_phone, 2) like '103%'"),
+                    "HdfsScanNode"), 1.0);
+            Assertions.assertEquals(rows, cardinality(getCostExplain(sql + "left(c_phone, 2) not like '103%'"),
+                    "HdfsScanNode"), 1.0);
+        });
     }
 
     @Test

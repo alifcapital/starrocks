@@ -182,7 +182,11 @@ public class ExpressionStatisticsMatcherTest {
         Assertions.assertNull(rewrite(eq(substr(8, 2), text("45"))));
         Assertions.assertNull(rewrite(eq(call("substr", VarcharType.VARCHAR, C, ConstantOperator.createInt(2)),
                 text("45"))));
+        // The column itself against a constant of fewer than 8 characters is x against it, and against one of 8 or
+        // more characters it is not written.
+        Assertions.assertEquals(X, rewrite(eq(C, text("1031234"))).getChild(0));
         Assertions.assertNull(rewrite(eq(C, text("10312345"))));
+        Assertions.assertNull(rewrite(eq(C, text("1031234567"))));
         Assertions.assertNull(rewrite(new IsNullPredicateOperator(true, C)));
     }
 
@@ -222,7 +226,8 @@ public class ExpressionStatisticsMatcherTest {
     @Test
     public void testSourceOfConditionsOnTheColumn() {
         ScalarOperator prefix = eq(left(3), text("103"));
-        ScalarOperator other = new BinaryPredicateOperator(BinaryType.NE, C, text("10399"));
+        // A constant of more than 8 characters is not compared over x, so this condition stays on c.
+        ScalarOperator other = new BinaryPredicateOperator(BinaryType.NE, C, text("1039999999"));
         ScalarOperator predicate = Utils.compoundAnd(prefix, other);
         // No source counts both: the prefix goes to x, the other condition stays, x does not describe the rows.
         ExpressionStatisticsMatcher.Result result =
@@ -245,8 +250,12 @@ public class ExpressionStatisticsMatcherTest {
         Statistics withHistogram = statistics(new ColumnStatistic(Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY,
                 0, 8, 1000, histogram, ColumnStatistic.StatisticType.ESTIMATE), Map.of());
         Assertions.assertNull(ExpressionStatisticsMatcher.match(
-                Utils.compoundAnd(like(C, "103%"), new BinaryPredicateOperator(BinaryType.LT, C, text("1035"))),
+                Utils.compoundAnd(like(C, "103%"), new BinaryPredicateOperator(BinaryType.NE, C, text("1035999999"))),
                 expressions(left(8), false), withHistogram));
+        // A range of at most 8 characters is written over x with the prefix, and x counts both.
+        Assertions.assertEquals(Set.of(X), ExpressionStatisticsMatcher.match(
+                Utils.compoundAnd(like(C, "103%"), new BinaryPredicateOperator(BinaryType.LT, C, text("1035"))),
+                expressions(left(8), false), withHistogram).getUsedColumns());
         // Without the range, x counts the prefix.
         Assertions.assertNotNull(ExpressionStatisticsMatcher.match(like(C, "103%"), expressions(left(8), false),
                 withHistogram));
@@ -268,7 +277,7 @@ public class ExpressionStatisticsMatcherTest {
         Assertions.assertEquals(Set.of(X), result.getUsedColumns());
         // A condition on the whole c is counted only by MCV(c, d).
         ScalarOperator withIn = Utils.compoundAnd(predicate,
-                new InPredicateOperator(false, C, text("10312345"), text("10400000")));
+                new InPredicateOperator(false, C, text("1031234567"), text("1040000000")));
         result = ExpressionStatisticsMatcher.match(withIn, expressions(left(8), true), withCd);
         Assertions.assertTrue(result.getUsedColumns().isEmpty());
     }

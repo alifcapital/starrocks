@@ -121,6 +121,9 @@ final class PrefixDerivationRule {
         if (predicate instanceof LikePredicateOperator) {
             return rewriteLike((LikePredicateOperator) predicate, canonicalLeft);
         }
+        if (column.equals(canonicalLeft)) {
+            return rewriteColumn(predicate);
+        }
         int[] positions = substrPositions(canonicalLeft);
         if (positions == null || !column.equals(canonicalLeft.getChild(0))) {
             return null;
@@ -142,15 +145,90 @@ final class PrefixDerivationRule {
         return withLeft(predicate, substr(x, start, count));
     }
 
+    /**
+     * c LIKE 'p%' and substr(c, 1, n) LIKE 'p%' with n <= K. The first characters of c start with p exactly when c
+     * does, if p has at most n characters; a prefix longer than n cannot be in a string of n characters, so the
+     * condition is false on every value. We do not write a pattern with more than a prefix, or a start after the
+     * first character: x holds only K characters of c, so it cannot tell what follows them.
+     */
     private ScalarOperator rewriteLike(LikePredicateOperator like, ScalarOperator canonicalLeft) {
-        if (like.isRegexp() || !column.equals(canonicalLeft)) {
+        if (like.isRegexp()) {
             return null;
         }
         Optional<String> prefix = LikePatternEstimator.pattern(like).flatMap(LikePatternEstimator.LikePattern::fixedPrefix);
-        if (prefix.isEmpty() || prefix.get().codePointCount(0, prefix.get().length()) > length) {
+        if (prefix.isEmpty()) {
             return null;
         }
-        return new LikePredicateOperator(LikePredicateOperator.LikeType.LIKE, x, like.getChild(1));
+        int characters = prefix.get().codePointCount(0, prefix.get().length());
+        ScalarOperator onX = new LikePredicateOperator(LikePredicateOperator.LikeType.LIKE, x, like.getChild(1));
+        if (column.equals(canonicalLeft)) {
+            return characters <= length ? onX : null;
+        }
+        int[] positions = substrPositions(canonicalLeft);
+        if (positions == null || !column.equals(canonicalLeft.getChild(0)) || positions[0] != 1 || positions[1] < 1
+                || positions[1] > length) {
+            return null;
+        }
+        return characters <= positions[1] ? onX : ConstantOperator.createBoolean(false);
+    }
+
+    /**
+     * c compared with string constants. x holds the first K characters of c, and we want a comparison with a constant
+     * v of m characters estimated over x where these characters tell the answer.
+     * - m < K: the order of c and v is that of their first differing character, or of their lengths when one starts the
+     *   other. A string of fewer than K characters is x whole, and a longer one has more than m characters in x, so
+     *   c < v, c <= v, c > v, c >= v, c = v, c <> v and c IN (...) are the same conditions on x.
+     * - m = K: x cannot tell v from a longer string that starts with v, and we expect the strings of a column with a
+     *   prefix statistic to be longer than K. So the rows of x = v are those of every string that starts with v, not those
+     *   of c = v, and c = v, c <> v, c IN (...) and c NOT IN (...) are not written. c < v and c >= v are exact. c <= v is
+     *   written as x < v and c > v as x >= v: they lose the rows of the strings equal to v, a share we expect to be
+     *   negligible when the strings are longer than K. The two sides of a constant, c < v with c >= v and c <= v with
+     *   c > v, are complements, so together they keep exactly the rows that are not NULL.
+     * - m > K: the first K characters w of v decide unless x = w, whose rows we cannot split. A range inside one
+     *   prefix, such as two bounds of a long identifier, should keep the rows of the prefix and not none, so c < v and
+     *   c <= v are written as x <= w, and c > v and c >= v as x >= w. Each of them is an upper bound, and the two count
+     *   x = w twice. An equality or a list with such a constant is not written: its rows are a part of those of x = w.
+     */
+    private ScalarOperator rewriteColumn(ScalarOperator predicate) {
+        if (predicate instanceof BinaryPredicateOperator) {
+            BinaryType type = ((BinaryPredicateOperator) predicate).getBinaryType();
+            String value = stringConstant(predicate.getChild(1));
+            if (value == null) {
+                return null;
+            }
+            int characters = value.codePointCount(0, value.length());
+            switch (type) {
+                case EQ:
+                case NE:
+                    return characters < length ? withLeft(predicate, x) : null;
+                case LT:
+                case LE:
+                case GT:
+                case GE:
+                    if (characters < length) {
+                        return withLeft(predicate, x);
+                    }
+                    ConstantOperator first = ConstantOperator.createVarchar(
+                            value.substring(0, value.offsetByCodePoints(0, length)));
+                    boolean below = type == BinaryType.LT || type == BinaryType.LE;
+                    // At K characters the strings equal to v are left on the side of the longer ones: c <= v is x < v.
+                    BinaryType onX = characters == length ? (below ? BinaryType.LT : BinaryType.GE)
+                            : below ? BinaryType.LE : BinaryType.GE;
+                    return new BinaryPredicateOperator(onX, x, first);
+                default:
+                    return null;
+            }
+        }
+        if (predicate instanceof InPredicateOperator && !((InPredicateOperator) predicate).isSubquery()) {
+            for (int i = 1; i < predicate.getChildren().size(); i++) {
+                String value = stringConstant(predicate.getChild(i));
+                if (value == null || value.codePointCount(0, value.length()) >= length) {
+                    return null;
+                }
+            }
+            return withLeft(predicate, x);
+        }
+        return null;
     }
 
     // The first count characters of c, count < K, compared with string constants.
