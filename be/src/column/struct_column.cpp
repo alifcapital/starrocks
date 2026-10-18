@@ -178,10 +178,11 @@ void StructColumn::remove_first_n_values(size_t count) {
 
 void StructColumn::append(const Column& src, size_t offset, size_t count) {
     const auto& struct_column = down_cast<const StructColumn&>(src);
-    DCHECK_EQ(_fields.size(), struct_column.fields().size());
+    // fields() builds a new vector of the field pointers, and a merge of sorted runs calls append for a few rows at a
+    // time, so we read the fields of the source directly.
+    DCHECK_EQ(_fields.size(), struct_column._fields.size());
     for (size_t i = 0; i < _fields.size(); i++) {
-        const Column& source_column = *struct_column.fields()[i];
-        _fields[i]->append(source_column, offset, count);
+        _fields[i]->append(*struct_column._fields[i], offset, count);
     }
 }
 

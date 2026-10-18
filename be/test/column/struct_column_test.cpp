@@ -393,6 +393,31 @@ TEST(StructColumnTest, test_update_rows) {
     ASSERT_EQ("{id:4,name:'world'}", column->debug_item(2));
 }
 
+TEST(StructColumnTest, test_append_range) {
+    std::vector<std::string> field_name{"id", "name"};
+    MutableColumns fields;
+    fields.emplace_back(NullableColumn::create(UInt64Column::create(), NullColumn::create()));
+    fields.emplace_back(NullableColumn::create(BinaryColumn::create(), NullColumn::create()));
+    auto src = StructColumn::create(std::move(fields), field_name);
+    src->append_datum(DatumStruct{uint64_t(1), Slice("smith")});
+    src->append_datum(DatumStruct{uint64_t(2), Slice("cruise")});
+    src->append_datum(DatumStruct{uint64_t(3), Slice("hello")});
+    src->append_datum(DatumStruct{uint64_t(4), Slice("world")});
+
+    // A merge of sorted runs moves a few rows at a time.
+    auto dst = src->clone_empty();
+    dst->append(*src, 2, 2);
+    dst->append(*src, 0, 1);
+
+    ASSERT_EQ(3, dst->size());
+    ASSERT_EQ("{id:3,name:'hello'}", dst->debug_item(0));
+    ASSERT_EQ("{id:4,name:'world'}", dst->debug_item(1));
+    ASSERT_EQ("{id:1,name:'smith'}", dst->debug_item(2));
+    for (const auto& field : down_cast<StructColumn*>(dst.get())->fields()) {
+        ASSERT_EQ(3, field->size());
+    }
+}
+
 TEST(StructColumnTest, test_assign) {
     std::vector<std::string> field_name{"id", "name"};
     auto id = NullableColumn::create(UInt64Column::create(), NullColumn::create());
