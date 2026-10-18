@@ -90,8 +90,9 @@ TEST_F(ParquetMetaDataTest, NumRows) {
     ASSERT_EQ(1024, meta_data.num_rows());
 }
 
-// The footer is the only source of the width of a FIXED_LEN_BYTE_ARRAY column, so a footer with a width
-// that no real file has must fail to init instead of reaching the column readers.
+// The footer is the only source of the width of a FIXED_LEN_BYTE_ARRAY column. A width that is not positive
+// fails the init. A large width does not, because the file can hold other columns that the query reads, and
+// the column reader checks the width of the column that it reads.
 TEST_F(ParquetMetaDataTest, FixedLenByteArrayTypeLength) {
     auto init = [](int32_t type_length) {
         tparquet::SchemaElement root;
@@ -112,13 +113,44 @@ TEST_F(ParquetMetaDataTest, FixedLenByteArrayTypeLength) {
         return meta_data.init(t_meta, true);
     };
 
-    ASSERT_TRUE(init(16).ok());
-    for (int32_t type_length : {0, -1, std::numeric_limits<int32_t>::min(), ParquetUtils::MAX_FLBA_TYPE_LENGTH + 1,
-                                std::numeric_limits<int32_t>::max()}) {
+    for (int32_t type_length : {1, 16, ParquetUtils::MAX_FLBA_TYPE_LENGTH + 1, std::numeric_limits<int32_t>::max()}) {
+        Status status = init(type_length);
+        ASSERT_TRUE(status.ok()) << type_length << " " << status.to_string();
+    }
+    for (int32_t type_length : {0, -1, std::numeric_limits<int32_t>::min()}) {
         Status status = init(type_length);
         ASSERT_TRUE(status.is_corruption()) << type_length << " " << status.to_string();
         ASSERT_NE(std::string::npos, status.message().find("flba_col")) << status.message();
     }
+}
+
+// A column with a huge width that the query does not read must not stop the query from reading the other columns.
+TEST_F(ParquetMetaDataTest, WideFixedLenByteArrayColumnKeepsOtherColumns) {
+    tparquet::SchemaElement root;
+    root.__set_num_children(2);
+
+    tparquet::SchemaElement id;
+    id.__set_name("id");
+    id.__set_type(tparquet::Type::INT32);
+    id.__set_num_children(0);
+
+    tparquet::SchemaElement wide;
+    wide.__set_name("wide");
+    wide.__set_type(tparquet::Type::FIXED_LEN_BYTE_ARRAY);
+    wide.__set_type_length(std::numeric_limits<int32_t>::max());
+    wide.__set_num_children(0);
+
+    tparquet::FileMetaData t_meta;
+    t_meta.__set_version(0);
+    t_meta.__set_schema({root, id, wide});
+    t_meta.__set_num_rows(1);
+
+    FileMetaData meta_data;
+    Status status = meta_data.init(t_meta, true);
+    ASSERT_TRUE(status.ok()) << status.to_string();
+    ASSERT_EQ(2U, meta_data.schema().get_fields_size());
+    ASSERT_EQ(tparquet::Type::INT32, meta_data.schema().get_parquet_fields()[0].physical_type);
+    ASSERT_EQ(std::numeric_limits<int32_t>::max(), meta_data.schema().get_parquet_fields()[1].type_length);
 }
 
 TEST(ApplicationVersion, Basics) {

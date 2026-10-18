@@ -1040,8 +1040,10 @@ static std::vector<SchemaElement> make_type_length_schemas(Type::type type, int3
     return t_schemas;
 }
 
+// The footer parser accepts every positive width. A column reader checks the upper end when it reads the column.
 TEST_F(ParquetSchemaTest, FixedLenByteArrayTypeLength) {
-    for (int32_t type_length : {1, 16, ParquetUtils::MAX_FLBA_TYPE_LENGTH}) {
+    for (int32_t type_length : {1, 16, ParquetUtils::MAX_FLBA_TYPE_LENGTH, ParquetUtils::MAX_FLBA_TYPE_LENGTH + 1,
+                                std::numeric_limits<int32_t>::max()}) {
         SchemaDescriptor desc;
         auto st = desc.from_thrift(make_type_length_schemas(Type::FIXED_LEN_BYTE_ARRAY, type_length), true);
         ASSERT_TRUE(st.ok()) << type_length << " " << st.message();
@@ -1049,15 +1051,34 @@ TEST_F(ParquetSchemaTest, FixedLenByteArrayTypeLength) {
     }
 }
 
-// A corrupt footer must not reach the decoders with a type length that makes them compute a wrapped size.
+// A width that is not positive is wrong whatever the query reads.
 TEST_F(ParquetSchemaTest, FixedLenByteArrayInvalidTypeLength) {
-    for (int32_t type_length : {0, -1, -4, std::numeric_limits<int32_t>::min(), ParquetUtils::MAX_FLBA_TYPE_LENGTH + 1,
-                                std::numeric_limits<int32_t>::max()}) {
+    for (int32_t type_length : {0, -1, -4, std::numeric_limits<int32_t>::min()}) {
         SchemaDescriptor desc;
         auto st = desc.from_thrift(make_type_length_schemas(Type::FIXED_LEN_BYTE_ARRAY, type_length), true);
         ASSERT_TRUE(st.is_corruption()) << type_length << " " << st.to_string();
         ASSERT_NE(std::string::npos, st.message().find("type_length_col")) << st.message();
     }
+}
+
+// A wide column that the query does not read must not make the file unreadable, so the schema keeps the
+// other columns and the width of the wide one.
+TEST_F(ParquetSchemaTest, FixedLenByteArrayWideColumnKeepsOtherColumns) {
+    std::vector<SchemaElement> t_schemas;
+    t_schemas.emplace_back(GroupNode::make_root(2));
+    t_schemas.emplace_back(PrimitiveNode::make("id", FieldRepetitionType::REQUIRED, Type::INT32));
+    auto wide = PrimitiveNode::make("wide", FieldRepetitionType::OPTIONAL, Type::FIXED_LEN_BYTE_ARRAY);
+    wide.__set_type_length(std::numeric_limits<int32_t>::max());
+    t_schemas.emplace_back(std::move(wide));
+
+    SchemaDescriptor desc;
+    auto st = desc.from_thrift(t_schemas, true);
+    ASSERT_TRUE(st.ok()) << st.message();
+    ASSERT_EQ(2U, desc.get_fields_size());
+    ASSERT_EQ("id", desc.get_parquet_fields()[0].name);
+    ASSERT_EQ(Type::INT32, desc.get_parquet_fields()[0].physical_type);
+    ASSERT_EQ("wide", desc.get_parquet_fields()[1].name);
+    ASSERT_EQ(std::numeric_limits<int32_t>::max(), desc.get_parquet_fields()[1].type_length);
 }
 
 TEST_F(ParquetSchemaTest, FixedLenByteArrayTypeLengthNotSet) {

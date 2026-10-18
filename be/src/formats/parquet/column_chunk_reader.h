@@ -149,6 +149,10 @@ private:
     // The error for a batch with NULL values that is read into a column that cannot hold NULL. The decoders give an
     // error for it too, but only the reader knows the file and the column.
     Status _null_for_non_nullable_column(size_t num_nulls, size_t num_values) const;
+    // The dotted path of the column and the file name, for an error that only the reader can attach to its column.
+    std::string _column_name() const;
+    std::string _file_name() const;
+    Status _set_type_length(Decoder* decoder) const;
     Status _parse_page_data();
 
     Status _parse_data_page(tparquet::PageType::type page_type);

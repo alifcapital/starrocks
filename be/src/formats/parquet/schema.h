@@ -104,7 +104,8 @@ struct ParquetField {
     // Only valid when this field is a leaf node
     tparquet::Type::type physical_type;
     // If type is FIXED_LEN_BYTE_ARRAY, this is the byte length of the vales.
-    // SchemaDescriptor accepts only a value in [1, ParquetUtils::MAX_FLBA_TYPE_LENGTH] for such a column.
+    // SchemaDescriptor accepts only a positive value for such a column. A decoder accepts only a value in
+    // [1, ParquetUtils::MAX_FLBA_TYPE_LENGTH], and checks it when the column is read.
     int32_t type_length;
 
     // Used when this column contains decimal data.

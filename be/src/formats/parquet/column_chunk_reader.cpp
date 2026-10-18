@@ -167,7 +167,7 @@ Status ColumnChunkReader::_parse_page_data() {
     return Status::OK();
 }
 
-Status ColumnChunkReader::_null_for_non_nullable_column(size_t num_nulls, size_t num_values) const {
+std::string ColumnChunkReader::_column_name() const {
     std::string column;
     for (const auto& name : metadata().path_in_schema) {
         if (!column.empty()) {
@@ -175,10 +175,25 @@ Status ColumnChunkReader::_null_for_non_nullable_column(size_t num_nulls, size_t
         }
         column += name;
     }
+    return column;
+}
+
+std::string ColumnChunkReader::_file_name() const {
+    return _opts.file != nullptr ? _opts.file->filename() : std::string();
+}
+
+Status ColumnChunkReader::_null_for_non_nullable_column(size_t num_nulls, size_t num_values) const {
     return Status::Corruption(strings::Substitute(
             "Parquet column '$0' has $1 NULL values in a batch of $2 values, but the table does not allow NULL in it, "
             "file: $3",
-            column, num_nulls, num_values, _opts.file != nullptr ? _opts.file->filename() : std::string()));
+            _column_name(), num_nulls, num_values, _file_name()));
+}
+
+Status ColumnChunkReader::_set_type_length(Decoder* decoder) const {
+    // The width comes from the footer, and the footer parser rejects only a width that is not positive, so a
+    // decoder is the first to see a width that is too large. It does not know the column, so we add it.
+    return decoder->set_type_length(_type_length)
+            .clone_and_append(strings::Substitute("column '$0', file: $1", _column_name(), _file_name()));
 }
 
 Status ColumnChunkReader::_parse_data_page(tparquet::PageType::type page_type) {
@@ -236,7 +251,7 @@ Status ColumnChunkReader::_parse_data_page(tparquet::PageType::type page_type) {
         _decoders[static_cast<int>(encoding)] = std::move(decoder);
     }
 
-    RETURN_IF_ERROR(_cur_decoder->set_type_length(_type_length));
+    RETURN_IF_ERROR(_set_type_length(_cur_decoder));
     _cur_decoder->set_num_values(_num_values);
     _cur_decoder->set_filter_share(_filter_share);
     RETURN_IF_ERROR(_cur_decoder->set_data(data));
@@ -271,7 +286,7 @@ Status ColumnChunkReader::_parse_dict_page() {
     RETURN_IF_ERROR(code_info->create_decoder(&dict_decoder));
     // The dictionary page declares its own encoding, and a decoder such as byte stream split divides
     // by the type length in set_data, so we set the type length before the data.
-    RETURN_IF_ERROR(dict_decoder->set_type_length(_type_length));
+    RETURN_IF_ERROR(_set_type_length(dict_decoder.get()));
     RETURN_IF_ERROR(dict_decoder->set_data(data));
 
     // The number of values comes from the page header. We expect the page to hold that many values, and a

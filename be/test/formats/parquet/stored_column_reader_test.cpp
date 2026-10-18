@@ -17,6 +17,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -1489,6 +1490,103 @@ TEST(OffsetIndexSkipStructTest, TwoOptionalChildren) {
             }
             ASSERT_NO_FATAL_FAILURE(first.finish());
             ASSERT_NO_FATAL_FAILURE(second.finish());
+        }
+    }
+}
+
+// Reads a REQUIRED FIXED_LEN_BYTE_ARRAY column from a chunk with the type length of the footer. The chunk holds
+// one page of 16 bytes: a data page of four values, or a dictionary page that declares one value.
+Status read_flba_column(int32_t type_length, bool dictionary_page, size_t* column_size) {
+    const std::string data(16, 'x');
+    tparquet::PageHeader page_header;
+    if (dictionary_page) {
+        tparquet::DictionaryPageHeader dict_page_header;
+        dict_page_header.__set_num_values(1);
+        dict_page_header.__set_encoding(tparquet::Encoding::PLAIN);
+        page_header.__set_type(tparquet::PageType::DICTIONARY_PAGE);
+        page_header.__set_dictionary_page_header(dict_page_header);
+    } else {
+        tparquet::DataPageHeader data_page_header;
+        data_page_header.__set_num_values(4);
+        data_page_header.__set_encoding(tparquet::Encoding::PLAIN);
+        data_page_header.__set_definition_level_encoding(tparquet::Encoding::RLE);
+        data_page_header.__set_repetition_level_encoding(tparquet::Encoding::RLE);
+        page_header.__set_type(tparquet::PageType::DATA_PAGE);
+        page_header.__set_data_page_header(data_page_header);
+    }
+    page_header.__set_uncompressed_page_size(static_cast<int32_t>(data.size()));
+    page_header.__set_compressed_page_size(static_cast<int32_t>(data.size()));
+
+    ThriftSerializer serializer(true, 1024);
+    uint32_t header_len = 0;
+    uint8_t* header_buf = nullptr;
+    RETURN_IF_ERROR(serializer.serialize(&page_header, &header_len, &header_buf));
+    std::string buffer(reinterpret_cast<const char*>(header_buf), header_len);
+    buffer += data;
+
+    tparquet::ColumnChunk chunk;
+    chunk.__isset.meta_data = true;
+    chunk.meta_data.type = tparquet::Type::FIXED_LEN_BYTE_ARRAY;
+    chunk.meta_data.path_in_schema = {"wide"};
+    chunk.meta_data.codec = tparquet::CompressionCodec::UNCOMPRESSED;
+    chunk.meta_data.num_values = 4;
+    chunk.meta_data.total_compressed_size = buffer.size();
+    chunk.meta_data.total_uncompressed_size = buffer.size();
+    chunk.meta_data.data_page_offset = 0;
+
+    RandomAccessFile file(std::make_shared<io::StringInputStream>(std::move(buffer)), "wide_flba_test");
+
+    tparquet::SchemaElement root;
+    root.__set_name("root");
+    root.__set_num_children(1);
+    tparquet::SchemaElement leaf;
+    leaf.__set_name("wide");
+    leaf.__set_type(tparquet::Type::FIXED_LEN_BYTE_ARRAY);
+    leaf.__set_type_length(type_length);
+    leaf.__set_repetition_type(tparquet::FieldRepetitionType::REQUIRED);
+    leaf.__set_num_children(0);
+    tparquet::FileMetaData t_file_meta;
+    t_file_meta.__set_version(1);
+    t_file_meta.__set_num_rows(4);
+    t_file_meta.__set_schema({root, leaf});
+    FileMetaData file_meta;
+    RETURN_IF_ERROR(file_meta.init(t_file_meta, true));
+
+    HdfsScannerStats stats;
+    ColumnReaderOptions opts;
+    opts.stats = &stats;
+    opts.file = &file;
+    opts.file_meta_data = &file_meta;
+    opts.chunk_size = 4096;
+    opts.datacache_options = nullptr;
+
+    std::unique_ptr<StoredColumnReader> reader;
+    RETURN_IF_ERROR(StoredColumnReader::create(opts, file_meta.schema().get_stored_column_by_column_name("wide"),
+                                               &chunk, &reader));
+    MutableColumnPtr column = ColumnHelper::create_column(TypeDescriptor::create_varchar_type(100), false);
+    Status st = reader->read_range(Range<uint64_t>(0, 4), nullptr, ColumnContentType::VALUE, column.get());
+    *column_size = column->size();
+    return st;
+}
+
+// The footer accepts a FIXED_LEN_BYTE_ARRAY column of any positive width, so the reader of a column that the query
+// reads is the one that sees a width that is too large. We expect an error that names the column and the file,
+// and no value in the column, for the data page and for the dictionary page.
+TEST(StoredColumnReaderWideFlbaTest, TooLargeTypeLengthOfProjectedColumnIsCorruption) {
+    size_t column_size = 0;
+    ASSERT_OK(read_flba_column(4, false, &column_size));
+    ASSERT_EQ(4U, column_size);
+
+    for (int32_t type_length : {ParquetUtils::MAX_FLBA_TYPE_LENGTH + 1, std::numeric_limits<int32_t>::max()}) {
+        for (bool dictionary_page : {false, true}) {
+            SCOPED_TRACE("type length " + std::to_string(type_length) + (dictionary_page ? " dictionary" : " data"));
+            column_size = 1;
+            Status st = read_flba_column(type_length, dictionary_page, &column_size);
+            ASSERT_TRUE(st.is_corruption()) << st.to_string();
+            EXPECT_NE(std::string::npos, st.message().find(std::to_string(type_length))) << st.to_string();
+            EXPECT_NE(std::string::npos, st.message().find("'wide'")) << st.to_string();
+            EXPECT_NE(std::string::npos, st.message().find("wide_flba_test")) << st.to_string();
+            EXPECT_EQ(0U, column_size);
         }
     }
 }
