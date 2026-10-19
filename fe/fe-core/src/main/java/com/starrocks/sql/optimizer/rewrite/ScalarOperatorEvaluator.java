@@ -53,7 +53,6 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 
-import static com.starrocks.sql.optimizer.rewrite.ScalarOperatorFunctions.SUPPORT_JAVA_STYLE_DATETIME_FORMATTER;
 
 /**
  * Use for execute constant functions
@@ -284,6 +283,9 @@ public enum ScalarOperatorEvaluator {
         // The format is the second argument for every name in SUPPORTED. These functions parse a string with the format and
         // do not render a date, and the BE reads their formats by the rules of the parser, which the model of a rendering
         // does not know. So they keep the reading by characters, see stripFormatValue, until they get a model of their own.
+        // We fear an order that the BE does not give, so we follow the BE where this reading differs from it: the BE parses
+        // every row by the format of the row, so a format that is no constant gives no order, and it knows no Java style
+        // format here, so 'yyyy-MM-dd' is a text that no date matches and the reading by characters refuses it.
         final ImmutableSet<String> SUPPORTED = ImmutableSet.of(
                 FunctionSet.STR_TO_DATE,
                 FunctionSet.STR2DATE,
@@ -291,14 +293,15 @@ public enum ScalarOperatorEvaluator {
         );
 
         if (SUPPORTED.contains(name) && operator.getChildren().size() >= 2) {
-            String pattern = operator.getChild(1).toString();
+            ScalarOperator second = operator.getChild(1);
+            if (!(second instanceof ConstantOperator) || ((ConstantOperator) second).isNull()) {
+                return false;
+            }
+            String pattern = second.toString();
             if (pattern.isEmpty()) {
                 return true;
             }
 
-            if (SUPPORT_JAVA_STYLE_DATETIME_FORMATTER.contains(pattern.trim())) {
-                return true;
-            }
             Optional<String> stripedPattern = stripFormatValue(pattern);
             // "YmdHiSf" or "YmdHisf" ensure the format string value reserve the original date order
             // like date_format('2021-01-01', '%Y-%m-%d') is qualified but date_format('2021-01-01', '%m-%Y-%d') is not

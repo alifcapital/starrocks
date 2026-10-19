@@ -34,8 +34,10 @@ import org.junit.jupiter.api.Test;
 
 import java.math.BigInteger;
 import java.time.LocalDateTime;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class ScalarOperatorEvaluatorTest {
@@ -202,6 +204,51 @@ public class ScalarOperatorEvaluatorTest {
 
         ScalarOperator result = ScalarOperatorEvaluator.INSTANCE.evaluation(operator);
         assertEquals(LocalDateTime.of(2003, 10, 11, 23, 56, 25), ((ConstantOperator) result).getDatetime());
+    }
+
+    private static CallOperator parseCall(String name, Type result, ScalarOperator... arguments) {
+        Function fn = new Function(new FunctionName(name), new Type[] {VarcharType.VARCHAR, VarcharType.VARCHAR}, result, false);
+        return new CallOperator(name, result, Lists.newArrayList(arguments), fn);
+    }
+
+    // The BE parses a string by the format of the row. It ignores the white space of the format, and a character that is no
+    // specifier must be in the string as it is, so 'yyyy-MM-dd' is a text that no date matches, and it is no date format
+    // of these functions. We fear an order that the BE does not give, so the FE reads these formats the same way, and a
+    // format that is no constant gives no order.
+    @Test
+    public void testParseFormatsAreReadAsTheBackendReadsThem() {
+        ColumnRefOperator text = new ColumnRefOperator(1, VarcharType.VARCHAR, "c", true);
+        for (String name : List.of(FunctionSet.STR_TO_DATE, FunctionSet.STR2DATE)) {
+            Type result = FunctionSet.STR2DATE.equals(name) ? DateType.DATE : DateType.DATETIME;
+            for (String format : List.of("%Y-%m-%d", "%Y-%m-%d %H:%i:%s", "%Y%m%d", "%Y/%m/%d", " %Y-%m-%d ",
+                    "\t%Y-%m-%d\n", "%Y-%m-%d %H:%i:%s.%f", "")) {
+                assertTrue(ScalarOperatorEvaluator.INSTANCE.isMonotonicFunction(
+                        parseCall(name, result, text, ConstantOperator.createVarchar(format))), name + " " + format);
+            }
+            for (String format : List.of("yyyy-MM-dd", " yyyy-MM-dd ", "yyyyMMdd", "\tyyyyMMdd\n", "yyyy-MM-dd HH:mm:ss",
+                    "%m-%d-%Y", "%y-%m-%d")) {
+                assertFalse(ScalarOperatorEvaluator.INSTANCE.isMonotonicFunction(
+                        parseCall(name, result, text, ConstantOperator.createVarchar(format))), name + " " + format);
+            }
+            // the format of each row, and a NULL format
+            ColumnRefOperator formats = new ColumnRefOperator(2, VarcharType.VARCHAR, "Y", true);
+            assertFalse(ScalarOperatorEvaluator.INSTANCE.isMonotonicFunction(parseCall(name, result, text, formats)), name);
+            assertFalse(ScalarOperatorEvaluator.INSTANCE.isMonotonicFunction(
+                    parseCall(name, result, text, ConstantOperator.createNull(VarcharType.VARCHAR))), name);
+        }
+    }
+
+    // to_datetime takes a scale, not a format, and the scale of each row gives no order either.
+    @Test
+    public void testToDatetimeNeedsAConstantScale() {
+        Function fn = new Function(new FunctionName(FunctionSet.TO_DATETIME),
+                new Type[] {IntegerType.BIGINT, IntegerType.INT}, DateType.DATETIME, false);
+        ColumnRefOperator epoch = new ColumnRefOperator(1, IntegerType.BIGINT, "ep", true);
+        assertTrue(ScalarOperatorEvaluator.INSTANCE.isMonotonicFunction(new CallOperator(FunctionSet.TO_DATETIME,
+                DateType.DATETIME, Lists.newArrayList(epoch, ConstantOperator.createInt(3)), fn)));
+        ColumnRefOperator scales = new ColumnRefOperator(2, IntegerType.INT, "Y", true);
+        assertFalse(ScalarOperatorEvaluator.INSTANCE.isMonotonicFunction(new CallOperator(FunctionSet.TO_DATETIME,
+                DateType.DATETIME, Lists.newArrayList(epoch, scales), fn)));
     }
 
     @Test

@@ -76,6 +76,17 @@ public class OperatorFunctionCheckerTest {
         assertFalse(OperatorFunctionChecker.onlyContainMonotonicFunctions(cast(IntegerType.INT, VarcharType.VARCHAR)).first);
     }
 
+    // The BE reads 'yyyyMMdd' as a text for str2date, which no date matches, so we fear an order that the BE does not give,
+    // and a retention condition on such a call is not monotonic.
+    @Test
+    public void testJavaStyleFormatOfStr2dateGivesNoOrder() {
+        for (String format : new String[] {"yyyyMMdd", "yyyy-MM-dd", " yyyy-MM-dd ", "yyyy-MM-dd HH:mm:ss"}) {
+            CallOperator str2date = new CallOperator(FunctionSet.STR2DATE, DateType.DATE,
+                    ImmutableList.of(cast(DateType.DATE, VarcharType.VARCHAR), ConstantOperator.createVarchar(format)));
+            assertFalse(OperatorFunctionChecker.onlyContainMonotonicFunctions(str2date).first, format);
+        }
+    }
+
     /**
      * A retention condition only needs the order where it compares a range. Under an (in)equality or
      * an IN list any deterministic cast maps soundly, so the cast check applies to range comparisons

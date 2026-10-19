@@ -36,7 +36,6 @@ package com.starrocks.sql.optimizer.rewrite;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableSet;
 import com.google.re2j.Matcher;
 import com.google.re2j.Pattern;
 import com.google.re2j.PatternSyntaxException;
@@ -126,9 +125,6 @@ import static com.starrocks.type.PrimitiveType.VARCHAR;
  * Constant Functions List
  */
 public class ScalarOperatorFunctions {
-    public static final Set<String> SUPPORT_JAVA_STYLE_DATETIME_FORMATTER =
-            ImmutableSet.<String>builder().add("yyyy-MM-dd").add("yyyy-MM-dd HH:mm:ss").add("yyyyMMdd").build();
-
     private static final int CONSTANT_128 = 128;
     private static final BigInteger INT_128_OPENER = BigInteger.ONE.shiftLeft(CONSTANT_128 + 1);
     private static final BigInteger[] INT_128_MASK1_ARR1 = new BigInteger[CONSTANT_128];
