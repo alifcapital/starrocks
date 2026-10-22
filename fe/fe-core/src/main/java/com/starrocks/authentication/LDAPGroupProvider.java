@@ -153,11 +153,26 @@ public class LDAPGroupProvider extends GroupProvider {
      */
     private volatile long lastSuccessfulRefreshTimeMs = 0;
 
+    private static final long NOT_LOADED_WARN_INTERVAL_MS = 60_000L;
+
+    /**
+     * When {@link #getGroup} last logged that this provider has not loaded yet. Only throttles that log.
+     */
+    private volatile long lastNotLoadedWarnTimeMs = 0;
+
     /**
      * True once {@link #prepareForActivation()} has filled {@link #userToGroupCache} synchronously.
      * Read by {@link #init()} to decide whether the periodic refresh has to run immediately.
      */
     private boolean cacheWarmedByActivation = false;
+
+    /**
+     * The instance this one replaced on the replay path, answering lookups on its behalf until this
+     * instance's first refresh has completed (see {@link #serveFromUntilWarm}). Null once that refresh
+     * has ended, whether it succeeded or not. Written on the replay thread and on the refresh thread,
+     * read on every login, hence volatile.
+     */
+    private volatile LDAPGroupProvider servingUntilWarm;
 
     /**
      * The current ldap group provider is registered to the scheduling task in the thread pool.
@@ -167,6 +182,14 @@ public class LDAPGroupProvider extends GroupProvider {
 
     public LDAPGroupProvider(String name, Map<String, String> properties) {
         super(name, properties);
+    }
+
+    /**
+     * For Gson. A provider loaded from the image must still run the field initializers above: without this
+     * constructor {@link #userToGroupCache} stays null until the first successful refresh, and every login
+     * in between fails with a NullPointerException.
+     */
+    private LDAPGroupProvider() {
     }
 
     @Override
@@ -181,21 +204,18 @@ public class LDAPGroupProvider extends GroupProvider {
     }
 
     /**
-     * Adopts the cache of the instance this one replaces. Only meaningful on the replay path: the leader
-     * warms its own cache in {@link #prepareForActivation()}, while a follower may not be able to reach
-     * the directory at all, and serving the groups resolved under the previous configuration beats
-     * serving none until the first refresh lands. The map is never mutated in place - both
-     * {@link #refreshGroups()} and {@link #prepareForActivation()} publish a new one - so sharing the
-     * reference with the outgoing provider is safe.
+     * Forwards lookups to the outgoing instance until this one has loaded its own cache. Only the replay
+     * path calls it: the leader's ALTER has already run {@link #prepareForActivation()} by the time it
+     * publishes. If the outgoing instance is itself still bridging - two ALTERs replayed within one
+     * refresh interval - point at what it is serving from, so the bridge never targets an instance whose
+     * cache is still empty and never grows into a chain.
      */
     @Override
-    public void inheritCacheFrom(GroupProvider previous) {
+    public void serveFromUntilWarm(GroupProvider previous) {
         if (previous instanceof LDAPGroupProvider) {
             LDAPGroupProvider outgoing = (LDAPGroupProvider) previous;
-            this.userToGroupCache = outgoing.userToGroupCache;
-            // Carry the age with the content: an inherited cache that counted as never refreshed would be
-            // stale beyond any ldap_cache_max_stale_time and dropped by the first failed refresh.
-            this.lastSuccessfulRefreshTimeMs = outgoing.lastSuccessfulRefreshTimeMs;
+            LDAPGroupProvider outgoingBridge = outgoing.servingUntilWarm;
+            this.servingUntilWarm = outgoingBridge != null ? outgoingBridge : outgoing;
         }
     }
 
@@ -233,6 +253,12 @@ public class LDAPGroupProvider extends GroupProvider {
 
     @Override
     public Set<String> getGroup(UserIdentity userIdentity, String distinguishedName) {
+        LDAPGroupProvider bridge = servingUntilWarm;
+        if (bridge != null) {
+            // Forward the query, not the cache: the outgoing instance resolves it under its own
+            // configuration, so its key encoding is the one its cache was built with.
+            return bridge.getGroup(userIdentity, distinguishedName);
+        }
         String ldapUserSearchAttr = getLdapUserSearchAttr();
         String lookupKey;
         if (ldapUserSearchAttr != null) {
@@ -245,11 +271,56 @@ public class LDAPGroupProvider extends GroupProvider {
             // different cache entries.
             lookupKey = LDAPAuthProvider.canonicalDn(distinguishedName);
         }
+        // 0 means no refresh has succeeded since this instance was created or restored from the image (the
+        // field is not persisted), so the cache is still empty because it was never loaded, not because the
+        // user belongs to no group.
+        if (lastSuccessfulRefreshTimeMs == 0) {
+            warnNotLoadedYet(userIdentity);
+        }
         return userToGroupCache.getOrDefault(lookupKey, Set.of());
+    }
+
+    /**
+     * Explains an empty group set during the window between FE start and the first successful refresh, so
+     * a login refused by `permitted_groups` in that window is not mistaken for a membership problem.
+     * Rate limited per provider: every login in the window hits this path.
+     */
+    private void warnNotLoadedYet(UserIdentity userIdentity) {
+        long now = System.currentTimeMillis();
+        if (now - lastNotLoadedWarnTimeMs < NOT_LOADED_WARN_INTERVAL_MS) {
+            return;
+        }
+        lastNotLoadedWarnTimeMs = now;
+        LOG.warn("group provider '{}' has not completed a successful load since this FE started; user '{}' " +
+                "resolves to no groups through it until a refresh succeeds", name, userIdentity.getUser());
     }
 
     public void refreshGroups() {
         LOG.info("refresh ldap group cache for group provider: {}", name);
+        try {
+            doRefreshGroups();
+        } catch (Throwable t) {
+            // This runs as a scheduleAtFixedRate task, and the executor cancels every later run of a task
+            // that throws. Letting anything escape would leave this provider never refreshed again until
+            // the FE restarts.
+            LOG.error("unexpected error while refreshing group provider '{}'; retrying at the next interval",
+                    name, t);
+        } finally {
+            if (servingUntilWarm != null) {
+                // The first refresh has ended, so this instance now stands on its own. If the refresh
+                // failed the cache is empty and stays empty until one succeeds: the journal has already
+                // committed this configuration, and answering from the retired one would grant groups
+                // the cluster no longer defines - denying access is the smaller of the two wrong answers.
+                if (userToGroupCache.isEmpty()) {
+                    LOG.error("group provider '{}' could not load its cache on its first refresh; this node " +
+                            "resolves no groups through it until a refresh succeeds", name);
+                }
+                servingUntilWarm = null;
+            }
+        }
+    }
+
+    private void doRefreshGroups() {
         Map<String, Set<String>> groups = new ConcurrentHashMap<>();
         boolean refreshed = false;
         try {
@@ -298,8 +369,14 @@ public class LDAPGroupProvider extends GroupProvider {
      * {@link #LDAP_CACHE_MAX_STALE_TIME}), while activation accepts what it got, because a directory that
      * always truncates would otherwise make ALTER impossible on it.
      *
-     * @return true if the whole directory was traversed; false if the answer was truncated - a referral the
-     *         server will not chase, or a server-side entry cap - or if neither group property is set.
+     * <p>Only the two exceptions that come with usable data (referrals, entry cap) are handled here. Any other
+     * failure - directory unreachable, bind refused, TLS error - is thrown on purpose, because the callers
+     * react to it differently: the refresh logs it and keeps its last cache, while activation turns it into a
+     * DdlException so the ALTER fails and the old provider keeps serving.
+     *
+     * @return true if the whole directory was traversed, counting an answer that only skipped referrals as
+     *         whole; false if the answer was truncated by a server-side entry cap, or if neither group
+     *         property is set.
      */
     @VisibleForTesting
     boolean fetchGroupsInto(Map<String, Set<String>> groups)
@@ -324,19 +401,37 @@ public class LDAPGroupProvider extends GroupProvider {
                         matchUserAndUpdateGroups(groups, attributes, userNameExtractInterface);
                     }
                     return true;
-                } catch (PartialResultException | SizeLimitExceededException e) {
-                    // Both mean "the directory answered with less than everything": a referral it
-                    // will not chase, or a server-side entry cap (Active Directory's MaxPageSize,
-                    // default 1000) hit by a subtree search. The JDK defers the limit exception to
-                    // the end of the enumeration, so what was already returned is usable - treat it
-                    // as the best-effort partial result this method's contract promises, rather than
-                    // failing the whole fetch and, through prepareForActivation(), the whole ALTER.
-                    // Deliberately NOT the shared supertype LimitExceededException: its other
-                    // subclass, TimeLimitExceededException, is a transient failure (server load, AD's
-                    // MaxQueryDuration), so the operator can retry and get a complete answer. An
-                    // entry cap is fixed configuration - every fetch hits it, so failing on it would
-                    // disable ALTER on such a directory for good.
-                    LOG.warn("LDAP group search returned a partial result for provider: {}", name, e);
+                } catch (PartialResultException e) {
+                    // Referrals, not truncation. Active Directory answers a subtree search from the domain
+                    // root with continuation references to its other partitions (DomainDnsZones,
+                    // ForestDnsZones, Configuration), on every search. JNDI does not follow them by
+                    // default and reports them with this exception at the end of the enumeration, after
+                    // every entry this server holds has been returned. Those partitions hold no groups,
+                    // so the answer is complete for a group search. Groups kept in another domain of the
+                    // forest are not found this way.
+                    //
+                    // Do NOT turn this back into a failed refresh (return false). Because such a directory
+                    // returns referrals on every search, no refresh would ever succeed: the provider would
+                    // never fill its cache, every user would resolve to no groups, and with
+                    // `permitted_groups` configured every LDAP login would be refused. That is exactly what
+                    // happened once this was treated as a failure, and it is what
+                    // LDAPGroupProviderReferralTest guards.
+                    LOG.warn("LDAP group search for provider '{}' returned referrals, which are not followed; " +
+                            "using the entries returned by this server as the complete result: {}",
+                            name, e.getMessage());
+                    return true;
+                } catch (SizeLimitExceededException e) {
+                    // A server-side entry cap (Active Directory's MaxPageSize, default 1000) hit by a
+                    // subtree search: the answer really is truncated. The JDK defers the limit exception
+                    // to the end of the enumeration, so what was already returned is usable - treat it as
+                    // the best-effort partial result this method's contract promises, rather than failing
+                    // the whole fetch and, through prepareForActivation(), the whole ALTER.
+                    // Deliberately NOT the shared supertype LimitExceededException: its other subclass,
+                    // TimeLimitExceededException, is a transient failure (server load, AD's
+                    // MaxQueryDuration), so the operator can retry and get a complete answer. An entry
+                    // cap is fixed configuration - every fetch hits it, so failing on it would disable
+                    // ALTER on such a directory for good.
+                    LOG.warn("LDAP group search returned a truncated result for provider: {}", name, e);
                     return false;
                 } finally {
                     closeQuietly(results);

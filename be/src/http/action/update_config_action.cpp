@@ -72,6 +72,7 @@
 #include "storage/storage_engine.h"
 #include "storage/update_manager.h"
 #include "util/bthreads/executor.h"
+#include "util/credential_mask.h"
 #include "util/logging.h"
 #include "util/priority_thread_pool.hpp"
 
@@ -215,18 +216,50 @@ Status UpdateConfigAction::update_config(const std::string& name, const std::str
             return StorageEngine::instance()->update_manager()->get_pindex_load_executor()->refresh_max_thread_num();
         });
         _config_callback.emplace("update_memory_limit_percent", [&]() -> Status {
-            Status st = StorageEngine::instance()->update_manager()->update_primary_index_memory_limit(
-                    config::update_memory_limit_percent);
-#if defined(USE_STAROS) && !defined(BE_TEST)
-            st = _exec_env->lake_update_manager()->update_primary_index_memory_limit(
-                    config::update_memory_limit_percent);
-#endif
-            return st;
+            GlobalEnv::GetInstance()->refresh_update_mem_limit();
+            StorageEngine::instance()->update_manager()->refresh_mem_limits();
+            auto* update_mgr = _exec_env->lake_update_manager();
+            if (update_mgr != nullptr) {
+                update_mgr->refresh_mem_limits();
+            }
+            LOG(INFO) << "Set update_memory_limit_percent: " << config::update_memory_limit_percent
+                      << ", update mem limit: " << GlobalEnv::GetInstance()->update_mem_tracker()->limit();
+            return Status::OK();
+        });
+        _config_callback.emplace("lake_pk_preload_memory_limit_percent", [&]() -> Status {
+            auto* update_mgr = _exec_env->lake_update_manager();
+            if (update_mgr != nullptr) {
+                update_mgr->refresh_preload_mem_limit();
+                LOG(INFO) << "Set lake_pk_preload_memory_limit_percent: "
+                          << config::lake_pk_preload_memory_limit_percent
+                          << ", preload mem limit: " << update_mgr->update_state_mem_tracker()->limit();
+            }
+            return Status::OK();
+        });
+        _config_callback.emplace("lake_pk_index_block_cache_limit_percent", [&]() -> Status {
+            auto* update_mgr = _exec_env->lake_update_manager();
+            if (update_mgr != nullptr) {
+                update_mgr->refresh_block_cache_mem_limit();
+                LOG(INFO) << "Set lake_pk_index_block_cache_limit_percent: "
+                          << config::lake_pk_index_block_cache_limit_percent
+                          << ", block cache capacity: " << update_mgr->block_cache()->cache()->get_capacity();
+            }
+            return Status::OK();
         });
         _config_callback.emplace("dictionary_cache_refresh_threadpool_size", [&]() -> Status {
             if (_exec_env->dictionary_cache_pool() != nullptr) {
                 return _exec_env->dictionary_cache_pool()->update_max_threads(
                         config::dictionary_cache_refresh_threadpool_size);
+            }
+            return Status::OK();
+        });
+        _config_callback.emplace("load_sink_close_thread_pool_num_max", [&]() -> Status {
+            if (config::load_sink_close_thread_pool_num_max <= 0) {
+                return Status::InvalidArgument("load_sink_close_thread_pool_num_max must be greater than 0");
+            }
+            auto* thread_pool = _exec_env->load_sink_close_thread_pool();
+            if (thread_pool != nullptr) {
+                return thread_pool->update_max_threads(config::load_sink_close_thread_pool_num_max);
             }
             return Status::OK();
         });
@@ -303,7 +336,11 @@ Status UpdateConfigAction::update_config(const std::string& name, const std::str
         _config_callback.emplace("pk_index_parallel_execution_threadpool_max_threads", [&]() -> Status {
             auto thread_pool = _exec_env->pk_index_execution_thread_pool();
             if (thread_pool != nullptr) {
-                return thread_pool->update_max_threads(config::pk_index_parallel_execution_threadpool_max_threads);
+                int max_thread_count = config::pk_index_parallel_execution_threadpool_max_threads;
+                if (max_thread_count <= 0) {
+                    max_thread_count = CpuInfo::num_cores();
+                }
+                return thread_pool->update_max_threads(std::max(1, max_thread_count));
             }
             return Status::OK();
         });
@@ -528,7 +565,8 @@ Status UpdateConfigAction::update_config(const std::string& name, const std::str
                     LOG(WARNING) << strings::Substitute("Failed to rollback config: $0.", name);
                 }
             } else {
-                LOG(INFO) << "set_config " << name << "=" << value << " success";
+                LOG(INFO) << "set_config " << name << "="
+                          << (config::is_sensitive_config(name) ? kCredentialMask : value) << " success";
             }
         }
     }
@@ -536,7 +574,8 @@ Status UpdateConfigAction::update_config(const std::string& name, const std::str
 }
 
 void UpdateConfigAction::handle(HttpRequest* req) {
-    LOG(INFO) << req->debug_string();
+    // A credential config's new value must not reach the log or the response, so it is masked everywhere below.
+    LOG(INFO) << req->debug_string(config::is_sensitive_config);
 
     Status s;
     std::string msg;
@@ -549,8 +588,10 @@ void UpdateConfigAction::handle(HttpRequest* req) {
         const std::string& new_value = req->params()->begin()->second;
         s = update_config(config, new_value);
         if (!s.ok()) {
-            LOG(WARNING) << "set_config " << config << "=" << new_value << " failed";
-            msg = strings::Substitute("set $0=$1 failed, reason: $2", config, new_value, s.to_string());
+            const std::string shown_value =
+                    config::is_sensitive_config(config) ? std::string(kCredentialMask) : new_value;
+            LOG(WARNING) << "set_config " << config << "=" << shown_value << " failed";
+            msg = strings::Substitute("set $0=$1 failed, reason: $2", config, shown_value, s.to_string());
         }
     }
 

@@ -53,6 +53,7 @@ public class IcebergConnector implements Connector {
     private final String catalogName;
     private IcebergCatalog icebergNativeCatalog;
     private ExecutorService icebergJobPlanningExecutor;
+    private ExecutorService backgroundJobPlanningExecutor;
     private volatile IcebergCatalogProperties icebergCatalogProperties;
     private final ConnectorProperties connectorProperties;
     private final IcebergProcedureRegistry procedureRegistry;
@@ -170,8 +171,9 @@ public class IcebergConnector implements Connector {
     }
 
     private ExecutorService buildBackgroundJobPlanningExecutor() {
-        return newWorkerPool(catalogName + "-background-iceberg-worker-pool",
+        backgroundJobPlanningExecutor = newWorkerPool(catalogName + "-background-iceberg-worker-pool",
                 icebergCatalogProperties.getBackgroundIcebergJobPlanningThreadNum());
+        return backgroundJobPlanningExecutor;
     }
 
     private void registerProcedures() {
@@ -182,15 +184,18 @@ public class IcebergConnector implements Connector {
     public void shutdown() {
         GlobalStateMgr.getCurrentState().getConnectorTableMetadataProcessor()
                 .unRegisterCachingIcebergCatalog(catalogName);
-        if (icebergNativeCatalog instanceof CachingIcebergCatalog) {
-            ((CachingIcebergCatalog) icebergNativeCatalog).shutdown();
-        }
         if (icebergJobPlanningExecutor != null) {
             icebergJobPlanningExecutor.shutdown();
+        }
+        if (backgroundJobPlanningExecutor != null) {
+            backgroundJobPlanningExecutor.shutdown();
         }
         if (commitQueueManager != null) {
             commitQueueManager.shutdownAll();
             LOG.info("IcebergCommitQueueManager shutdown for catalog {}", catalogName);
+        }
+        if (icebergNativeCatalog != null) {
+            icebergNativeCatalog.shutdown();
         }
     }
 

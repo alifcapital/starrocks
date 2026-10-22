@@ -16,12 +16,16 @@ package com.starrocks.sql.optimizer.statistics;
 
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.Table;
+import com.starrocks.statistic.ColumnStatsMeta;
+import com.starrocks.statistic.StatsConstants;
 import com.starrocks.thrift.TStatisticData;
 import com.starrocks.type.IntegerType;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -43,12 +47,34 @@ class ExternalTableStatisticsTest {
                 .setUpdateTime("2026-09-28 01:02:03");
     }
 
+    // Rows of a column are the whole table only when its metadata says so: we fear a column without metadata
+    // comes from a collection that died before it committed, so the decoder treats it as unknown. The tests that
+    // compare decoded values with the collected ones therefore give every column a FULL metadata.
+    private static Map<String, ColumnStatsMeta> fullMetadata(String... columns) {
+        Map<String, ColumnStatsMeta> metadata = new HashMap<>();
+        for (String column : columns) {
+            metadata.put(column, new ColumnStatsMeta(column, StatsConstants.AnalyzeType.FULL, LocalDateTime.now()));
+        }
+        return metadata;
+    }
+
+    @Test
+    void columnWithoutMetadataIsUnknownButKeepsItsRawRows() {
+        Table table = table();
+        ExternalTableStatistics decoded = ExternalTableStatistics.decode(
+                ExternalTableStatistics.encode(List.of(row("first", 100)), table), table, Map.of());
+        Assertions.assertTrue(decoded.summaries.get("first").estimated.isUnknown());
+        Assertions.assertTrue(decoded.columns.get("first").isUnknown());
+        Assertions.assertEquals(100, decoded.summaries.get("first").raw.getRowCount());
+    }
+
     @Test
     void roundTripPreparesIdenticalScalarsAndReusesThemAcrossRequests() {
         Table table = table();
         TStatisticData first = row("first", 100);
         ExternalTableStatistics decoded = ExternalTableStatistics.decode(
-                ExternalTableStatistics.encode(List.of(first, row("другая\"колонка", 200)), table), table, Map.of());
+                ExternalTableStatistics.encode(List.of(first, row("другая\"колонка", 200)), table), table,
+                fullMetadata("first", "другая\"колонка"));
         ColumnStatistic expected = ColumnBasicStatsCacheLoader.buildColumnStatistics(
                 first, "", "", "t", "first", IntegerType.BIGINT);
         ColumnStatistic actual = decoded.columns.get("first");
@@ -139,8 +165,9 @@ class ExternalTableStatisticsTest {
         var sample = new com.starrocks.statistic.ColumnStatsMeta("d",
                 com.starrocks.statistic.StatsConstants.AnalyzeType.SAMPLE, java.time.LocalDateTime.now(),
                 java.util.Set.of(1L, 2L), 8);
-        var decoded = ExternalTableStatistics.decode(ExternalTableStatistics.encode(rows, table), table,
-                Map.of("d", sample));
+        Map<String, ColumnStatsMeta> metadata = fullMetadata("ts", "text", "i");
+        metadata.put("d", sample);
+        var decoded = ExternalTableStatistics.decode(ExternalTableStatistics.encode(rows, table), table, metadata);
         for (TStatisticData row : rows) {
             var expected = ColumnBasicStatsCacheLoader.buildColumnStatistics(row, "", "", "t", row.columnName,
                     types.get(row.columnName));

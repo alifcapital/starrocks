@@ -86,6 +86,33 @@ This topic introduces the following types of BE configurations:
 - Description: The reader's remote I/O buffer size for cloud-native table compaction in a shared-data cluster. The default value is 1MB. You can increase this value to accelerate compaction process.
 - Introduced in: v3.2.3
 
+### lake_dump_tablet_metadata_per_request_memory_limit_bytes
+
+- Default: 268435456
+- Type: Long
+- Unit: Bytes
+- Is mutable: Yes
+- Description: The tracked memory budget for synchronous allocations made while processing one `/api/cloudnative/dump_tablet_metadata` request on a CN. It uses the standard MemTracker accounting granularity rather than enforcing a byte-exact ceiling. It covers metadata inspection, sensitive-field redaction, and JSON serialization, but not the metadata already stored in the CN metadata cache or the asynchronous HTTP output buffer. Each request uses the value captured when it is admitted. If this value is less than or equal to `0`, new requests fail closed.
+- Introduced in: v4.1.7
+
+### lake_dump_tablet_metadata_per_request_json_size_limit_bytes
+
+- Default: 33554432
+- Type: Long
+- Unit: Bytes
+- Is mutable: Yes
+- Description: The maximum size of the complete JSON response for one `/api/cloudnative/dump_tablet_metadata` request. The size is checked before the response is handed to the HTTP output buffer. Each request uses the value captured when it is admitted. If this value is less than or equal to `0`, new requests fail closed.
+- Introduced in: v4.1.7
+
+### lake_dump_tablet_metadata_max_concurrency
+
+- Default: 1
+- Type: Int
+- Unit: Requests
+- Is mutable: Yes
+- Description: The maximum number of `/api/cloudnative/dump_tablet_metadata` requests admitted concurrently on one CN. A request continues to occupy one slot until its HTTP request is released. Increasing the value applies immediately to new requests. Decreasing it does not cancel admitted requests, and new requests are rejected until the active count is below the new limit. If this value is less than or equal to `0`, new requests fail closed.
+- Introduced in: v4.1.7
+
 ### lake_enable_del_file_crc_check
 
 - Default: true
@@ -122,13 +149,22 @@ This topic introduces the following types of BE configurations:
 - Description: The maximum number of input rowsets allowed in a Primary Key table compaction task in a shared-data cluster. The default value of this parameter is changed from `5` to `1000` since v3.2.4 and v3.1.10, and to `500` since v3.3.1 and v3.2.9. After the Sized-tiered Compaction policy is enabled for Primary Key tables (by setting `enable_pk_size_tiered_compaction_strategy` to `true`), StarRocks does not need to limit the number of rowsets for each compaction to reduce write amplification. Therefore, the default value of this parameter is increased.
 - Introduced in: v3.1.8, v3.2.3
 
+### lake_pk_compaction_base_enable_delete_trigger
+
+- Default: false
+- Type: Boolean
+- Unit: -
+- Is mutable: Yes
+- Description: Whether a Primary Key tablet in a shared-data cluster switches from cumulative compaction to base compaction on its own when its deletes reach `lake_pk_compaction_base_delete_ratio_threshold` or `lake_pk_compaction_base_delete_rows_threshold`. It is disabled by default because `lake_pk_compaction_base_delete_rows_threshold` is an absolute count: on a large table whose existing rows keep being updated or deleted, a tablet reaches it again soon after each base compaction, and each base compaction rewrites up to `update_compaction_ratio_threshold` (0.5 by default) of the tablet's data. A manual `ALTER TABLE ... COMPACT` runs base compaction regardless of this item.
+- Introduced in: v4.1.7
+
 ### lake_pk_compaction_base_delete_ratio_threshold
 
 - Default: 0.5
 - Type: Double
 - Unit: -
 - Is mutable: Yes
-- Description: One of two triggers that switch a Primary Key tablet in a shared-data cluster from cumulative compaction (size-tiered small-file merges) to base compaction, which rewrites the delete-bearing rowsets (the ones with the most deleted rows first) to drop deleted rows and shrink their delete vectors. Base compaction runs when the tablet's aggregate delete ratio (`sum(num_dels) / sum(num_rows)` across rowsets) reaches this value, when its absolute delete-row count reaches `lake_pk_compaction_base_delete_rows_threshold`, or when a manual `ALTER TABLE ... COMPACT` forces a base compaction. Set both thresholds high enough to disable the automatic triggers.
+- Description: One of two triggers that switch a Primary Key tablet in a shared-data cluster from cumulative compaction (size-tiered small-file merges) to base compaction, which rewrites the delete-bearing rowsets (the ones with the most deleted rows first) to drop deleted rows and shrink their delete vectors. When `lake_pk_compaction_base_enable_delete_trigger` is `true`, base compaction runs when the tablet's aggregate delete ratio (`sum(num_dels) / sum(num_rows)` across rowsets) reaches this value or when its absolute delete-row count reaches `lake_pk_compaction_base_delete_rows_threshold`. A manual `ALTER TABLE ... COMPACT` forces a base compaction regardless of these items.
 - Introduced in: v4.1.4
 
 ### lake_pk_compaction_base_delete_rows_threshold
@@ -137,7 +173,7 @@ This topic introduces the following types of BE configurations:
 - Type: Int
 - Unit: -
 - Is mutable: Yes
-- Description: One of two triggers for Primary Key base compaction in a shared-data cluster (see `lake_pk_compaction_base_delete_ratio_threshold`). Base compaction runs when a tablet's absolute delete-row count (`sum(num_dels)` across rowsets) reaches this value. This absolute-count trigger complements the ratio trigger: on hot update/delete tables the delete vectors bloat and space is wasted while the aggregate delete ratio stays low (diluted by many mostly-live rowsets), so the ratio trigger alone would not fire. Raise it to make base compaction less frequent, or lower it to reclaim delete vectors sooner.
+- Description: One of two triggers for Primary Key base compaction in a shared-data cluster (see `lake_pk_compaction_base_delete_ratio_threshold`). When `lake_pk_compaction_base_enable_delete_trigger` is `true`, base compaction runs when a tablet's absolute delete-row count (`sum(num_dels)` across rowsets) reaches this value. This absolute-count trigger complements the ratio trigger: on hot update/delete tables the delete vectors bloat and space is wasted while the aggregate delete ratio stays low (diluted by many mostly-live rowsets), so the ratio trigger alone would not fire. Raise it to make base compaction less frequent, or lower it to reclaim delete vectors sooner.
 - Introduced in: v4.1.4
 
 ### lake_put_txn_log_timeout_guard_ms
@@ -198,6 +234,33 @@ This topic introduces the following types of BE configurations:
 - Is mutable: No
 - Description: The maximum number of cached client instances retained for each remote host by BE-wide client caches. This single setting is used when creating BackendServiceClientCache, FrontendServiceClientCache, and BrokerServiceClientCache during ExecEnv initialization, so it limits the number of client stubs/connections kept per host across those caches. Raising this value reduces reconnects and stub creation overhead at the cost of increased memory and file-descriptor usage; lowering it saves resources but may increase connection churn. The value is read at startup and cannot be changed at runtime. Currently one shared setting controls all client cache types; separate per-cache configuration may be introduced later.
 - Introduced in: v3.2.0
+
+### primary_key_index_memory_high_percent
+
+- Default: 75
+- Type: Int
+- Unit: -
+- Is mutable: Yes
+- Description: The level to which a background thread periodically shrinks the primary key index cache in a shared-data cluster, expressed as a percentage of the cache capacity. The cache capacity equals the memory limit for updates (see `update_memory_limit_percent`). When the cache holds more than this percentage, the least recently used primary key indexes that are not in use are evicted until the cache is within this percentage. Indexes in use are never evicted. Set it to a value lower than `primary_key_index_memory_urgent_percent`.
+- Introduced in: -
+
+### primary_key_index_memory_middle_percent
+
+- Default: 50
+- Type: Int
+- Unit: -
+- Is mutable: Yes
+- Description: The level, expressed as a percentage of the cache capacity, to which the primary key index cache is shrunk when a publish of a Primary Key table in a shared-data cluster fails because it exceeds the memory limit. The primary key indexes that are not in use are evicted until the cache is within this percentage, which frees memory for the retried publish. Set it to a value lower than `primary_key_index_memory_high_percent`.
+- Introduced in: -
+
+### primary_key_index_memory_urgent_percent
+
+- Default: 85
+- Type: Int
+- Unit: -
+- Is mutable: Yes
+- Description: The upper limit of the primary key index cache in a shared-data cluster, expressed as a percentage of the cache capacity. It is checked after every publish that does not fail because it exceeds the memory limit: when the cache holds more than this percentage, the least recently used primary key indexes that are not in use are evicted until the cache is within this percentage. It is a backstop for when the cache grows faster than the background thread brings it down to `primary_key_index_memory_high_percent`, so set it to a value higher than that item.
+- Introduced in: -
 
 ### starlet_filesystem_instance_cache_capacity
 
@@ -545,11 +608,29 @@ This topic introduces the following types of BE configurations:
 
 ### lake_replication_file_copy_threads
 
-- Default: 0
+- Default: 16
 - Type: Int
 - Unit: -
 - Is mutable: No
-- Description: Number of threads in the dedicated thread pool used by lake-to-lake (shared-data) cross-cluster replication for per-file copy. `0` means `cpu_cores * 4` (the same default semantics as `replication_threads`); negative values mean `-value * cpu_cores`. This pool is intentionally separate from the agent-task `replicate_snapshot` pool so that per-file copy sub-tasks can be awaited from the outer task without tripping the thread-pool self-deadlock guard. The pool is built once at startup and has no runtime resize hook, so CN restart is required to change its size.
+- Description: Number of threads in the CN-wide dedicated thread pool used by lake-to-lake (shared-data) cross-cluster replication for per-file copy. The default caps concurrent copy tasks and their read buffers independently of CPU count. `0` means `cpu_cores * 4`; negative values mean `-value * cpu_cores`. The pool is built once at startup, so CN restart is required to change its size.
+- Introduced in: v4.1.2
+
+### lake_replication_max_parallel_files_per_tablet
+
+- Default: 4
+- Type: Int
+- Unit: -
+- Is mutable: Yes
+- Description: Maximum number of files copied concurrently for one tablet during lake-to-lake (shared-data) cross-cluster replication. All tablets share the CN-wide `lake_replication_file_copy_threads` pool, so this setting prevents one tablet from monopolizing the pool. Values less than or equal to `1` serialize file copy within each tablet.
+- Introduced in: v4.1.4
+
+### lake_replication_parallel_copy_min_file_count
+
+- Default: 2
+- Type: Int
+- Unit: -
+- Is mutable: Yes
+- Description: Minimum number of files in a tablet required to copy that tablet's files concurrently during lake-to-lake (shared-data) cross-cluster replication. Set this parameter to `0` to disable the dedicated file copy pool and execute file copy in the calling replication task.
 - Introduced in: v4.1.2
 
 ### lake_service_max_concurrency

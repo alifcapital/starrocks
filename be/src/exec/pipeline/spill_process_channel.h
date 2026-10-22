@@ -57,13 +57,20 @@ public:
 
     SpillProcessTask& operator=(std::function<StatusOr<ChunkPtr>()> task) {
         _task = std::move(task);
+        _is_final = false;
         return *this;
     }
 
     void reset();
 
+    // The terminal handoff enqueued by add_last_task / execute(). Only this task may run from
+    // SpillProcessChannel::close(); the data tasks before it read sink-owned state that may already be freed.
+    void mark_final() { _is_final = true; }
+    bool is_final() const { return _is_final; }
+
 private:
     std::function<StatusOr<ChunkPtr>()> _task;
+    bool _is_final = false;
 };
 
 using SpillProcessChannelPtr = std::shared_ptr<SpillProcessChannel>;
@@ -157,6 +164,9 @@ public:
     // The pump can prepare before an adaptive producer creates its spiller. Register in either order.
     void prepare_source(RuntimeState* state, pipeline::PipelineObserver* observer);
 
+    // Lifetime anchor: the spilling context (hash joiner / aggregator / sort context, a ContextWithDependency)
+    // owns the state referenced by the spill tasks. The channel holds a ref on it, so the context cannot
+    // close() (free that state) while spill tasks run.
     // The channel owns this ref from binding until close, including when the producer is created after
     // the pump's prepare(). Never infer ownership later from whether the context pointer is non-null.
     void set_guarded_context(pipeline::ContextWithDependency* context);

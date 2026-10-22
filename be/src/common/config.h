@@ -233,15 +233,16 @@ CONF_mInt64(lake_replication_slow_log_ms, "30000");
 CONF_mInt64(lake_replication_read_buffer_size, "16777216"); // 16MB
 // Maximum retry count for non-segment file copy during lake-to-lake replication
 CONF_mInt32(lake_replication_max_file_copy_retry, "3");
+// Maximum number of files copied concurrently for one tablet during lake-to-lake replication.
+CONF_mInt32(lake_replication_max_parallel_files_per_tablet, "4");
 // Minimum number of files required to enable parallel copy in lake-to-lake replication.
 // Set to 0 to force disable parallel copy.
 CONF_mInt32(lake_replication_parallel_copy_min_file_count, "2");
-// Number of threads in the dedicated thread pool for per-file copy in lake-to-lake replication.
-// 0 means cpu_cores * 4 (matches replication_threads default semantics); negative means -value * cpu_cores.
-// This pool is intentionally separate from the agent-task replicate_snapshot pool so that per-file
-// copy sub-tasks can be awaited from the outer task without tripping the thread-pool self-deadlock
-// guard. The pool is built once at startup; CN restart is required to change its size.
-CONF_Int32(lake_replication_file_copy_threads, "0");
+// Number of threads in the dedicated thread pool used by lake replication for per-file copy.
+// The fixed default bounds per-copy read buffers independently of CPU count. 0 means
+// cpu_cores * 4. Negative means -value * cpu_cores. The pool is built once at startup;
+// CN restart is required to change its size.
+CONF_Int32(lake_replication_file_copy_threads, "16");
 
 // The log dir.
 CONF_String(sys_log_dir, "${STARROCKS_HOME}/log");
@@ -427,6 +428,8 @@ CONF_mInt32(update_compaction_per_tablet_min_interval_seconds, "120"); // 2min
 // set this value to none zero if auto algorithm isn't working well
 CONF_mInt32(update_compaction_chunk_size_for_row_store, "0");
 CONF_mInt64(max_update_compaction_num_singleton_deltas, "500");
+// Maximum number of level -1 rowsets selected per size-tiered primary key compaction. Values below 2 are treated as 2.
+CONF_mInt64(max_update_compaction_num_level_minus_one_rowsets, "10000");
 CONF_mInt64(update_compaction_size_threshold, "268435456");
 CONF_mInt64(update_compaction_result_bytes, "1073741824");
 // This config controls the io amp ratio of delvec files.
@@ -738,7 +741,14 @@ CONF_Bool(enable_http_auth, "false");
 // to open/close system metrics
 CONF_Bool(enable_system_metrics, "true");
 
-CONF_Bool(enable_jvm_metrics, "false");
+// Collect JVM memory metrics. No JVM is created for this: collection starts once a JVM exists
+// in the process, for example after HDFS access, a JNI scanner, or a Java UDF.
+CONF_Bool(enable_jvm_metrics, "true");
+
+// Count the committed JVM heap and non-heap memory in the "jvm" memory tracker under the process
+// tracker, so the BE memory limit includes it. Updated by the JVM metrics hook, so it needs
+// enable_jvm_metrics. When turned off, the next round releases the tracked memory.
+CONF_mBool(enable_jvm_memory_tracker, "true");
 
 CONF_mBool(enable_prefetch, "true");
 
@@ -803,7 +813,8 @@ CONF_Int64(compaction_memory_limit_per_worker, "2147483648"); // 2GB
 CONF_mInt32(compaction_chunk_reset_memory_tracker_threshold_percent, "-1");
 CONF_String(consistency_max_memory_limit, "10G");
 CONF_Int32(consistency_max_memory_limit_percent, "20");
-CONF_Int32(update_memory_limit_percent, "60");
+// Percentage of the process memory limit used by the update (primary key) mem tracker and index cache.
+CONF_mInt32(update_memory_limit_percent, "60");
 // Metadata cache limit for shared-nothing mode. Not working for PK table now.
 // Disable metadata cache when metadata_cache_memory_limit_percent <= 0.
 CONF_mInt32(metadata_cache_memory_limit_percent, "30"); // 30%
@@ -1492,6 +1503,15 @@ CONF_mBool(starlet_write_file_with_tag, "false");
 #endif
 
 CONF_mInt64(lake_metadata_cache_limit, /*2GB=*/"2147483648");
+// Tracked memory budget for synchronously processing one dump_tablet_metadata request. It uses the standard
+// MemTracker accounting granularity. New requests fail closed when the value is non-positive.
+CONF_mInt64(lake_dump_tablet_metadata_per_request_memory_limit_bytes, "268435456");
+// Maximum bytes in the complete JSON response for one dump_tablet_metadata request.
+// New requests fail closed when the value is non-positive.
+CONF_mInt64(lake_dump_tablet_metadata_per_request_json_size_limit_bytes, "33554432");
+// Maximum number of admitted dump_tablet_metadata requests. A lower value does not cancel requests already admitted.
+// New requests fail closed when the value is non-positive.
+CONF_mInt32(lake_dump_tablet_metadata_max_concurrency, "1");
 CONF_mBool(lake_print_delete_log, "false");
 CONF_mInt64(lake_compaction_stream_buffer_size_bytes, "1048576"); // 1MB
 // The interval to check whether lake compaction is valid. Set to <= 0 to disable the check.
@@ -1544,6 +1564,13 @@ CONF_mBool(enable_primary_key_recover, "false");
 CONF_mBool(lake_enable_compaction_async_write, "false");
 CONF_mInt64(lake_pk_compaction_max_input_rowsets, "500");
 CONF_mInt64(lake_pk_compaction_min_input_segments, "5");
+// Whether a scheduled lake primary-key compaction switches to base compaction on its own once the
+// tablet's deletes reach one of the two thresholds below. Off by default: the rows threshold is an
+// absolute count, so on a large tablet whose existing keys keep being updated or deleted it is
+// reached again soon after each base compaction, and every such round rewrites up to
+// update_compaction_ratio_threshold of the tablet's data. A manual ALTER TABLE ... COMPACT runs
+// base compaction whether or not this is on.
+CONF_mBool(lake_pk_compaction_base_enable_delete_trigger, "false");
 // Lake primary-key base compaction (delete reclamation) triggers -- either condition switches a
 // tablet from cumulative selection (the size-tiered small-file merge, which favors small
 // freshly-written rowsets) to base compaction, which rewrites the delete-bearing rowsets (most
@@ -1556,6 +1583,7 @@ CONF_mInt64(lake_pk_compaction_min_input_segments, "5");
 //      long before the aggregate ratio -- diluted by many mostly-live rowsets -- crosses (1).
 // Without these, delete-heavy base rowsets keep losing size-tiered level selection and their
 // deletes / delete-vectors grow without bound even though the tablet keeps getting compacted.
+// Both thresholds are checked only while lake_pk_compaction_base_enable_delete_trigger is on.
 CONF_mDouble(lake_pk_compaction_base_delete_ratio_threshold, "0.5");
 CONF_mInt64(lake_pk_compaction_base_delete_rows_threshold, "10000000");
 // Enable cleanup of orphan delvec entries during compaction.
@@ -1563,8 +1591,18 @@ CONF_mInt64(lake_pk_compaction_base_delete_rows_threshold, "10000000");
 // non-existent segments and prevent delvec file garbage collection.
 // Turn this on after upgrade to clean up existing orphans, then turn it off once done.
 CONF_mBool(lake_enable_orphan_delvec_cleanup_on_compaction, "false");
-// Used for control memory usage of update state cache and compaction state cache
+// Used for control memory usage of update state cache and compaction state cache in shared-data mode
 CONF_mInt32(lake_pk_preload_memory_limit_percent, "30");
+// Upper bound of the shared-data primary key index cache, as a percentage of its capacity, checked after every
+// publish that does not fail on the update memory limit. A backstop for when the background evict thread has
+// not yet brought the cache down to primary_key_index_memory_high_percent.
+CONF_mInt32(primary_key_index_memory_urgent_percent, "85");
+// The background update cache evict thread shrinks the shared-data primary key index cache to this percentage
+// of its capacity whenever it holds more.
+CONF_mInt32(primary_key_index_memory_high_percent, "75");
+// When a shared-data primary key publish fails because it exceeds the update memory limit, the primary key
+// index cache is shrunk to this percentage of its capacity, so that the retry has memory to work with.
+CONF_mInt32(primary_key_index_memory_middle_percent, "50");
 CONF_mInt32(lake_pk_index_sst_min_compaction_versions, "2");
 CONF_mInt32(lake_pk_index_sst_max_compaction_versions, "100");
 // Verify sstable block checksums on cloud-native PK index reads (open, point lookup,
@@ -1583,7 +1621,8 @@ CONF_mBool(enable_strict_delvec_crc_check, "true");
 CONF_mBool(lake_enable_del_file_crc_check, "true");
 // When the ratio of cumulative level to base level is greater than this config, use base merge.
 CONF_mDouble(lake_pk_index_cumulative_base_compaction_ratio, "0.1");
-CONF_Int32(lake_pk_index_block_cache_limit_percent, "10");
+// Capacity of the shared-data primary key index sstable block cache, as a percentage of the update mem limit.
+CONF_mInt32(lake_pk_index_block_cache_limit_percent, "10");
 // When true, shared-data (lake) tablet metadata and txn log files are written with an
 // Adler-32 checksum (a FixedFileHeader for single files, a footer crc for bundle files), so
 // corruption can be detected on read. Readers always auto-detect and verify the checksum when
@@ -1672,7 +1711,7 @@ CONF_Int64(spill_max_log_block_container_bytes, "10737418240"); // 10GB
 // The maximum size of a single spill directory, for some case the spill directory may
 // be the same with storage path. Spill will return with error when used size has exceeded
 // the limit.
-CONF_mDouble(spill_max_dir_bytes_ratio, "0.8"); // 80%
+CONF_mDouble(spill_max_dir_bytes_ratio, "0.5"); // 50%
 // min bytes size of spill read buffer. if the buffer size is less than this value, we will disable buffer read
 CONF_Int64(spill_read_buffer_min_bytes, "1048576");
 CONF_mInt64(mem_limited_chunk_queue_block_size, "8388608");
@@ -1818,6 +1857,9 @@ CONF_mInt64(l0_max_mem_usage, "104857600"); // 100MB
 CONF_mInt64(l0_snapshot_size, "16777216"); // 16MB
 CONF_mInt64(max_tmp_l1_num, "10");
 CONF_mBool(enable_parallel_get_and_bf, "false");
+// Skip duplicate-key checks in immutable L1/L2 files during local persistent-index inserts.
+// L0 (memtable) duplicate-key checks are always performed.
+CONF_mBool(skip_pindex_l1_l2_check_in_insert, "true");
 // Control if using the minor compaction strategy
 CONF_Bool(enable_pindex_minor_compaction, "true");
 // if l2 num is larger than this, stop doing async compaction,
@@ -2251,6 +2293,10 @@ CONF_mInt32(avro_reader_buffer_size_bytes, "8388608");
 CONF_mInt32(json_parse_many_batch_size, "1000000");
 CONF_mBool(enable_dynamic_batch_size_for_json_parse_many, "true");
 CONF_mInt32(put_combined_txn_log_thread_pool_num_max, "64");
+// Maximum number of threads that run the final close of load sinks, including the combined txn log write.
+// Keep it separate from pip_sink_io, where other sinks run multi-MB uploads. Must be greater than 0; changes at
+// runtime resize the pool without interrupting closes already running.
+CONF_mInt32(load_sink_close_thread_pool_num_max, "64");
 CONF_mBool(enable_put_combinded_txn_log_parallel, "false");
 // used to control whether the metrics/ interface collects table metrics
 CONF_mBool(enable_collect_table_metrics, "true");

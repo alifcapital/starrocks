@@ -1301,6 +1301,17 @@ static StatusOr<typename Inputs::value_type> _extract_from_flat_json(FunctionCon
         const std::vector<uint32_t>* rows = nullptr;
         if constexpr (std::is_same_v<Inputs, SelectedColumns>) rows = columns[0].rows;
         ASSIGN_OR_RETURN(auto value, _extract_with_hyper<TargetType>(state, path, json_column, rows));
+        // Only a JSON root is rebuilt by merging; a scalar root is never built and stays NULL.
+        constexpr bool rebuilds_json_root = TargetType == TYPE_JSON || TargetType == TYPE_UNKNOWN;
+        if (rebuilds_json_root && state->flat_path.empty() && value->is_nullable()) {
+            // The root is the document itself, NULL exactly where the input row is. The merger marks an object
+            // with no flat values NULL, but here it is a document that none of the read paths occur in.
+            // The value holds only the selected rows, so the flags are taken from those rows of the input.
+            // input_null_flags returns a copy: the input column belongs to the chunk, and the result may be
+            // mutated in place.
+            const auto& data = down_cast<const NullableColumn*>(value.get())->data_column();
+            value = NullableColumn::create(data, input_null_flags(columns[0], data->size()));
+        }
         return compact_input<Inputs>(std::move(value));
     } else {
         ASSIGN_OR_RETURN(auto value, _extract_with_cast<TargetType>(context, state, path, json_column));

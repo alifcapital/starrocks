@@ -69,7 +69,7 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 - 类型: Boolean
 - 单位: -
 - 是否可变: Yes
-- 描述: 当为 true 时，StarRocks 会在将凭据从任务 SQL 定义返回到 `information_schema.tasks` 和 `information_schema.task_runs` 之前，通过对 DEFINITION 列应用 SqlCredentialRedactor.redact 来屏蔽凭据。在 `information_schema.task_runs` 中，无论定义是来自任务运行状态还是在为空时来自任务定义查找，都应用相同的屏蔽。当为 false 时，返回原始任务定义（可能会暴露凭据）。屏蔽是 CPU/字符串处理工作，当任务或 `task_runs` 数量很大时可能非常耗时；仅当您需要未屏蔽的定义并接受安全风险时才禁用。
+- 描述: 当为 true 时，StarRocks 会在将凭据从任务 SQL 定义返回到 `information_schema.tasks` 和 `information_schema.task_runs` 之前，通过对 DEFINITION 列应用 SqlCredentialRedactor.redact 来屏蔽凭据。在 `information_schema.task_runs` 中，无论定义是来自任务运行状态还是在为空时来自任务定义查找，都应用相同的屏蔽。任务运行结束、归档到 `_statistics_.task_run_history` 之前，也会先屏蔽定义中的凭据，历史表里不会保存明文凭据。当为 false 时，返回并归档原始任务定义（可能会暴露凭据）。屏蔽是 CPU/字符串处理工作，当任务或 `task_runs` 数量很大时可能非常耗时；仅当您需要未屏蔽的定义并接受安全风险时才禁用。
 - 引入版本: v3.5.6
 
 ### `privilege_max_role_depth`
@@ -135,6 +135,15 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 - 单位: -
 - 是否可变: Yes
 - 描述: 外部表（Iceberg）统计信息收集的**辅助**扫描行数预算。统计扫描在估算扫描行数达到该预算后即提前停止。由于单个 split 的行数只能估算（记录数按文件而非按 split 记录），该预算仅作为辅助软限，而非主控制项。默认值与 `connector_table_query_trigger_analyze_small_table_rows` 对齐。取值 `0` 或更小表示该维度不限制。可通过 `ANALYZE TABLE ... PROPERTIES("scan_rows_cap" = "...")` 按语句覆盖。
+- 引入版本: v4.1
+
+### `connector_table_analyze_query_timeout`
+
+- 默认值: 360
+- 类型: Long
+- 单位: 秒
+- 是否可变: Yes
+- 描述: 单条外部表统计信息收集查询允许运行的最长时间。统计收集会按 (分区, 列组) 拆分成多条查询，每条只读取一个分区、受上述扫描预算限制并产出固定大小的 sketch，正常情况下远小于一秒即可返回。若没有该上限，每条查询都会继承 `statistic_collect_query_timeout` 的剩余时间——而后者是整个收集任务的预算，因此一条被过载 BE 卡住的查询就可能耗尽全部预算，导致其后的所有分区都来不及采集。对于冷存储或远端对象存储，受限扫描确实可能更慢，可调大该值。取值 `0` 或更小表示不设置独立上限，查询可再次使用任务的全部剩余预算。实际生效的超时始终取该值与任务剩余预算中的较小者。
 - 引入版本: v4.1
 
 ### `connector_table_query_trigger_analyze_large_table_interval`
@@ -1053,6 +1062,15 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 - 是否可变: Yes
 - 描述: 完成事务期间获取数据库和表锁的默认超时。
 - 引入版本: v4.0.0, v3.5.8
+
+### `history_job_keep_max_num`
+
+- 默认值: 1000
+- 类型: Int
+- 单位: -
+- 是否可变: Yes
+- 描述: FE 内存中保留的已完成或已取消 ALTER 作业的最大数量，这些作业可通过 SHOW ALTER TABLE 查看。schema 变更作业与优化作业共用一个上限，rollup 作业单独计数。超出上限时，按完成时间从早到晚删除作业，即使作业尚未超过 `history_job_keep_max_second` 设定的保留时长。以下两种情况下作业会继续保留，作业数因此可能暂时超过上限：一是正在进行的导入可能还在使用该作业变更前的 schema；二是存算分离集群中仍有集群快照依赖该作业。设为 `0` 或负数表示不限制。
+- 引入版本: -
 
 ### `history_job_keep_max_second`
 

@@ -31,6 +31,8 @@ import com.starrocks.connector.statistics.StatisticsUtils;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.statistic.AnalyzeMgr;
+import com.starrocks.statistic.ColumnStatsMeta;
+import com.starrocks.statistic.ExternalBasicStatsMeta;
 import com.starrocks.statistic.ExternalMcvStatsMeta;
 import com.starrocks.statistic.HistogramStatsMeta;
 import com.starrocks.statistic.StatisticExecutor;
@@ -206,6 +208,22 @@ public class StatisticsCacheLoadFailureTest {
         };
     }
 
+    // We fear that rows without column metadata come from a collection that died before it committed, so the
+    // table summary of such a column is unknown. The loads below expect the rows to be taken as the whole table,
+    // so the table gets a FULL metadata for the column.
+    private void mockFullStatisticsMeta(String column) {
+        ExternalBasicStatsMeta meta = new ExternalBasicStatsMeta("iceberg", "db", "t", List.of(column),
+                StatsConstants.AnalyzeType.FULL, LocalDateTime.now(), Map.of());
+        meta.addColumnStatsMeta(new ColumnStatsMeta(column, StatsConstants.AnalyzeType.FULL, LocalDateTime.now()));
+        new MockUp<AnalyzeMgr>() {
+            @Mock
+            public ExternalBasicStatsMeta getExternalTableBasicStatsMeta(String catalogName, String dbName,
+                                                                         String tableName) {
+                return meta;
+            }
+        };
+    }
+
     @Test
     public void testUnifiedTableLoaderDecodesPreparedRowsAndGroupsDifferentTables() {
         Table table = org.mockito.Mockito.mock(Table.class);
@@ -272,8 +290,11 @@ public class StatisticsCacheLoadFailureTest {
         AsyncLoadingCache<ConnectorTableColumnKey, Optional<ConnectorTableColumnStats>> cache =
                 Caffeine.newBuilder().executor(Runnable::run).buildAsync(new ConnectorColumnStatsCacheLoader());
         ready.set(false);
-        Assertions.assertThrows(CompletionException.class, () -> loadBasic(cache, bulk));
+        // A load before the FE is ready reads nothing. We fear a cached "no statistics" that outlives startup, so the
+        // loader returns no value (and no key for a bulk load): nothing is cached, and no failure is logged for it.
+        loadBasic(cache, bulk);
         Assertions.assertEquals(0, queries.get());
+        Assertions.assertTrue(cache.synchronous().asMap().isEmpty(), "A skipped load must not be cached");
         ready.set(true);
         loadBasic(cache, bulk);
         loadBasic(cache, bulk);
@@ -437,6 +458,7 @@ public class StatisticsCacheLoadFailureTest {
     @Test
     public void testUnpartitionedLoadPreparesOneBeSummaryWithoutBinaryPartitionQuery() throws Exception {
         mockPartitionMetadata(true);
+        mockFullStatisticsMeta("a");
         partitionRows = List.of(ExternalPartitionStatisticsTest.row("", "a", 100, 50, 0, "1", "100").setCountDistinct(50));
         CachedStatisticStorage storage = new CachedStatisticStorage();
         ExternalStatisticsRequest request = new ExternalStatisticsRequest(UUID, List.of(""), List.of("a"), true, true);
@@ -455,6 +477,7 @@ public class StatisticsCacheLoadFailureTest {
     @Test
     public void testScopedLoadsPreserveQueryTriggeredAnalyzeWithoutAdditionalReads() throws Exception {
         mockPartitionMetadata(true);
+        mockFullStatisticsMeta("a");
         partitionRows = List.of(ExternalPartitionStatisticsTest.row("", "a", 100, 50, 0, "1", "100").setCountDistinct(50));
         AtomicInteger checks = new AtomicInteger();
         CompletableFuture<Void> observed = new CompletableFuture<>();

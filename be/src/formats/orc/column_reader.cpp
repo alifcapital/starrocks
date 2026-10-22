@@ -19,6 +19,7 @@
 #include "common/statusor.h"
 #include "formats/orc/orc_chunk_reader.h"
 #include "formats/orc/utils.h"
+#include "runtime/current_thread.h"
 
 namespace starrocks {
 
@@ -82,10 +83,15 @@ StatusOr<std::unique_ptr<ORCColumnReader>> ORCColumnReader::create(const TypeDes
         std::vector<std::unique_ptr<ORCColumnReader>> child_readers;
         for (size_t i = 0; i < type.children.size(); i++) {
             const TypeDescriptor& child_type = type.children[i];
-            ASSIGN_OR_RETURN(
-                    std::unique_ptr<ORCColumnReader> child_reader,
-                    ORCColumnReader::create(child_type, orc_mapping->get_orc_type_child_mapping(i).orc_type, true,
-                                            orc_mapping->get_orc_type_child_mapping(i).orc_mapping, reader));
+            const OrcMappingOrcType& child = orc_mapping->get_orc_type_child_mapping(i);
+            std::unique_ptr<ORCColumnReader> child_reader;
+            if (child.orc_type == nullptr) {
+                // an Iceberg struct subfield missing from the file reads NULL
+                ASSIGN_OR_RETURN(child_reader, create_default_column_reader(child_type, true, reader));
+            } else {
+                ASSIGN_OR_RETURN(child_reader,
+                                 ORCColumnReader::create(child_type, child.orc_type, true, child.orc_mapping, reader));
+            }
             child_readers.emplace_back(std::move(child_reader));
         }
         return std::make_unique<StructColumnReader>(type, orc_type, nullable, reader, std::move(child_readers));
@@ -527,7 +533,7 @@ Status StringColumnReader::get_next(orc::ColumnVectorBatch* cvb, Column* col, si
     // reallocate and copy all the bytes of the column. So we reserve only when the capacity is short, and then at
     // least twice the capacity.
     if (needed_bytes > vb.capacity()) {
-        vb.reserve(std::max(needed_bytes, 2 * vb.capacity()));
+        TRY_CATCH_BAD_ALLOC(vb.reserve(std::max(needed_bytes, 2 * vb.capacity())));
     }
 
     auto& vo = values->get_offset();
@@ -677,7 +683,7 @@ Status VarbinaryColumnReader::get_next(orc::ColumnVectorBatch* cvb, Column* col,
     size_t write_pos = vb.size();
 
     // vb is using RawVectorPad16, resize will not initialize vector
-    vb.resize(vb.size() + len);
+    TRY_CATCH_BAD_ALLOC(vb.resize(vb.size() + len));
     raw::stl_vector_resize_uninitialized(&vo, vo.size() + size);
 
     if (cvb->hasNulls) {
@@ -974,8 +980,10 @@ Status StructColumnReader::_fill_struct_column(orc::ColumnVectorBatch* cvb, Colu
 
     auto field_columns = col_struct->fields();
     for (size_t i = 0; i < _type.children.size(); i++) {
-        size_t column_id = _child_readers[i]->get_orc_type()->getColumnId();
-        orc::ColumnVectorBatch* field_cvb = orc_struct->fieldsColumnIdMap[column_id];
+        const orc::Type* field_orc_type = _child_readers[i]->get_orc_type();
+        // nullptr for a subfield missing from the file (DefaultColumnReader)
+        orc::ColumnVectorBatch* field_cvb =
+                field_orc_type == nullptr ? nullptr : orc_struct->fieldsColumnIdMap[field_orc_type->getColumnId()];
         auto* field_column = field_columns[i]->as_mutable_raw_ptr();
         RETURN_IF_ERROR(_child_readers[i]->get_next(field_cvb, field_column, from, size));
     }

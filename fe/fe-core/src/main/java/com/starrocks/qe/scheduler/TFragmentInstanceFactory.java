@@ -70,10 +70,10 @@ public class TFragmentInstanceFactory {
         // calculate the number of all tablet sinks in advance and assign them to each fragment instance
         boolean enablePipelineTableSinkDop = jobSpec.isEnablePipeline() && fragment.getPlanFragment().hasTableSink();
 
+        TPlanFragment sharedFragment = createSharedFragment(fragment);
         List<TExecPlanFragmentParams> res = new ArrayList<>(instances.size());
-        TPlanFragment sharedPlanFragment = instances.isEmpty() ? null : createSharedPlanFragment(fragment);
         for (FragmentInstance instance : instances) {
-            res.add(create(instance, descTable, accTabletSinkDop, totalTableSinkDop, sharedPlanFragment));
+            res.add(create(instance, sharedFragment, descTable, accTabletSinkDop, totalTableSinkDop));
 
             if (enablePipelineTableSinkDop) {
                 accTabletSinkDop += instance.getTableSinkDop();
@@ -83,47 +83,45 @@ public class TFragmentInstanceFactory {
         return res;
     }
 
+    /**
+     * Create the thrift fragment shared by the requests of all the instances of {@code execFragment}, so that it is
+     * built and serialized only once. Returns null if sharing gains nothing for a single instance, or
+     * the instances need their own fragment because {@link #toThriftForUniqueParams} modifies the output sink per
+     * instance.
+     */
+    public TPlanFragment createSharedFragment(ExecutionFragment execFragment) {
+        PlanFragment fragment = execFragment.getPlanFragment();
+        if (execFragment.getInstances().size() <= 1 || fragment.hasInstanceSpecificSink()) {
+            return null;
+        }
+        execFragment.setLayoutInfosForRuntimeFilters();
+        // The group-by NDV reserve estimate depends on the instance count, so we set it before the plan that all
+        // the instances share is serialized. Otherwise the shared plan would carry the unscaled estimate.
+        execFragment.scaleAggReserveEstimateByInstanceCount();
+        return fragment.toThrift(new SerializeOnceTPlanFragment());
+    }
+
     public TExecPlanFragmentParams create(FragmentInstance instance,
                                           TDescriptorTable descTable,
                                           int accTabletSinkDop,
                                           int totalTableSinkDop) {
-        return create(instance, descTable, accTabletSinkDop, totalTableSinkDop, null);
+        return create(instance, null, descTable, accTabletSinkDop, totalTableSinkDop);
     }
 
     /**
-     * @param sharedPlanFragment the result of {@link #createSharedPlanFragment} for the fragment of the instance, or
-     *                           null to build the thrift plan for this instance only.
+     * @param sharedFragment the fragment from {@link #createSharedFragment}, or null to build one for this instance.
      */
     public TExecPlanFragmentParams create(FragmentInstance instance,
+                                          TPlanFragment sharedFragment,
                                           TDescriptorTable descTable,
                                           int accTabletSinkDop,
-                                          int totalTableSinkDop,
-                                          TPlanFragment sharedPlanFragment) {
+                                          int totalTableSinkDop) {
         TExecPlanFragmentParams result = new TExecPlanFragmentParams();
 
-        toThriftFromCommonParams(result, instance.getExecFragment(), descTable, totalTableSinkDop, sharedPlanFragment);
+        toThriftFromCommonParams(result, instance.getExecFragment(), sharedFragment, descTable, totalTableSinkDop);
         toThriftForUniqueParams(result, instance, accTabletSinkDop);
 
         return result;
-    }
-
-    /**
-     * Builds the thrift plan of the fragment once for all its instances, or returns null when each instance must
-     * build its own.
-     *
-     * <p>Building the thrift plan is costly, and the instances of a fragment get the same plan. The serializers only
-     * read it, so all the instances can hold one object. Two kinds of fragment change the plan per instance, so we
-     * do not share it for them: {@link #toThriftForUniqueParams} keeps only the destinations of the instance in the
-     * thrift sink of a multi cast fragment, and it appends the instance index to the file prefix of an export sink,
-     * which the plan of the next instance includes.
-     */
-    public TPlanFragment createSharedPlanFragment(ExecutionFragment execFragment) {
-        PlanFragment fragment = execFragment.getPlanFragment();
-        if (fragment instanceof MultiCastPlanFragment || fragment.getSink() instanceof ExportSink) {
-            return null;
-        }
-        execFragment.setLayoutInfosForRuntimeFilters();
-        return fragment.toThrift();
     }
 
     public TExecPlanFragmentParams createIncrementalScanRanges(FragmentInstance instance) {
@@ -140,16 +138,9 @@ public class TFragmentInstanceFactory {
 
     public void toThriftFromCommonParams(TExecPlanFragmentParams result,
                                          ExecutionFragment execFragment,
+                                         TPlanFragment sharedFragment,
                                          TDescriptorTable descTable,
                                          int totalTableSinkDop) {
-        toThriftFromCommonParams(result, execFragment, descTable, totalTableSinkDop, null);
-    }
-
-    private void toThriftFromCommonParams(TExecPlanFragmentParams result,
-                                          ExecutionFragment execFragment,
-                                          TDescriptorTable descTable,
-                                          int totalTableSinkDop,
-                                          TPlanFragment sharedPlanFragment) {
         // TODO(lzh): move to a more proper place.
         execFragment.setLayoutInfosForRuntimeFilters();
         // Divide the group-by NDV reserve estimate by the now-known instance count, before
@@ -162,7 +153,7 @@ public class TFragmentInstanceFactory {
         boolean isEnablePipelineTableSinkDop = isEnablePipeline && fragment.hasTableSink();
 
         result.setProtocol_version(InternalServiceVersion.V1);
-        result.setFragment(sharedPlanFragment != null ? sharedPlanFragment : fragment.toThrift());
+        result.setFragment(sharedFragment != null ? sharedFragment : fragment.toThrift());
         result.setDesc_tbl(descTable);
         result.setFunc_version(TFunctionVersion.RUNTIME_FILTER_SERIALIZE_VERSION_3.getValue());
         result.setArrow_flight_sql_version(TArrowFlightSQLVersion.V1.getValue());
@@ -245,6 +236,11 @@ public class TFragmentInstanceFactory {
 
         boolean isEnablePipeline = jobSpec.isEnablePipeline();
         boolean isEnablePipelineTableSinkDop = isEnablePipeline && fragment.hasTableSink();
+        // The per-instance changes below would leak into the other instances through a shared fragment.
+        Preconditions.checkState(!fragment.hasInstanceSpecificSink() ||
+                        !(result.getFragment() instanceof SerializeOnceTPlanFragment),
+                "fragment %s with an instance-specific sink must not share its thrift fragment",
+                fragment.getFragmentId());
 
         result.setBackend_num(instance.getIndexInJob());
         if (isEnablePipeline) {

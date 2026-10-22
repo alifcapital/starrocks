@@ -389,6 +389,24 @@ This topic introduces the following types of FE configurations:
 - Description: The cluster-wide default list of Group Providers, separated by commas. It applies to natively authenticated users, and from v4.2 also to a security integration that sets no `group_provider` property of its own - earlier versions consulted no Group Provider at all in that case. See [Authenticate User Groups](../../user_privs/group_provider.md).
 - Introduced in: v3.5
 
+### `group_provider_http_connect_timeout_ms`
+
+- Default: 5000
+- Type: Int
+- Unit: Milliseconds
+- Is mutable: Yes
+- Description: Connect timeout for a File Group Provider whose `group_file_url` is an `http://` or `https://` URL. Must be positive. If the server does not accept the connection within this time, the CREATE or ALTER GROUP PROVIDER statement fails and the group provider keeps its previous configuration. Without a bound, a server that never answers would block not only the statement but also journal replay on every FE.
+- Introduced in: v4.2
+
+### `group_provider_http_read_timeout_ms`
+
+- Default: 30000
+- Type: Int
+- Unit: Milliseconds
+- Is mutable: Yes
+- Description: Read timeout for a File Group Provider whose `group_file_url` is an `http://` or `https://` URL. Must be positive. Bounds how long a connected server may stay silent before the fetch fails; see `group_provider_http_connect_timeout_ms` for the failure behavior.
+- Introduced in: v4.2
+
 ### `hdfs_file_system_expire_seconds`
 
 - Default: 300
@@ -612,6 +630,15 @@ This topic introduces the following types of FE configurations:
 - Description:
 - Introduced in: -
 
+### `star_client_get_shard_info_batch_size`
+
+- Default: 1024
+- Type: Int
+- Unit: -
+- Is mutable: Yes
+- Description: The maximum number of tablets that the FE looks up in one StarMgr request when it resolves the Compute Nodes of many tablets at once in a shared-data cluster, for example when it plans a query or a load on a large table, or when AutoVacuum cleans up a partition or the FE deletes tablets. A larger lookup is split into consecutive requests of at most this many tablets. StarMgr holds a lock on its tablet metadata while it answers one request, which blocks StarMgr metadata changes and, on Follower FEs, the replay of StarMgr metadata. A request for all tablets of a large table can therefore stall them for seconds. A smaller value shortens each stall at the cost of more requests. Values less than `1` are treated as `1`.
+- Introduced in: v4.2.0
+
 ### `lake_scheduler_enable_colocate_group_sample`
 
 - Default: true
@@ -720,7 +747,7 @@ This topic introduces the following types of FE configurations:
 - Type: boolean
 - Unit: -
 - Is mutable: Yes
-- Description: When enabled, StarRocks optimizes tablet creation for cloud-native tables and materialized views in shared-data mode by creating a single shared tablet metadata for all tablets under a physical partition instead of distinct metadata per tablet. This reduces the number of tablet creation tasks and metadata/files produced during table creation, rollup, and schema-change jobs. The optimization is applied only for cloud-native tables/materialized views and is combined with `file_bundling` (the latter reuses the same optimization logic). Note: schema-change and rollup jobs explicitly disable the optimization for tables using `file_bundling` to avoid overwriting files with identical names. Enable cautiously — it changes the granularity of created tablet metadata and can affect how replica creation and file naming behave.
+- Description: When enabled, StarRocks optimizes tablet creation for cloud-native tables and materialized views in shared-data mode by creating a single shared tablet metadata for all tablets under a physical partition instead of distinct metadata per tablet. This reduces the number of tablet creation tasks and metadata/files produced during table creation, rollup, and schema-change jobs. The optimization is applied only for cloud-native tables/materialized views and is combined with `file_bundling` (the latter reuses the same optimization logic). Note: schema-change and rollup jobs explicitly disable the optimization for tables using `file_bundling` to avoid overwriting files with identical names. Tables that use range distribution never use the optimization: each of their tablets carries its own key range, so its metadata is always created per tablet. Enable cautiously — it changes the granularity of created tablet metadata and can affect how replica creation and file naming behave.
 - Introduced in: v3.3.1, v3.4.0, v3.5.0
 
 ### `lake_create_tablet_max_retries`

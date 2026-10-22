@@ -453,6 +453,7 @@ public:
     METRICS_DEFINE_THREAD_POOL(replicate_snapshot);
     METRICS_DEFINE_THREAD_POOL(replicate_file);
     METRICS_DEFINE_THREAD_POOL(automatic_partition);
+    METRICS_DEFINE_THREAD_POOL(load_sink_close);
 
     METRIC_DEFINE_INT_COUNTER(exec_runtime_memory_size, MetricUnit::BYTES);
 
@@ -487,6 +488,7 @@ public:
 
     MetricRegistry* metrics() { return &_metrics; }
     SystemMetrics* system_metrics() { return &_system_metrics; }
+    JVMMetrics* jvm_metrics() { return &_jvm_metrics; }
     TableMetricsManager* table_metrics_mgr() { return &_table_metrics_mgr; }
     TableMetricsPtr table_metrics(uint64_t table_id) { return _table_metrics_mgr.get_table_metrics(table_id); }
     pipeline::PipelineExecutorMetrics* get_pipeline_executor_metrics() { return &pipeline_executor_metrics; }

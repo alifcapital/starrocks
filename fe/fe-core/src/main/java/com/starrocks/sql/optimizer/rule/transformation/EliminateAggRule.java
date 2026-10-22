@@ -183,7 +183,7 @@ public class EliminateAggRule extends TransformationRule {
         if (outType.equals(func.getType())) {
             return func;
         }
-        return new CastOperator(outType, func);
+        return new CastOperator(outType, func, true);
     }
 
 }

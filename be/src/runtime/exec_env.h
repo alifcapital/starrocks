@@ -125,10 +125,7 @@ public:
     ~GlobalEnv() { _is_init = false; }
 
     Status init();
-    void stop() {
-        _is_init = false;
-        _reset_tracker();
-    }
+    void stop();
 
     static bool is_init();
 
@@ -167,10 +164,15 @@ public:
     MemTracker* replication_mem_tracker() { return _replication_mem_tracker.get(); }
     MemTracker* datacache_mem_tracker() { return _datacache_mem_tracker.get(); }
     MemTracker* jemalloc_metadata_traker() { return _jemalloc_metadata_tracker.get(); }
+    MemTracker* jvm_mem_tracker() { return _jvm_mem_tracker.get(); }
     std::shared_ptr<MemTracker> get_mem_tracker_by_type(MemTrackerType type);
     std::vector<std::shared_ptr<MemTracker>> mem_trackers() const;
 
     static int64_t calc_max_query_memory(int64_t process_mem_limit, int64_t percent);
+    static int64_t calc_max_update_memory(int64_t process_mem_limit);
+
+    // Re-apply update_memory_limit_percent to the update mem tracker.
+    void refresh_update_mem_limit();
 
     int64_t process_mem_limit() const { return _process_mem_tracker->limit(); }
 
@@ -187,6 +189,8 @@ private:
 
     // Track usage of jemalloc
     std::shared_ptr<MemTracker> _jemalloc_metadata_tracker;
+    // JVM heap and non-heap committed memory
+    std::shared_ptr<MemTracker> _jvm_mem_tracker;
 
     // Limit the memory used by the query. At present, it can use 90% of the be memory limit
     std::shared_ptr<MemTracker> _query_pool_mem_tracker;
@@ -323,6 +327,8 @@ public:
 
     ThreadPool* automatic_partition_pool() { return _automatic_partition_pool.get(); }
 
+    ThreadPool* load_sink_close_thread_pool() { return _load_sink_close_thread_pool.get(); }
+
     RuntimeFilterWorker* runtime_filter_worker() { return _runtime_filter_worker; }
 
     RuntimeFilterCache* runtime_filter_cache() { return _runtime_filter_cache; }
@@ -377,6 +383,9 @@ public:
     DiagnoseDaemon* diagnose_daemon() const { return _diagnose_daemon; }
 
 private:
+    Status _init_pk_index_execution_thread_pool();
+    Status _init_load_sink_close_thread_pool();
+
     void _wait_for_fragments_finish();
     size_t _get_running_fragments_count() const;
 
@@ -432,6 +441,8 @@ private:
     connector::ConnectorSinkSpillExecutor* _connector_sink_spill_executor = nullptr;
 
     std::unique_ptr<ThreadPool> _automatic_partition_pool;
+
+    std::unique_ptr<ThreadPool> _load_sink_close_thread_pool;
 
     RuntimeFilterWorker* _runtime_filter_worker = nullptr;
     RuntimeFilterCache* _runtime_filter_cache = nullptr;

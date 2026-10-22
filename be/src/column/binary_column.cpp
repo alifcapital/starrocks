@@ -301,12 +301,29 @@ bool BinaryColumnBase<T>::append_strings_overflow(const Slice* data, size_t size
     } else if (max_length <= 128) {
         append_fixed_length<T, 128>(data, size, &bytes, &_offsets);
     } else {
+        // Values wider than the largest fixed-length specialization are copied at their
+        // exact length, so we cannot reuse append_fixed_length here. Size the destination
+        // up front anyway: appending one value at a time lets the byte buffer grow
+        // geometrically, which re-copies the whole buffer on every doubling and leaves the
+        // final capacity at up to twice the bytes actually held. That is what turns a chunk
+        // of large strings into a multi-hundred-MB allocation spike in the scan path.
+        uint64_t total_length = 0;
         for (size_t i = 0; i < size; i++) {
-            const auto& s = data[i];
-            const auto* const p = reinterpret_cast<const Bytes::value_type*>(s.data);
-            bytes.insert(bytes.end(), p, p + s.size);
-            _offsets.emplace_back(bytes.size());
+            total_length += data[i].size;
         }
+
+        const uint64_t old_bytes_size = bytes.size();
+        const uint64_t new_bytes_size = old_bytes_size + total_length;
+        bytes.resize(new_bytes_size);
+
+        auto* __restrict dst_bytes = bytes.data();
+        uint64_t offset = old_bytes_size;
+        for (size_t i = 0; i < size; i++) {
+            memcpy(dst_bytes + offset, data[i].data, data[i].size);
+            offset += data[i].size;
+            _offsets.emplace_back(offset);
+        }
+        DCHECK_EQ(offset, new_bytes_size);
     }
     invalidate_slice_cache();
     return true;
@@ -826,6 +843,12 @@ const uint8_t* BinaryColumnBase<T>::deserialize_and_append(const uint8_t* pos) {
 
 template <typename T>
 void BinaryColumnBase<T>::deserialize_and_append_batch(Buffer<Slice>& srcs, size_t chunk_size) {
+    // Callers hand down a full-size slice buffer and a row count, and the entries past that count
+    // may still be default constructed -- Slice() points its data at a 1-byte "" literal. Bail out
+    // before the reserve heuristic peeks at srcs[0], which would read past that literal.
+    if (chunk_size == 0) {
+        return;
+    }
     // max size of one string is 2^32, so use uint32_t not T
     uint32_t string_size = *((uint32_t*)srcs[0].data);
     get_bytes().reserve(chunk_size * string_size * 2);
@@ -861,6 +884,11 @@ void BinaryColumnBase<T>::serialize_batch_with_null_masks(uint8_t* dst, Buffer<u
 template <typename T>
 void BinaryColumnBase<T>::deserialize_and_append_batch_nullable(Buffer<Slice>& srcs, size_t chunk_size,
                                                                 Buffer<uint8_t>& is_nulls, bool& has_null) {
+    // See deserialize_and_append_batch(): srcs[0] is only guaranteed to be a real key when there
+    // is at least one row to append.
+    if (chunk_size == 0) {
+        return;
+    }
     const uint32_t string_size = *((bool*)srcs[0].data) // is null
                                          ? 4
                                          : *((uint32_t*)(srcs[0].data + sizeof(bool))); // first string size

@@ -441,9 +441,9 @@ public class SkewJoinV2Test extends PlanTestBase {
                     "(select distinct upper(S_ADDRESS) u, S_SUPPKEY k from supplier) t1 " +
                     "join[skew|t1.k(1,2)] supplier s2 on t1.k = s2.S_SUPPKEY";
             String plan = getVerboseExplain(sql);
-            // The top projection decodes the derived dictionary before evaluating ifnull().
+            // the top fragment evaluates ifnull() over the decoded derived dict 21 ...
             assertContains(plan, "18 <-> ifnull[(DictDecode([21: upper, INT, true], [<place-holder>]), 'x')");
-            // It must carry the derived dictionary expression through the split consumers.
+            // ... so it must carry 21's global dict expr (it arrives through the split consumers)
             assertContains(plan, "  RESULT SINK\n" +
                     "\n" +
                     "  Global Dict Exprs:\n" +

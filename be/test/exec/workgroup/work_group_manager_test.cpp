@@ -14,9 +14,15 @@
 
 #include <gtest/gtest.h>
 
+#include <limits>
+#include <optional>
+
+#include "exec/pipeline/pipeline_driver_queue.h"
 #include "exec/workgroup/work_group.h"
 #include "runtime/mem_tracker.h"
 #include "testutil/parallel_test.h"
+#include "util/metrics.h"
+#include "util/starrocks_metrics.h"
 
 namespace starrocks::workgroup {
 TWorkGroup create_twg(const int64_t id, const int64_t version, const std::string& name, const std::string& mem_pool,
@@ -35,6 +41,182 @@ TWorkGroupOp make_twg_op(const TWorkGroup& twg, const TWorkGroupOpType::type op_
     op.__set_workgroup(twg);
     op.__set_op_type(op_type);
     return op;
+}
+
+// In an anonymous namespace, since other test files linked into the same binary define their own FakeDriverQueue.
+namespace {
+class FakeDriverQueue final : public pipeline::DriverQueue {
+public:
+    FakeDriverQueue() : DriverQueue(nullptr) {}
+
+    void close() override {}
+    void put_back(const pipeline::DriverRawPtr driver) override {}
+    void put_back(const std::vector<pipeline::DriverRawPtr>& drivers) override {}
+    void put_back_from_executor(const pipeline::DriverRawPtr driver) override {}
+    StatusOr<pipeline::DriverRawPtr> take(const bool block) override { return nullptr; }
+    void cancel(pipeline::DriverRawPtr driver) override {}
+    void update_statistics(const pipeline::DriverRawPtr driver) override {}
+    size_t size() const override { return 0; }
+    bool should_yield(const pipeline::DriverRawPtr driver, int64_t unaccounted_runtime_ns) const override {
+        return false;
+    }
+    std::vector<pipeline::DriverQueueLevelStats> level_stats() const override { return stats; }
+
+    std::vector<pipeline::DriverQueueLevelStats> stats;
+};
+
+FakeDriverQueue* set_fake_driver_queue(const WorkGroupPtr& wg) {
+    auto queue = std::make_unique<FakeDriverQueue>();
+    queue->stats.resize(pipeline::QuerySharedDriverQueue::QUEUE_SIZE);
+    auto* result = queue.get();
+    wg->driver_sched_entity()->set_queue(std::move(queue));
+    return result;
+}
+} // namespace
+
+PARALLEL_TEST(WorkGroupManagerTest, driver_queue_level_metrics) {
+    PipelineExecutorSetConfig config{10, 1, 1, 1, CpuUtil::CpuIds{}, false, false, nullptr};
+    WorkGroupManager manager(config);
+    auto wg = std::make_shared<WorkGroup>(create_twg(130, 1, "wg_mlfq_metrics", WorkGroup::DEFAULT_MEM_POOL, 0.5));
+    manager.add_workgroup(wg);
+
+    auto queue = std::make_unique<FakeDriverQueue>();
+    queue->stats.resize(pipeline::QuerySharedDriverQueue::QUEUE_SIZE);
+    queue->stats[1] = {.accu_time_ns = 300, .wait_time_ns = 200, .schedule_count = 2};
+    wg->driver_sched_entity()->set_queue(std::move(queue));
+    manager.update_metrics();
+
+    auto get_value = [](const std::string& name, const std::string& level) -> std::optional<int64_t> {
+        auto* metric = StarRocksMetrics::instance()->metrics()->get_metric(
+                name, MetricLabels().add("name", "wg_mlfq_metrics").add("level", level));
+        if (metric == nullptr) {
+            return std::nullopt;
+        }
+        return std::stoll(metric->to_string());
+    };
+    EXPECT_EQ(0, get_value("resource_group_driver_queue_level_accu_time_ns", "0"));
+    EXPECT_EQ(300, get_value("resource_group_driver_queue_level_accu_time_ns", "1"));
+    EXPECT_EQ(200, get_value("resource_group_driver_queue_level_wait_time_ns", "1"));
+    EXPECT_EQ(2, get_value("resource_group_driver_queue_level_schedule_count", "1"));
+    EXPECT_EQ(std::nullopt, get_value("resource_group_driver_queue_level_accu_time_ns", "8"));
+
+    manager.destroy();
+}
+
+PARALLEL_TEST(WorkGroupManagerTest, driver_queue_level_counters_survive_workgroup_lifecycle) {
+    PipelineExecutorSetConfig config{10, 1, 1, 1, CpuUtil::CpuIds{}, false, false, nullptr};
+    WorkGroupManager manager(config);
+    std::vector<FakeDriverQueue*> queues;
+    manager.set_workgroup_expiration_time(std::chrono::seconds(0));
+    const std::string name = "wg_queue_lifecycle";
+    auto twg = create_twg(131, 1, name, WorkGroup::DEFAULT_MEM_POOL, 0.5);
+    auto old_wg = std::make_shared<WorkGroup>(twg);
+    manager.add_workgroup(old_wg);
+    queues.push_back(set_fake_driver_queue(old_wg));
+    old_wg->incr_num_running_drivers();
+
+    auto get_value = [&name](const std::string& metric_name) -> std::optional<int64_t> {
+        auto* metric = StarRocksMetrics::instance()->metrics()->get_metric(
+                metric_name, MetricLabels().add("name", name).add("level", "1"));
+        return metric == nullptr ? std::nullopt : std::optional<int64_t>(std::stoll(metric->to_string()));
+    };
+    auto check_values = [&](int64_t accu_time, int64_t wait_time, int64_t schedule_count) {
+        EXPECT_EQ(accu_time, get_value("resource_group_driver_queue_level_accu_time_ns"));
+        EXPECT_EQ(wait_time, get_value("resource_group_driver_queue_level_wait_time_ns"));
+        EXPECT_EQ(schedule_count, get_value("resource_group_driver_queue_level_schedule_count"));
+    };
+    queues[0]->stats[1] = {.accu_time_ns = 300, .wait_time_ns = 200, .schedule_count = 2};
+    manager.update_metrics();
+    check_values(300, 200, 2);
+
+    // The old queue has unsampled work. The new queue can already exceed the previous sample,
+    // so comparing successive samples to detect a reset would undercount it.
+    queues[0]->stats[1] = {.accu_time_ns = 400, .wait_time_ns = 350, .schedule_count = 3};
+    twg.version = 2;
+    auto new_wg = std::make_shared<WorkGroup>(twg);
+    manager.add_workgroup(new_wg);
+    queues.push_back(set_fake_driver_queue(new_wg));
+    queues[1]->stats[1] = {.accu_time_ns = 250, .wait_time_ns = 500, .schedule_count = 5};
+    manager.update_metrics();
+    check_values(250, 850, 8);
+    manager.update_metrics();
+    check_values(250, 850, 8);
+
+    // A draining version can still run after ALTER. Its increments belong to the same series.
+    queues[0]->stats[1].wait_time_ns = 450;
+    queues[0]->stats[1].schedule_count = 4;
+    queues[1]->stats[1].wait_time_ns = 700;
+    queues[1]->stats[1].schedule_count = 7;
+    manager.apply({});
+    manager.update_metrics();
+    check_values(250, 1150, 11);
+
+    // Retiring the queue must preserve its final increments, without counting them twice.
+    queues[0]->stats[1].wait_time_ns = 475;
+    queues[0]->stats[1].schedule_count = 5;
+    old_wg->decr_num_running_drivers();
+    manager.apply({});
+    manager.update_metrics();
+    check_values(250, 1175, 12);
+
+    queues[1]->stats[1].wait_time_ns = 750;
+    queues[1]->stats[1].schedule_count = 8;
+    twg.version = 3;
+    manager.apply({make_twg_op(twg, TWorkGroupOpType::WORKGROUP_OP_DELETE)});
+    manager.apply({});
+    manager.update_metrics();
+    check_values(0, 1225, 13);
+    manager.update_metrics();
+    check_values(0, 1225, 13);
+
+    // DROP/CREATE with a new ID and the same name reuses the registered metric series.
+    auto recreated = create_twg(132, 1, name, WorkGroup::DEFAULT_MEM_POOL, 0.5);
+    auto recreated_wg = std::make_shared<WorkGroup>(recreated);
+    manager.add_workgroup(recreated_wg);
+    queues.push_back(set_fake_driver_queue(recreated_wg));
+    queues[2]->stats[1] = {.accu_time_ns = 150, .wait_time_ns = 75, .schedule_count = 1};
+    manager.update_metrics();
+    check_values(150, 1300, 14);
+
+    queues[2]->stats[1].wait_time_ns = 175;
+    queues[2]->stats[1].schedule_count = 2;
+    manager.destroy();
+    manager.update_metrics();
+    check_values(0, 1400, 15);
+}
+
+PARALLEL_TEST(WorkGroupManagerTest, driver_queue_level_counter_totals_saturate) {
+    PipelineExecutorSetConfig config{10, 1, 1, 1, CpuUtil::CpuIds{}, false, false, nullptr};
+    WorkGroupManager manager(config);
+    std::vector<FakeDriverQueue*> queues;
+    for (int version = 1; version <= 2; ++version) {
+        auto wg = std::make_shared<WorkGroup>(
+                create_twg(133, version, "wg_queue_limit", WorkGroup::DEFAULT_MEM_POOL, 0.5));
+        manager.add_workgroup(wg);
+        auto* queue = set_fake_driver_queue(wg);
+        const auto value = version == 1 ? std::numeric_limits<int64_t>::max() - 1 : 10;
+        queue->stats[0] = {.accu_time_ns = 0, .wait_time_ns = value, .schedule_count = value};
+        queues.push_back(queue);
+    }
+    manager.update_metrics();
+    auto check_saturated = [&] {
+        for (const auto* name :
+             {"resource_group_driver_queue_level_wait_time_ns", "resource_group_driver_queue_level_schedule_count"}) {
+            auto* metric = StarRocksMetrics::instance()->metrics()->get_metric(
+                    name, MetricLabels().add("name", "wg_queue_limit").add("level", "0"));
+            ASSERT_NE(nullptr, metric);
+            EXPECT_EQ(std::to_string(std::numeric_limits<int64_t>::max()), metric->to_string());
+        }
+    };
+    check_saturated();
+    for (auto* queue : queues) queue->stats[0] = {.wait_time_ns = -1, .schedule_count = -1};
+    manager.update_metrics();
+    check_saturated();
+    // A complete wrap can make the queue's raw counters positive again; the exported total remains saturated.
+    for (auto* queue : queues) queue->stats[0] = {.wait_time_ns = 1, .schedule_count = 1};
+    manager.update_metrics();
+    check_saturated();
+    manager.destroy();
 }
 
 PARALLEL_TEST(WorkGroupManagerTest, add_workgroups_different_mem_pools) {

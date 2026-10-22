@@ -20,11 +20,26 @@
 #include <boost/locale/encoding_utf.hpp>
 
 #include "column/array_column.h"
+#include "column/column_helper.h"
 #include "column/column_viewer.h"
-#include "exprs/selected_column.h"
+#include "column/const_column.h"
 #include "column/datum.h"
+#include "exprs/selected_column.h"
 
 namespace starrocks {
+
+namespace {
+
+// The number of rows one argument spans: a constant column counts as its logical length, a selected
+// argument as the length of its selection.
+size_t input_size(const ColumnPtr& input) {
+    return input->size();
+}
+size_t input_size(const SelectedColumn& input) {
+    return input.rows == nullptr ? input.column->size() : input.rows->size();
+}
+
+} // namespace
 
 Status GinFunctions::tokenize_prepare(FunctionContext* context, FunctionContext::FunctionStateScope scope) {
     if (scope != FunctionContext::THREAD_LOCAL) {
@@ -79,7 +94,14 @@ StatusOr<ColumnPtr> GinFunctions::tokenize_impl(FunctionContext* context, const 
     }
 
     FunctionColumnViewer<TYPE_VARCHAR, Inputs> value_viewer(columns[1]);
-    size_t num_rows = value_viewer.size();
+    // ColumnViewer unwraps a constant column, so its size() is the length of the underlying data
+    // column -- always 1 for a constant -- and not the number of rows being evaluated. Tokenizing
+    // that many rows and returning an ordinary column produced a column shorter than the chunk it
+    // was appended to. Tokenize the single value and return a constant column instead, which is the
+    // contract every other function here follows through ColumnBuilder::build(is_const).
+    const bool value_is_constant = input_column(columns[1])->is_constant();
+    const size_t num_input_rows = input_size(columns[1]);
+    const size_t num_rows = value_is_constant ? std::min<size_t>(num_input_rows, 1) : num_input_rows;
 
     // Array Offset
     int offset = 0;
@@ -91,7 +113,7 @@ StatusOr<ColumnPtr> GinFunctions::tokenize_impl(FunctionContext* context, const 
 
     NullColumn::MutablePtr null_array = NullColumn::create();
 
-    for (int row = 0; row < num_rows; ++row) {
+    for (size_t row = 0; row < num_rows; ++row) {
         array_offsets->append(offset);
 
         if (value_viewer.is_null(row) || value_viewer.value(row).empty()) {
@@ -117,7 +139,14 @@ StatusOr<ColumnPtr> GinFunctions::tokenize_impl(FunctionContext* context, const 
     array_offsets->append(offset);
     auto result_array = ArrayColumn::create(NullableColumn::create(array_binary_column, NullColumn::create(offset, 0)),
                                             array_offsets);
-    return NullableColumn::create(result_array, null_array);
+    if (value_is_constant) {
+        // A constant column carries its value unwrapped, so a null one has to be built as such.
+        if (num_rows == 0 || null_array->get_data()[0] != 0) {
+            return ColumnHelper::create_const_null_column(num_input_rows);
+        }
+        return ConstColumn::create(std::move(result_array), num_input_rows);
+    }
+    return NullableColumn::create(std::move(result_array), std::move(null_array));
 }
 
 StatusOr<ColumnPtr> GinFunctions::tokenize(FunctionContext* context, const Columns& columns) {

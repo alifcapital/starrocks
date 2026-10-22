@@ -38,7 +38,7 @@ import com.starrocks.sql.optimizer.rewrite.scalar.ScalarOperatorRewriteRule;
 import com.starrocks.sql.optimizer.rewrite.scalar.SimplifiedPredicateRule;
 import com.starrocks.sql.optimizer.rule.RuleType;
 
-import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -104,8 +104,8 @@ public class PushDownPredicateProjectRule extends TransformationRule {
         // Check if the filter's predicate contains non-deterministic functions
         // If it does, don't push down the predicate below project to avoid incorrect results
         List<ScalarOperator> compoundAndPredicates = Utils.extractConjuncts(filter.getPredicate());
-        Set<ScalarOperator> pushedPredicates = new HashSet<>();
-        Set<ScalarOperator> keptPredicates = new HashSet<>();
+        Set<ScalarOperator> pushedPredicates = new LinkedHashSet<>();
+        Set<ScalarOperator> keptPredicates = new LinkedHashSet<>();
         for (var entry : project.getColumnRefMap().entrySet()) {
             if (Utils.hasNonDeterministicFunc(entry.getValue())) {
                 compoundAndPredicates.forEach(scalarOperator -> {

@@ -15,19 +15,28 @@
 package com.starrocks.alter;
 
 import com.google.api.client.util.Lists;
+import com.staros.proto.PlacementPolicy;
+import com.starrocks.catalog.ColocateRange;
+import com.starrocks.catalog.ColocateRangeMgr;
+import com.starrocks.catalog.ColocateTableIndex;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.MaterializedIndex;
 import com.starrocks.catalog.MaterializedIndex.IndexExtState;
 import com.starrocks.catalog.MaterializedIndexMeta;
+import com.starrocks.catalog.MaterializedView;
 import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.Partition;
 import com.starrocks.catalog.SchemaInfo;
 import com.starrocks.catalog.Table;
+import com.starrocks.catalog.Tablet;
 import com.starrocks.catalog.TabletInvertedIndex;
 import com.starrocks.catalog.TabletMeta;
+import com.starrocks.catalog.Tuple;
+import com.starrocks.catalog.Variant;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.common.Config;
+import com.starrocks.common.Range;
 import com.starrocks.common.util.concurrent.MarkedCountDownLatch;
 import com.starrocks.common.util.concurrent.lock.AutoCloseableLock;
 import com.starrocks.common.util.concurrent.lock.LockType;
@@ -35,10 +44,13 @@ import com.starrocks.common.util.concurrent.lock.Locker;
 import com.starrocks.lake.LakeTable;
 import com.starrocks.lake.LakeTablet;
 import com.starrocks.lake.Utils;
+import com.starrocks.persist.AlterMaterializedViewStatusLog;
+import com.starrocks.persist.EditLog;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.RunMode;
 import com.starrocks.server.WarehouseManager;
+import com.starrocks.sql.ast.AlterMaterializedViewStatusClause;
 import com.starrocks.sql.ast.AlterTableStmt;
 import com.starrocks.sql.ast.CreateDbStmt;
 import com.starrocks.sql.ast.CreateTableStmt;
@@ -46,11 +58,16 @@ import com.starrocks.sql.ast.expression.Expr;
 import com.starrocks.sql.plan.ExecPlan;
 import com.starrocks.task.AgentBatchTask;
 import com.starrocks.task.AlterReplicaTask;
+import com.starrocks.task.CreateReplicaTask;
 import com.starrocks.thrift.TAlterTabletReqV2;
+import com.starrocks.thrift.TCreateTabletReq;
 import com.starrocks.thrift.TTabletSchema;
 import com.starrocks.transaction.TransactionState;
+import com.starrocks.type.IntegerType;
 import com.starrocks.utframe.MockedWarehouseManager;
+import com.starrocks.utframe.StarRocksAssert;
 import com.starrocks.utframe.UtFrameUtils;
+import mockit.Invocation;
 import mockit.Mock;
 import mockit.MockUp;
 import org.junit.jupiter.api.AfterEach;
@@ -71,6 +88,7 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 
 public class LakeTableSchemaChangeJobTest {
     private static final int NUM_BUCKETS = 4;
@@ -1007,5 +1025,175 @@ public class LakeTableSchemaChangeJobTest {
             Thread.sleep(100);
         }
         return job;
+    }
+
+    /**
+     * Shadow tablets copy their origin tablets' ranges. With lake_enable_tablet_creation_optimization the
+     * job created them from one partition-shared version-1 object, which carries a single range, so every
+     * shadow tablet after the first got the first one's range.
+     */
+    @Test
+    public void testRangeTableShadowTabletsGetTheirOwnRanges() throws Exception {
+        boolean oldOptimization = Config.lake_enable_tablet_creation_optimization;
+        boolean oldRangeDistribution = Config.enable_range_distribution;
+        boolean oldFastSchemaEvolution = Config.enable_fast_schema_evolution_in_share_data_mode;
+        Config.lake_enable_tablet_creation_optimization = true;
+        Config.enable_range_distribution = true;
+        // Fast schema evolution would turn the type change into a metadata-only job.
+        Config.enable_fast_schema_evolution_in_share_data_mode = false;
+        try {
+            LakeTable anchor = createTable(connectContext, "CREATE TABLE r_anchor (k1 INT, k2 INT, v INT) "
+                    + "DUPLICATE KEY(k1, k2) ORDER BY (k1, k2) "
+                    + "PROPERTIES('replication_num' = '1', 'file_bundling' = 'false', "
+                    + "'colocate_with' = 'g_shadow_range:k1')");
+            ColocateTableIndex colocateTableIndex = GlobalStateMgr.getCurrentState().getColocateTableIndex();
+            long grpId = colocateTableIndex.getGroup(anchor.getId()).grpId;
+            ColocateRangeMgr rangeMgr = colocateTableIndex.getColocateRangeMgr();
+            long firstShardGroupId = rangeMgr.getColocateRanges(grpId).get(0).getShardGroupId();
+            long secondShardGroupId = GlobalStateMgr.getCurrentState().getStarOSAgent().createShardGroup(
+                    db.getId(), anchor.getId(), 0L, 0L, PlacementPolicy.PACK);
+            Tuple b100 = new Tuple(Arrays.asList(Variant.of(IntegerType.INT, "100")));
+            rangeMgr.setColocateRanges(grpId, Arrays.asList(
+                    new ColocateRange(Range.lt(b100), firstShardGroupId),
+                    new ColocateRange(Range.ge(b100), secondShardGroupId)));
+
+            LakeTable rangeTable = createTable(connectContext, "CREATE TABLE r1 (k1 INT, k2 INT, v INT) "
+                    + "DUPLICATE KEY(k1, k2) ORDER BY (k1, k2) "
+                    + "PROPERTIES('replication_num' = '1', 'file_bundling' = 'false', "
+                    + "'colocate_with' = 'g_shadow_range:k1')");
+            Assertions.assertTrue(rangeTable.isRangeDistribution());
+            Assertions.assertEquals(2, rangeTable.getPartitions().iterator().next().getDefaultPhysicalPartition()
+                    .getLatestBaseIndex().getTablets().size());
+
+            List<CreateReplicaTask> built = new ArrayList<>();
+            new MockUp<CreateReplicaTask.Builder>() {
+                @Mock
+                public CreateReplicaTask build(Invocation inv) {
+                    CreateReplicaTask task = inv.proceed();
+                    built.add(task);
+                    return task;
+                }
+            };
+
+            // A value-column type change rewrites data, so it runs as a LakeTableSchemaChangeJob.
+            alterTable(connectContext, "ALTER TABLE r1 MODIFY COLUMN v BIGINT");
+            LakeTableSchemaChangeJob job = getAlterJob(rangeTable);
+            job.runPendingJob();
+
+            List<CreateReplicaTask> shadowTasks = built.stream()
+                    .filter(task -> task.getTableId() == rangeTable.getId())
+                    .collect(Collectors.toList());
+            List<Tablet> shadowTablets = rangeTable.getPartitions().iterator().next().getDefaultPhysicalPartition()
+                    .getLatestMaterializedIndices(MaterializedIndex.IndexExtState.ALL).stream()
+                    .filter(index -> index.getState() == MaterializedIndex.IndexState.SHADOW)
+                    .flatMap(index -> index.getTablets().stream())
+                    .collect(Collectors.toList());
+            Assertions.assertEquals(2, shadowTablets.size());
+            Assertions.assertEquals(2, shadowTasks.size(), "every shadow tablet must get its own create task");
+            for (Tablet shadowTablet : shadowTablets) {
+                TCreateTabletReq request = shadowTasks.stream()
+                        .filter(t -> t.getTabletId() == shadowTablet.getId())
+                        .findFirst()
+                        .orElseThrow(() -> new AssertionError("no create task for " + shadowTablet.getId()))
+                        .toThrift();
+                Assertions.assertEquals(shadowTablet.getRange().toThrift(), request.getRange());
+                Assertions.assertFalse(request.isEnable_tablet_creation_optimization());
+            }
+        } finally {
+            Config.lake_enable_tablet_creation_optimization = oldOptimization;
+            Config.enable_range_distribution = oldRangeDistribution;
+            Config.enable_fast_schema_evolution_in_share_data_mode = oldFastSchemaEvolution;
+        }
+    }
+    /**
+     * A schema change of a lake table that modifies a column its MVs read inactivates every one of them, in any
+     * database, and the MVs above them, and journals each inactivation with the clear of the version map: a
+     * follower and the next leader see the MVs inactive too.
+     */
+    @Test
+    public void testFinishedJobInactivatesAndJournalsRelatedMvs() throws Exception {
+        String otherDb = DB_NAME + "_mv";
+        GlobalStateMgr.getCurrentState().getLocalMetastore().createDb(otherDb);
+        // The column change has to go through this job rather than a fast schema evolution.
+        boolean oldFastSchemaEvolution = Config.enable_fast_schema_evolution_in_share_data_mode;
+        Config.enable_fast_schema_evolution_in_share_data_mode = false;
+        try {
+            createTable(connectContext, "CREATE TABLE t_mv_base(c0 INT, c1 INT) duplicate key(c0) " +
+                    "distributed by hash(c0) buckets " + NUM_BUCKETS);
+            StarRocksAssert starRocksAssert = new StarRocksAssert(connectContext);
+            String mvProps = "DISTRIBUTED BY HASH(c0) BUCKETS 1 REFRESH DEFERRED MANUAL ";
+            starRocksAssert.withMaterializedView("CREATE MATERIALIZED VIEW " + DB_NAME + ".mv_same1 " + mvProps +
+                    "AS SELECT c0, c1 FROM " + DB_NAME + ".t_mv_base");
+            starRocksAssert.withMaterializedView("CREATE MATERIALIZED VIEW " + DB_NAME + ".mv_same2 " + mvProps +
+                    "AS SELECT c0, c1 FROM " + DB_NAME + ".t_mv_base");
+            starRocksAssert.withMaterializedView("CREATE MATERIALIZED VIEW " + otherDb + ".mv_other " + mvProps +
+                    "AS SELECT c0, c1 FROM " + DB_NAME + ".t_mv_base");
+            starRocksAssert.withMaterializedView("CREATE MATERIALIZED VIEW " + otherDb + ".mv_above " + mvProps +
+                    "AS SELECT c0, c1 FROM " + DB_NAME + ".mv_same1");
+            List<MaterializedView> mvs = new ArrayList<>();
+            for (String name : List.of(DB_NAME + ".mv_same1", DB_NAME + ".mv_same2", otherDb + ".mv_other",
+                    otherDb + ".mv_above")) {
+                String[] parts = name.split("\\.");
+                MaterializedView mv = (MaterializedView) GlobalStateMgr.getCurrentState().getLocalMetastore()
+                        .getTable(parts[0], parts[1]);
+                Assertions.assertTrue(mv.isActive());
+                mvs.add(mv);
+            }
+
+            LakeTable baseTable = (LakeTable) GlobalStateMgr.getCurrentState().getLocalMetastore()
+                    .getTable(DB_NAME, "t_mv_base");
+            alterTable(connectContext, "ALTER TABLE t_mv_base MODIFY COLUMN c1 BIGINT");
+            LakeTableSchemaChangeJob schemaChangeJob = getAlterJob(baseTable);
+            new MockUp<LakeTableSchemaChangeJob>() {
+                @Mock
+                public void sendAgentTask(AgentBatchTask batchTask) {
+                    batchTask.getAllTasks().forEach(t -> t.setFinished(true));
+                }
+            };
+            new MockUp<AlterJobV2>() {
+                @Mock
+                public boolean publishVersion() {
+                    return true;
+                }
+            };
+            List<AlterMaterializedViewStatusLog> journaled = new ArrayList<>();
+            new MockUp<EditLog>() {
+                @Mock
+                public void logAlterMvStatus(Invocation invocation, AlterMaterializedViewStatusLog log) {
+                    journaled.add(log);
+                    invocation.proceed();
+                }
+            };
+
+            schemaChangeJob.runPendingJob();
+            schemaChangeJob.runWaitingTxnJob();
+            schemaChangeJob.runRunningJob();
+            Assertions.assertEquals(AlterJobV2.JobState.FINISHED_REWRITING, schemaChangeJob.getJobState());
+            long deadlineMs = System.currentTimeMillis() + 60000;
+            while (schemaChangeJob.getJobState() != AlterJobV2.JobState.FINISHED) {
+                Assertions.assertTrue(System.currentTimeMillis() < deadlineMs, "the schema change never finished");
+                schemaChangeJob.runFinishedRewritingJob();
+                Thread.sleep(10);
+            }
+
+            for (MaterializedView mv : mvs) {
+                Assertions.assertFalse(mv.isActive(), mv.getName() + " is still active");
+                AlterMaterializedViewStatusLog log = journaled.stream()
+                        .filter(l -> l.getTableId() == mv.getId())
+                        .findFirst()
+                        .orElseThrow(() -> new AssertionError("the inactivation of " + mv.getName()
+                                + " was not journaled"));
+                Assertions.assertEquals(AlterMaterializedViewStatusClause.INACTIVE, log.getStatus());
+                Assertions.assertTrue(log.isClearVersionMap());
+
+                // What a follower replays.
+                mv.setActive();
+                GlobalStateMgr.getCurrentState().getAlterJobMgr().replayAlterMaterializedViewStatus(log);
+                Assertions.assertFalse(mv.isActive());
+            }
+        } finally {
+            Config.enable_fast_schema_evolution_in_share_data_mode = oldFastSchemaEvolution;
+            GlobalStateMgr.getCurrentState().getLocalMetastore().dropDb(connectContext, otherDb, true);
+        }
     }
 }

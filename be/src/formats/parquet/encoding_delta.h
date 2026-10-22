@@ -24,6 +24,7 @@
 #include "common/status.h"
 #include "formats/parquet/encoding.h"
 #include "formats/parquet/utils.h"
+#include "runtime/current_thread.h"
 #include "simd/delta_decode.h"
 #include "util/bit_stream_utils.h"
 #include "util/slice.h"
@@ -632,7 +633,7 @@ public:
             down_cast<NullableColumn*>(dst)->null_column_raw_ptr()->append_default(count);
         }
         auto* binary_column = ColumnHelper::get_binary_column(dst);
-        binary_column->append_continuous_strings(slice_buffer_.data(), count);
+        TRY_CATCH_BAD_ALLOC(binary_column->append_continuous_strings(slice_buffer_.data(), count));
         return Status::OK();
     }
 
@@ -927,7 +928,7 @@ public:
             down_cast<NullableColumn*>(dst)->null_column_raw_ptr()->append_default(count);
         }
         auto* binary_column = ColumnHelper::get_binary_column(dst);
-        binary_column->append_continuous_strings(slice_buffer_.data(), count);
+        TRY_CATCH_BAD_ALLOC(binary_column->append_continuous_strings(slice_buffer_.data(), count));
         return Status::OK();
     }
 

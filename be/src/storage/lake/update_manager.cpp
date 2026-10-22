@@ -27,6 +27,7 @@
 #include "storage/lake/local_pk_index_manager.h"
 #include "storage/lake/location_provider.h"
 #include "storage/lake/meta_file.h"
+#include "storage/lake/pk_index_utils.h"
 #include "storage/lake/rowset.h"
 #include "storage/lake/tablet.h"
 #include "storage/lake/tablet_reshard_helper.h"
@@ -63,9 +64,7 @@ UpdateManager::UpdateManager(std::shared_ptr<LocationProvider> location_provider
           _location_provider(std::move(location_provider)),
           _pk_index_shards(config::pk_index_map_shard_size) {
     _update_mem_tracker = mem_tracker;
-    const int64_t update_mem_limit = _update_mem_tracker->limit();
-    const int64_t preload_mem_limit =
-            update_mem_limit * std::max(std::min(100, config::lake_pk_preload_memory_limit_percent), 0) / 100;
+    const int64_t preload_mem_limit = _calc_preload_mem_limit();
     _update_state_mem_tracker =
             std::make_unique<MemTracker>(preload_mem_limit, "lake_rowset_update_state", mem_tracker);
     _index_cache_mem_tracker = std::make_unique<MemTracker>(-1, "lake_index_cache", mem_tracker);
@@ -74,11 +73,9 @@ UpdateManager::UpdateManager(std::shared_ptr<LocationProvider> location_provider
     _index_cache.set_mem_tracker(_index_cache_mem_tracker.get());
     _update_state_cache.set_mem_tracker(_update_state_mem_tracker.get());
 
-    _index_cache.set_capacity(update_mem_limit);
+    _block_cache = std::make_unique<PersistentIndexBlockCache>(mem_tracker, _calc_block_cache_mem_limit());
 
-    const int64_t block_cache_mem_limit =
-            update_mem_limit * std::max(std::min(100, config::lake_pk_index_block_cache_limit_percent), 0) / 100;
-    _block_cache = std::make_unique<PersistentIndexBlockCache>(mem_tracker, block_cache_mem_limit);
+    refresh_mem_limits();
 }
 
 UpdateManager::~UpdateManager() {
@@ -94,6 +91,18 @@ inline std::string cache_key(uint32_t tablet_id, int64_t txn_id) {
 PersistentIndexBlockCache::PersistentIndexBlockCache(MemTracker* mem_tracker, int64_t cache_limit)
         : _cache(new_lru_cache(cache_limit)) {
     _mem_tracker = std::make_unique<MemTracker>(cache_limit, "lake_persistent_index_block_cache", mem_tracker);
+}
+
+void PersistentIndexBlockCache::set_capacity(int64_t cache_limit) {
+    {
+        // Config-update callbacks run outside the registry lock, so serialize the paired writes to keep the
+        // tracker limit and the cache capacity consistent across concurrent resizes. Use a dedicated lock so
+        // that shrinking, which frees the evicted blocks, does not block update_memory_usage() on publish.
+        std::lock_guard<std::mutex> lg(_capacity_mutex);
+        _mem_tracker->set_limit(cache_limit);
+        _cache->set_capacity(cache_limit);
+    }
+    update_memory_usage();
 }
 
 void PersistentIndexBlockCache::update_memory_usage() {
@@ -180,6 +189,10 @@ StatusOr<IndexEntry*> UpdateManager::prepare_primary_index(
         _index_cache.remove(index_entry);
         std::string msg = strings::Substitute("prepare_primary_index: load primary index failed: $0", st.to_string());
         LOG(ERROR) << msg;
+        // Keep a memory limit failure recognizable: publish_version shrinks the index cache on it.
+        if (st.is_mem_limit_exceeded()) {
+            return Status::MemoryLimitExceeded(msg);
+        }
         return Status::InternalError(msg);
     }
     _block_cache->update_memory_usage();
@@ -428,18 +441,6 @@ Status UpdateManager::publish_primary_key_tablet(const TxnLogPB_OpWrite& op_writ
     // Plan how del files interleave with segments (see DelInterleavePlan / build_del_interleave_plan).
     DelInterleavePlan del_plan =
             build_del_interleave_plan(op_write, rowset_id, assigned_global_segments, max_segment_id, del_rebuild_rssid);
-    // Apply one del file's erase into the index with its own rssid, recording shadowed rows in
-    // `new_deletes`. Called at the interleave point (right after the segment it follows) so the
-    // upsert/delete order within this transaction is preserved.
-    auto apply_one_del = [&](uint32_t del_id) -> Status {
-        RETURN_IF_ERROR(state.load_delete(del_id, params));
-        DCHECK(state.deletes(del_id) != nullptr);
-        RETURN_IF_ERROR(index.erase(metadata, *state.deletes(del_id), &new_deletes, del_plan.del_rssids[del_id]));
-        _index_cache.update_object_size(index_entry, index.memory_usage());
-        state.release_delete(del_id);
-        del_plan.del_applied[del_id] = true;
-        return Status::OK();
-    };
     // When too many sst files, we need to compact them early.
     int32_t current_fileset_start_idx = index.current_fileset_index();
     AsyncCompactCBPtr async_compact_cb;
@@ -568,7 +569,10 @@ Status UpdateManager::publish_primary_key_tablet(const TxnLogPB_OpWrite& op_writ
             if (auto it = del_plan.dels_after_segment.find(global_segment_id);
                 it != del_plan.dels_after_segment.end()) {
                 for (uint32_t del_id : it->second) {
-                    RETURN_IF_ERROR(apply_one_del(del_id));
+                    RETURN_IF_ERROR(
+                            _do_delete(del_id, del_plan.del_rssids[del_id], params, state, index, &new_deletes));
+                    _index_cache.update_object_size(index_entry, index.memory_usage());
+                    del_plan.del_applied[del_id] = true;
                 }
             }
             if (async_compact_cb) {
@@ -605,7 +609,9 @@ Status UpdateManager::publish_primary_key_tablet(const TxnLogPB_OpWrite& op_writ
         if (del_plan.del_applied[del_id]) {
             continue;
         }
-        RETURN_IF_ERROR(apply_one_del(del_id));
+        RETURN_IF_ERROR(_do_delete(del_id, del_plan.del_rssids[del_id], params, state, index, &new_deletes));
+        _index_cache.update_object_size(index_entry, index.memory_usage());
+        del_plan.del_applied[del_id] = true;
     }
 
     _block_cache->update_memory_usage();
@@ -1155,6 +1161,30 @@ Status UpdateManager::_do_update(uint32_t rowset_id, int32_t upsert_idx, const S
     return Status::OK();
 }
 
+// Apply one del file to the primary index and collect the rows it shadows. Large del files written by a
+// current BE carry a pre-built tombstone sstable, which bulk_erase ingests directly; small del files and
+// pre-upgrade txn logs fall back to the memtable erase path.
+Status UpdateManager::_do_delete(uint32_t del_id, uint32_t del_rssid, const RowsetUpdateStateParams& params,
+                                 RowsetUpdateState& state, LakePrimaryIndex& index, DeletesMap* new_deletes) {
+    TRACE_COUNTER_SCOPE_LATENCY_US("do_delete_latency_us");
+    RETURN_IF_ERROR(state.load_delete(del_id, params));
+    DCHECK(state.deletes(del_id) != nullptr);
+
+    const auto& op_write = params.op_write;
+    const bool has_prebuilt_del_sst = op_write.del_ssts_size() == op_write.dels_meta_size() &&
+                                      op_write.del_sst_ranges_size() == op_write.dels_meta_size() &&
+                                      !op_write.del_ssts(del_id).name().empty();
+    if (has_prebuilt_del_sst) {
+        RETURN_IF_ERROR(index.bulk_erase(params.metadata, *state.deletes(del_id), new_deletes, del_rssid,
+                                         op_write.del_ssts(del_id), op_write.del_sst_ranges(del_id),
+                                         params.metadata->version()));
+    } else {
+        RETURN_IF_ERROR(index.erase(params.metadata, *state.deletes(del_id), new_deletes, del_rssid));
+    }
+    state.release_delete(del_id);
+    return Status::OK();
+}
+
 // Handles condition-based merge for a single chunk of primary keys during parallel publish.
 // This function is invoked concurrently for different chunks to compare condition column values
 // between new and existing rows, deciding which version should be retained.
@@ -1467,8 +1497,8 @@ Status UpdateManager::_do_update_with_condition(const RowsetUpdateStateParams& p
     // is a safe lower bound for the per-segment count: if the whole rowset is under the
     // threshold, every segment is too.
     std::unique_ptr<ThreadPoolToken> token;
-    if (config::enable_pk_index_parallel_execution &&
-        params.op_write.rowset().num_rows() >= config::pk_index_parallel_execution_min_rows) {
+    const size_t min_rows_per_task = get_pk_index_parallel_execution_min_rows();
+    if (config::enable_pk_index_parallel_execution && params.op_write.rowset().num_rows() >= min_rows_per_task) {
         token = ExecEnv::GetInstance()->pk_index_execution_thread_pool()->new_token(
                 ThreadPool::ExecutionMode::CONCURRENT);
     }
@@ -1988,22 +2018,22 @@ void UpdateManager::expire_cache() {
     }
 }
 
-void UpdateManager::evict_cache(int64_t memory_urgent_level, int64_t memory_high_level) {
-    int64_t capacity = _index_cache.capacity();
-    int64_t size = _index_cache.size();
-    int64_t memory_urgent = capacity * memory_urgent_level / 100;
-    int64_t memory_high = capacity * memory_high_level / 100;
-
-    if (size > memory_urgent) {
-        _index_cache.try_evict(memory_urgent);
+void UpdateManager::evict_cache(int32_t percent) {
+    percent = std::max(std::min(100, percent), 0);
+    // Divide first: an unlimited update memory tracker leaves the capacity at SIZE_MAX.
+    const size_t target = _index_cache.capacity() / 100 * percent;
+    const size_t orig_size = _index_cache.size();
+    if (orig_size <= target) {
+        return;
     }
-
-    size = _index_cache.size();
-    if (size > memory_high) {
-        int64_t target_memory = std::max((size * 9 / 10), memory_high);
-        _index_cache.try_evict(target_memory);
+    _index_cache.try_evict(target);
+    const size_t size = _index_cache.size();
+    if (size < orig_size) {
+        // Every publish can trim the cache, so log at most once a second.
+        LOG_EVERY_T(INFO, 1) << "lake primary index cache evicted to " << percent << "% of capacity "
+                             << PrettyPrinter::print_bytes(_index_cache.capacity()) << ": "
+                             << PrettyPrinter::print_bytes(orig_size) << " -> " << PrettyPrinter::print_bytes(size);
     }
-    return;
 }
 
 size_t UpdateManager::get_rowset_num_deletes(int64_t tablet_id, int64_t version, const RowsetMetadataPB& rowset_meta) {
@@ -2297,6 +2327,32 @@ int64_t UpdateManager::get_primary_index_data_version(int64_t tablet_id) {
         return version;
     }
     return 0;
+}
+
+int64_t UpdateManager::_calc_preload_mem_limit() const {
+    const int32_t preload_mem_percent = std::max(std::min(100, config::lake_pk_preload_memory_limit_percent), 0);
+    return _update_mem_tracker->limit() * preload_mem_percent / 100;
+}
+
+int64_t UpdateManager::_calc_block_cache_mem_limit() const {
+    const int32_t block_cache_mem_percent = std::max(std::min(100, config::lake_pk_index_block_cache_limit_percent), 0);
+    return _update_mem_tracker->limit() * block_cache_mem_percent / 100;
+}
+
+void UpdateManager::refresh_block_cache_mem_limit() {
+    _block_cache->set_capacity(_calc_block_cache_mem_limit());
+}
+
+void UpdateManager::refresh_preload_mem_limit() {
+    const int64_t preload_mem_limit = _calc_preload_mem_limit();
+    _update_state_mem_tracker->set_limit(preload_mem_limit);
+    _compaction_state_mem_tracker->set_limit(preload_mem_limit);
+}
+
+void UpdateManager::refresh_mem_limits() {
+    refresh_preload_mem_limit();
+    _index_cache.set_capacity(_update_mem_tracker->limit());
+    refresh_block_cache_mem_limit();
 }
 
 void UpdateManager::_print_memory_stats() {

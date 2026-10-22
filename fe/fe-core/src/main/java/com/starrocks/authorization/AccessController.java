@@ -17,6 +17,7 @@ package com.starrocks.authorization;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.Function;
+import com.starrocks.catalog.Table;
 import com.starrocks.catalog.TableName;
 import com.starrocks.catalog.UserIdentity;
 import com.starrocks.qe.ConnectContext;
@@ -200,6 +201,25 @@ public interface AccessController {
 
     default Expr getRowAccessPolicy(ConnectContext currentUser, TableName tableName) {
         return null;
+    }
+
+    /**
+     * Whether a row access or column masking policy may apply to {@code tableName}, answered without asking the
+     * catalog. The planner resolves an external table before the meta lock is taken when this says yes, so that the
+     * tables its policies read can be locked; a controller that serves policies must not say no for a table it may
+     * have one for. The default matches the default lookups above, which have none.
+     */
+    default boolean mayHavePolicy(ConnectContext context, TableName tableName) {
+        return false;
+    }
+
+    /**
+     * Called by the unlocked analysis pre-pass for each external table it resolved, before the meta lock is
+     * taken. A controller whose {@link #getColumnMaskingPolicy} / {@link #getRowAccessPolicy} would otherwise
+     * ask the catalog again -- under the lock, since those run during analysis -- can do that asking here. Must
+     * not change the outcome of either lookup, nor throw: anything it cannot do is left to them.
+     */
+    default void preResolvePolicyTarget(ConnectContext context, TableName tableName, Table table) {
     }
 
     default void checkWarehouseAction(ConnectContext context, String name, PrivilegeType privilegeType)

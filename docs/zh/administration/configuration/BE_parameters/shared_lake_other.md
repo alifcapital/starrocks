@@ -83,6 +83,33 @@ SELECT * FROM information_schema.be_configs [WHERE NAME LIKE "%<name_pattern>%"]
 - 描述：存算分离集群 Compaction 任务在远程 FS 读 I/O 阶段的 Buffer 大小。默认值为 1MB。您可以适当增大该配置项取值以加速 Compaction 任务。
 - 引入版本：v3.2.3
 
+### lake_dump_tablet_metadata_per_request_memory_limit_bytes
+
+- 默认值：268435456
+- 类型：Long
+- 单位：Bytes
+- 是否动态：是
+- 描述：CN 同步处理单个 `/api/cloudnative/dump_tablet_metadata` 请求时的受跟踪内存预算。该预算使用标准 MemTracker 统计粒度，并非精确到字节的硬上限。该限制覆盖元数据检查、敏感字段脱敏和 JSON 序列化，但不包含 CN 元数据缓存中已存在的元数据，也不包含异步 HTTP 输出缓冲区。每个请求使用其被接纳时读取到的配置值。如果该值小于或等于 `0`，新请求将以 fail-closed 方式被拒绝。
+- 引入版本：v4.1.7
+
+### lake_dump_tablet_metadata_per_request_json_size_limit_bytes
+
+- 默认值：33554432
+- 类型：Long
+- 单位：Bytes
+- 是否动态：是
+- 描述：单个 `/api/cloudnative/dump_tablet_metadata` 请求完整 JSON 响应的最大字节数。响应交给 HTTP 输出缓冲区之前会检查该限制。每个请求使用其被接纳时读取到的配置值。如果该值小于或等于 `0`，新请求将以 fail-closed 方式被拒绝。
+- 引入版本：v4.1.7
+
+### lake_dump_tablet_metadata_max_concurrency
+
+- 默认值：1
+- 类型：Int
+- 单位：请求
+- 是否动态：是
+- 描述：单个 CN 上可同时接纳的 `/api/cloudnative/dump_tablet_metadata` 请求数上限。请求在其 HTTP request 被释放之前一直占用一个并发名额。调大配置会立即影响新请求；调小配置不会取消已接纳的请求，在活跃请求数降到新上限以下之前会拒绝新请求。如果该值小于或等于 `0`，新请求将以 fail-closed 方式被拒绝。
+- 引入版本：v4.1.7
+
 ### lake_enable_del_file_crc_check
 
 - 默认值：true
@@ -119,13 +146,22 @@ SELECT * FROM information_schema.be_configs [WHERE NAME LIKE "%<name_pattern>%"]
 - 描述：存算分离集群下，主键表 Compaction 任务中允许的最大输入 Rowset 数量。该参数默认值自 v3.2.4 和 v3.1.10 版本开始从 `5` 变更为 `1000`，并自 v3.3.1 和 v3.2.9 版本开始变更为 `500`。存算分离集群中的主键表在开启 Sized-tiered Compaction 策略后 (即设置 `enable_pk_size_tiered_compaction_strategy` 为 `true`)，无需通过限制每次 Compaction 的 Rowset 个数来降低写放大，因此调大该值。
 - 引入版本：v3.1.8, v3.2.3
 
+### lake_pk_compaction_base_enable_delete_trigger
+
+- 默认值：false
+- 类型：Boolean
+- 单位：-
+- 是否动态：是
+- 描述：存算分离集群下，主键表 Tablet 的删除量达到 `lake_pk_compaction_base_delete_ratio_threshold` 或 `lake_pk_compaction_base_delete_rows_threshold` 时，是否自动从 Cumulative Compaction 切换到 Base Compaction。默认关闭，因为 `lake_pk_compaction_base_delete_rows_threshold` 是绝对行数：在已有数据持续被更新或删除的大表上，Tablet 每次 Base Compaction 之后很快又会达到该值，而每次 Base Compaction 最多重写 Tablet 中 `update_compaction_ratio_threshold`（默认 0.5）比例的数据。手动执行 `ALTER TABLE ... COMPACT` 时，无论该参数如何设置都会执行 Base Compaction。
+- 引入版本：v4.1.7
+
 ### lake_pk_compaction_base_delete_ratio_threshold
 
 - 默认值：0.5
 - 类型：Double
 - 单位：-
 - 是否动态：是
-- 描述：存算分离集群下，将主键表 Tablet 从 Cumulative Compaction（Size-tiered 小文件合并）切换到 Base Compaction 的两个触发条件之一。Base Compaction 会重写带删除的 Rowset（删除行数多的优先），物理清除被删除的行并缩小其 Delete Vector。当 Tablet 的整体删除比例（各 Rowset 的 `sum(num_dels) / sum(num_rows)`）达到该值、其累计删除行数达到 `lake_pk_compaction_base_delete_rows_threshold`、或手动执行 `ALTER TABLE ... COMPACT` 强制 Base Compaction 时触发。将两个阈值都调至足够大可关闭自动触发。
+- 描述：存算分离集群下，将主键表 Tablet 从 Cumulative Compaction（Size-tiered 小文件合并）切换到 Base Compaction 的两个触发条件之一。Base Compaction 会重写带删除的 Rowset（删除行数多的优先），物理清除被删除的行并缩小其 Delete Vector。`lake_pk_compaction_base_enable_delete_trigger` 为 `true` 时，当 Tablet 的整体删除比例（各 Rowset 的 `sum(num_dels) / sum(num_rows)`）达到该值、或其累计删除行数达到 `lake_pk_compaction_base_delete_rows_threshold` 时触发。手动执行 `ALTER TABLE ... COMPACT` 时，无论这些参数如何设置都会强制执行 Base Compaction。
 - 引入版本：v4.1.4
 
 ### lake_pk_compaction_base_delete_rows_threshold
@@ -134,7 +170,7 @@ SELECT * FROM information_schema.be_configs [WHERE NAME LIKE "%<name_pattern>%"]
 - 类型：Int
 - 单位：-
 - 是否动态：是
-- 描述：存算分离集群下主键表 Base Compaction 的两个触发条件之一（参见 `lake_pk_compaction_base_delete_ratio_threshold`）。当 Tablet 的累计删除行数（各 Rowset 的 `sum(num_dels)`）达到该值时触发 Base Compaction。该绝对数量触发条件是对比例触发条件的补充：在高频更新/删除的表上，Delete Vector 会膨胀、空间被浪费，但整体删除比例可能因大量存活行的稀释而偏低，仅靠比例触发条件不会触发。调大该值可降低 Base Compaction 频率，调小则可更早回收 Delete Vector。
+- 描述：存算分离集群下主键表 Base Compaction 的两个触发条件之一（参见 `lake_pk_compaction_base_delete_ratio_threshold`）。`lake_pk_compaction_base_enable_delete_trigger` 为 `true` 时，当 Tablet 的累计删除行数（各 Rowset 的 `sum(num_dels)`）达到该值时触发 Base Compaction。该绝对数量触发条件是对比例触发条件的补充：在高频更新/删除的表上，Delete Vector 会膨胀、空间被浪费，但整体删除比例可能因大量存活行的稀释而偏低，仅靠比例触发条件不会触发。调大该值可降低 Base Compaction 频率，调小则可更早回收 Delete Vector。
 - 引入版本：v4.1.4
 
 ### lake_put_txn_log_timeout_guard_ms
@@ -195,6 +231,33 @@ SELECT * FROM information_schema.be_configs [WHERE NAME LIKE "%<name_pattern>%"]
 - 是否动态：否
 - 描述：BE 范围内的客户端缓存为每个远程主机保留的最大缓存 client 实例数。提高此值可以减少重连和 stub 创建开销，但会增加内存和文件描述符使用；降低它则节省资源但可能增加连接 churn。该值在启动时读取，运行时无法更改。目前一个共享设置控制所有客户端缓存类型；将来可能会引入每种缓存的独立配置。
 - 引入版本：v3.2.0
+
+### primary_key_index_memory_high_percent
+
+- 默认值: 75
+- 类型: Int
+- 单位: -
+- 是否动态配置: 是
+- 描述: 存算分离集群中，后台线程定期回收主键索引缓存的目标，以缓存容量的百分比表示。缓存容量即更新相关内存的上限（参见 `update_memory_limit_percent`）。占用超过该比例时，按最近最少使用的顺序淘汰未在使用的主键索引，直至占用回落到该比例以内。正在使用的主键索引不会被淘汰。建议设置为小于 `primary_key_index_memory_urgent_percent` 的值。
+- 引入版本: -
+
+### primary_key_index_memory_middle_percent
+
+- 默认值: 50
+- 类型: Int
+- 单位: -
+- 是否动态配置: 是
+- 描述: 存算分离集群中主键表 Publish 因超出内存限制而失败时，主键索引缓存的回收目标，以缓存容量的百分比表示。此时系统会淘汰未在使用的主键索引，直至占用回落到该比例以内，为重试的 Publish 腾出内存。建议设置为小于 `primary_key_index_memory_high_percent` 的值。
+- 引入版本: -
+
+### primary_key_index_memory_urgent_percent
+
+- 默认值: 85
+- 类型: Int
+- 单位: -
+- 是否动态配置: 是
+- 描述: 存算分离集群中主键索引缓存的占用上限，以缓存容量的百分比表示。每次 Publish 结束后（因超出内存限制而失败的除外）都会检查一次：占用超过该比例时，按最近最少使用的顺序淘汰未在使用的主键索引，直至占用回落到该比例以内。缓存增长快于后台线程将其回收到 `primary_key_index_memory_high_percent` 的速度时，由该配置项兜底，因此应设置为大于该配置项的值。
+- 引入版本: -
 
 ### starlet_filesystem_instance_cache_capacity
 
@@ -542,11 +605,29 @@ SELECT * FROM information_schema.be_configs [WHERE NAME LIKE "%<name_pattern>%"]
 
 ### lake_replication_file_copy_threads
 
-- 默认值：0
+- 默认值：16
 - 类型：Int
 - 单位：-
 - 是否动态：否
-- 描述：存算分离跨集群复制（lake-to-lake replication）逐文件拷贝所使用的独立线程池大小。`0` 表示 `cpu_cores * 4`（与 `replication_threads` 默认语义一致）；负值表示 `-value * cpu_cores`。该线程池与 agent 任务的 `replicate_snapshot` 线程池刻意区分，目的是让外层任务可以安全地通过 `ThreadPoolToken::wait()` 等待逐文件拷贝子任务，而不触发线程池自死锁保护。该线程池在启动时一次性创建，无运行时 resize 入口，调整大小需重启 CN。
+- 描述：存算分离跨集群复制（lake-to-lake replication）逐文件拷贝所使用的 CN 全局独立线程池大小。默认值用于限制并发拷贝任务及其读缓冲区，不随 CPU 核数增长。`0` 表示 `cpu_cores * 4`；负值表示 `-value * cpu_cores`。该线程池在启动时一次性创建，调整大小需重启 CN。
+- 引入版本：v4.1.2
+
+### lake_replication_max_parallel_files_per_tablet
+
+- 默认值：4
+- 类型：Int
+- 单位：-
+- 是否动态：是
+- 描述：存算分离跨集群复制（lake-to-lake replication）中单个 tablet 同时拷贝文件的最大数量。所有 tablet 共用 CN 全局的 `lake_replication_file_copy_threads` 线程池，因此该配置可防止单个 tablet 独占线程池。配置值小于或等于 `1` 时，单个 tablet 内的文件串行拷贝。
+- 引入版本：v4.1.4
+
+### lake_replication_parallel_copy_min_file_count
+
+- 默认值：2
+- 类型：Int
+- 单位：-
+- 是否动态：是
+- 描述：存算分离跨集群复制（lake-to-lake replication）中，启用单个 tablet 内文件并行拷贝所需的最小文件数。设置为 `0` 时关闭独立文件拷贝线程池，由调用复制任务直接执行文件拷贝。
 - 引入版本：v4.1.2
 
 ### lake_service_max_concurrency

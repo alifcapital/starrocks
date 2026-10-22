@@ -180,8 +180,10 @@ public class McvExpressionPlanningTest {
         forms.add(new Form("NOT(c LIKE OR col)", i -> not(Utils.compoundOr(new LikePredicateOperator(
                 LikePredicateOperator.LikeType.LIKE, C, text(five(i) + "%")), col())),
                 new double[] {540000, 540000, 540000, 540000}));
+        // Every part repeats d = 3 and is estimated over the rows that the earlier parts kept. We expect the repeat to keep
+        // all of those rows and not to divide them by the NDV of d again, so the OR stays within the 60000 rows of d = 3.
         forms.add(new Form("x=p AND col", i -> Utils.compoundAnd(compare(BinaryType.EQ, left(5), text(five(i))), col()),
-                new double[] {229332.36, 516736.05, 20000, 60000}));
+                new double[] {50851.47, 59999.99, 20000, 60000}));
         forms.add(new Form("x=p", i -> compare(BinaryType.EQ, left(5), text(five(i))),
                 new double[] {200000, 600000, 200000, 600000}));
         StringBuilder measured = new StringBuilder();

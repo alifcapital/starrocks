@@ -348,12 +348,14 @@ final class CastStatisticsDerivation {
     // is not a value of the type.
     static ConstantOperator toConstant(double value, Type type) {
         try {
-            if (type.isDate()) {
-                return ConstantOperator.createDate(Utils.getDatetimeFromLong((long) Math.floor(value))
-                        .toLocalDate().atStartOfDay());
-            }
-            if (type.isDatetime()) {
-                return ConstantOperator.createDatetime(Utils.getDatetimeFromLong((long) Math.floor(value)));
+            if (type.isDate() || type.isDatetime()) {
+                Optional<LocalDateTime> dateTime = Utils.getDatetimeFromStatistic(Math.floor(value));
+                if (dateTime.isEmpty()) {
+                    return null;
+                }
+                return type.isDate()
+                        ? ConstantOperator.createDate(dateTime.get().toLocalDate().atStartOfDay())
+                        : ConstantOperator.createDatetime(dateTime.get());
             }
             if (type.isFixedPointType()) {
                 if (value != Math.rint(value)) {

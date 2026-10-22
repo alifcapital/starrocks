@@ -52,7 +52,6 @@ import com.starrocks.sql.optimizer.operator.logical.LogicalValuesOperator;
 import com.starrocks.sql.optimizer.operator.pattern.Pattern;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
-import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.rule.RuleType;
 import com.starrocks.sql.optimizer.transformer.SqlToScalarOperatorTranslator;
@@ -62,6 +61,7 @@ import org.apache.commons.lang3.NotImplementedException;
 
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -166,16 +166,20 @@ public class PartitionColumnMinMaxRewriteRule extends TransformationRule {
         OlapTable table = (OlapTable) scanOperator.getTable();
         try {
             OptExpression result = null;
+            // Each form declines (null) when it cannot prove its answer, and the next, cheaper-to-prove
+            // form is tried instead.
             if (checkRewritePartitionValues(aggregationOperator, scanOperator, table)) {
                 result = optimizeWithListPartitionValues(aggregationOperator, table);
             } else if (checkRewriteDayRangePartition(aggregationOperator, scanOperator, table)) {
                 result = optimizeWithPartitionValues(aggregationOperator, table,
                         Pair.create(this::getRangePartitionValue, this::getRangePartitionValue));
-            } else {
+            }
+            if (result == null) {
                 Pair<Boolean, Boolean> minMax = checkMinMax(aggregationOperator);
                 if (checkPartitionPrune(aggregationOperator, scanOperator, table)) {
                     result = optimizeWithPartitionPrune(input, aggregationOperator, scanOperator, table, minMax);
-                } else if (checkRewriteTopN(aggregationOperator, scanOperator, table, minMax)) {
+                }
+                if (result == null && checkRewriteTopN(aggregationOperator, scanOperator, table, minMax)) {
                     result = optimizeWithTopN(input, aggregationOperator, scanOperator, table, minMax);
                 }
             }
@@ -244,7 +248,13 @@ public class PartitionColumnMinMaxRewriteRule extends TransformationRule {
         Set<Long> nullPartitions = partitionInfo.getNullValuePartitions();
 
         Set<Long> prunedSet = new LinkedHashSet<>();
-        if (hasMinMax.first) {
+        if (partitionInfo.isListPartition()) {
+            ListPartitionInfo listInfo = (ListPartitionInfo) partitionInfo;
+            if ((hasMinMax.first && !selectListPartitions(listInfo, nonEmptyPartitionIds, true, prunedSet))
+                    || (hasMinMax.second && !selectListPartitions(listInfo, nonEmptyPartitionIds, false, prunedSet))) {
+                return null;
+            }
+        } else if (hasMinMax.first) {
             List<Long> sorted = partitionInfo.getSortedPartitions(true);
             sorted.retainAll(nonEmptyPartitionIds);
             if (CollectionUtils.isEmpty(sorted)) {
@@ -259,7 +269,7 @@ public class PartitionColumnMinMaxRewriteRule extends TransformationRule {
             }
         }
 
-        if (hasMinMax.second) {
+        if (!partitionInfo.isListPartition() && hasMinMax.second) {
             List<Long> sorted = partitionInfo.getSortedPartitions(false);
             sorted.retainAll(nonEmptyPartitionIds);
             if (CollectionUtils.isEmpty(sorted)) {
@@ -305,62 +315,8 @@ public class PartitionColumnMinMaxRewriteRule extends TransformationRule {
     }
 
     /**
-     * For a list partition, the partition values are the values a partition allows, not the values it holds. We
-     * evaluate MIN/MAX from them only when every nonempty partition allows a single value.
+     * For List Partition, we can evaluate the MAX(pt) based on the partition values
      */
-    private OptExpression optimizeWithListPartitionValues(LogicalAggregationOperator aggregationOperator,
-                                                          OlapTable table) {
-        PartitionInfo partitionInfo = table.getPartitionInfo();
-        if (partitionInfo.getClass() != ListPartitionInfo.class || partitionInfo.getPartitionColumnsSize() != 1) {
-            return null;
-        }
-        List<Partition> nonEmpty = table.getNonEmptyPartitions();
-        if (nonEmpty.isEmpty()) {
-            return null;
-        }
-        Map<Long, List<LiteralExpr>> partitionValues = ((ListPartitionInfo) partitionInfo).getLiteralExprValues();
-        LiteralExpr min = null;
-        LiteralExpr max = null;
-        for (Partition partition : nonEmpty) {
-            List<LiteralExpr> values = partitionValues.get(partition.getId());
-            // Allowed values prove an actual extremum only when the nonempty partition has a single value.
-            if (values == null || values.size() != 1 || values.get(0) == null) {
-                return null;
-            }
-            LiteralExpr value = values.get(0);
-            if (value.isConstantNull()) {
-                continue;
-            }
-            if (min == null || value.compareTo(min) < 0) {
-                min = value;
-            }
-            if (max == null || value.compareTo(max) > 0) {
-                max = value;
-            }
-        }
-
-        List<ScalarOperator> valueRow = Lists.newArrayList();
-        List<ColumnRefOperator> columns = Lists.newArrayList();
-        for (var entry : aggregationOperator.getAggregations().entrySet()) {
-            LiteralExpr value;
-            if (isMin(entry.getValue())) {
-                value = min;
-            } else if (isMax(entry.getValue())) {
-                value = max;
-            } else {
-                continue;
-            }
-            valueRow.add(value == null ? ConstantOperator.createNull(entry.getKey().getType())
-                    : SqlToScalarOperatorTranslator.translate(value));
-            columns.add(entry.getKey());
-        }
-        LogicalValuesOperator values = new LogicalValuesOperator.Builder()
-                .setRows(List.of(valueRow))
-                .setColumnRefSet(columns)
-                .build();
-        return OptExpression.create(values);
-    }
-
     private OptExpression optimizeWithPartitionValues(LogicalAggregationOperator aggregationOperator,
                                                       OlapTable table,
                                                       Pair<BiFunction<Long, PartitionInfo, ScalarOperator>,
@@ -422,6 +378,115 @@ public class PartitionColumnMinMaxRewriteRule extends TransformationRule {
         List<Long> sorted = partitionInfo.getSortedPartitions(asc);
         sorted.retainAll(nonEmptyPartitionIds);
         return sorted.isEmpty() ? null : sorted.get(0);
+    }
+
+    /**
+     * For LIST partitions, MIN/MAX(pt) is a partition's value only when that partition holds exactly one value. A
+     * partition's definition says which values its rows may take, not which ones they do: with
+     * {@code p VALUES IN ('5', '6')} holding only 5, MAX is 5, not 6. Returns null when the extreme partition is
+     * not single-valued, so the caller falls back to scanning.
+     */
+    private OptExpression optimizeWithListPartitionValues(LogicalAggregationOperator aggregationOperator,
+                                                          OlapTable table) {
+        ListPartitionInfo partitionInfo = (ListPartitionInfo) table.getPartitionInfo();
+        Set<Long> nonEmptyPartitionIds =
+                table.getNonEmptyPartitions().stream().map(Partition::getId).collect(Collectors.toSet());
+
+        List<ScalarOperator> valueRow = Lists.newArrayList();
+        List<ColumnRefOperator> columns = Lists.newArrayList();
+        for (var entry : aggregationOperator.getAggregations().entrySet()) {
+            boolean min = isMin(entry.getValue());
+            if (!min && !isMax(entry.getValue())) {
+                continue;
+            }
+            Long extreme = null;
+            LiteralExpr extremeValue = null;
+            for (long partitionId : nonEmptyPartitionIds) {
+                List<LiteralExpr> values = nonNullListValues(partitionInfo, partitionId);
+                if (values == null) {
+                    return null;
+                }
+                // A partition of NULL only never decides MIN or MAX.
+                if (values.isEmpty()) {
+                    continue;
+                }
+                LiteralExpr value = min ? Collections.min(values) : Collections.max(values);
+                int order = extremeValue == null ? 0 : value.compareTo(extremeValue);
+                if (extremeValue == null || (min ? order < 0 : order > 0)) {
+                    extreme = partitionId;
+                    extremeValue = value;
+                }
+            }
+            // The partition must hold that one value and nothing else, NULL included: rows of only NULL in a
+            // partition IN (NULL, '7') leave the answer to some other partition.
+            if (extreme == null || partitionInfo.getLiteralExprValues().get(extreme).size() != 1) {
+                return null;
+            }
+            valueRow.add(SqlToScalarOperatorTranslator.translate(extremeValue));
+            columns.add(entry.getKey());
+        }
+        LogicalValuesOperator values = new LogicalValuesOperator.Builder()
+                .setRows(List.of(valueRow))
+                .setColumnRefSet(columns)
+                .build();
+        return OptExpression.create(values);
+    }
+
+    /**
+     * The LIST partitions MIN (asc) or MAX (desc) of the partition column can come from, added to {@code selected}.
+     *
+     * <p>The partition with the most extreme value is not enough on its own: its rows may hold only its least
+     * extreme value, and another partition's values can lie between, as with p1 IN ('1', '10') holding 1 and
+     * p2 IN ('5', '6') holding 5. For MAX, a partition without NULL in its definition guarantees a row at or above
+     * its smallest value, so every partition whose largest value is below the best such guarantee can be skipped.
+     * MIN is the mirror image. Returns false when the values cannot be read, and nothing should be pruned.
+     */
+    private boolean selectListPartitions(ListPartitionInfo partitionInfo, Set<Long> nonEmptyPartitionIds,
+                                         boolean min, Set<Long> selected) {
+        List<Pair<Long, List<LiteralExpr>>> candidates = new ArrayList<>();
+        for (long partitionId : nonEmptyPartitionIds) {
+            List<LiteralExpr> values = nonNullListValues(partitionInfo, partitionId);
+            if (values == null) {
+                return false;
+            }
+            if (!values.isEmpty()) {
+                candidates.add(Pair.create(partitionId, values));
+            }
+        }
+        if (candidates.isEmpty()) {
+            return false;
+        }
+        // Most extreme first: by smallest value for MIN, by largest value for MAX.
+        candidates.sort((x, y) -> min
+                ? Collections.min(x.second).compareTo(Collections.min(y.second))
+                : Collections.max(y.second).compareTo(Collections.max(x.second)));
+
+        LiteralExpr bound = null;
+        for (Pair<Long, List<LiteralExpr>> candidate : candidates) {
+            LiteralExpr reach = min ? Collections.min(candidate.second) : Collections.max(candidate.second);
+            if (bound != null && (min ? reach.compareTo(bound) > 0 : reach.compareTo(bound) < 0)) {
+                break;
+            }
+            selected.add(candidate.first);
+            boolean mayHoldOnlyNull = partitionInfo.getLiteralExprValues().get(candidate.first).size()
+                    != candidate.second.size();
+            if (!mayHoldOnlyNull) {
+                LiteralExpr guaranteed = min ? Collections.max(candidate.second) : Collections.min(candidate.second);
+                if (bound == null || (min ? guaranteed.compareTo(bound) < 0 : guaranteed.compareTo(bound) > 0)) {
+                    bound = guaranteed;
+                }
+            }
+        }
+        return true;
+    }
+
+    /** A single-column LIST partition's non-NULL values, or null when they are not available as literals. */
+    private static List<LiteralExpr> nonNullListValues(ListPartitionInfo partitionInfo, long partitionId) {
+        List<LiteralExpr> values = partitionInfo.getLiteralExprValues().get(partitionId);
+        if (values == null) {
+            return null;
+        }
+        return values.stream().filter(v -> !v.isConstantNull()).collect(Collectors.toList());
     }
 
     public ScalarOperator getRangePartitionValue(long partitionId, PartitionInfo partitionInfo) {

@@ -18,6 +18,7 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Stopwatch;
 import com.google.common.base.Strings;
+import com.google.common.base.Throwables;
 import com.google.common.collect.Lists;
 import com.google.common.util.concurrent.Uninterruptibles;
 import com.starrocks.catalog.Database;
@@ -95,6 +96,13 @@ public class MVTaskRunProcessor extends BaseTaskRunProcessor implements MVRefres
     public MVTaskRunProcessor() {
     }
 
+    @Override
+    public void postTaskRun(TaskRunContext context) {
+        // Older MV tasks may still have an ANALYZE statement persisted in postRun. MV refresh no longer
+        // generates this statement, so do not let the generic task post-processor execute the legacy value.
+        // Statistics maintenance for refreshed partitions is handled by the insert-overwrite path.
+    }
+
     @VisibleForTesting
     @Override
     public TaskRunContext prepare(TaskRunContext context) throws Exception {
@@ -114,6 +122,13 @@ public class MVTaskRunProcessor extends BaseTaskRunProcessor implements MVRefres
         this.mv = (MaterializedView) table;
         // refresh mv until mv is reloaded.
         mv.waitForReloaded();
+        // Before the run reads the MV's definition or any base table: a reset after this point means the data
+        // this run writes may come from a definition that no longer holds. A later batch of a refresh job takes the
+        // epoch its first run read instead, so that a reset since the job started fences it too: the job's partition
+        // range and freshness baseline were decided before that reset.
+        String inheritedEpoch = properties.get(TaskRun.MV_VERSION_MAP_RESET_EPOCH);
+        final long versionMapResetEpoch = inheritedEpoch != null
+                ? Long.parseLong(inheritedEpoch) : mv.getVersionMapResetEpoch();
         this.logger = MVTraceUtils.getLogger(mv, MVTaskRunProcessor.class);
 
         // NOTE: mvId is set in Task's properties when creating
@@ -150,6 +165,7 @@ public class MVTaskRunProcessor extends BaseTaskRunProcessor implements MVRefres
 
         // prepare mv context
         this.mvTaskRunContext = new MvTaskRunContext(context);
+        this.mvTaskRunContext.setVersionMapResetEpoch(versionMapResetEpoch);
         // prepare partition ttl number
         int partitionTTLNumber = mv.getTableProperty().getPartitionTTLNumber();
         this.mvTaskRunContext.setPartitionTTLNumber(partitionTTLNumber);
@@ -308,8 +324,16 @@ public class MVTaskRunProcessor extends BaseTaskRunProcessor implements MVRefres
                         lockFailedTimes, DebugUtil.getStackTrace(e));
                 lastException = e;
             } catch (Throwable e) {
-                refreshFailedTimes += 1;
-                logger.warn("refresh mv failed at {}th time: {}", refreshFailedTimes, e);
+                // A lock timeout raised where a checked exception cannot propagate arrives wrapped, e.g. from the
+                // non-ref base table check of change detection; it is still lock contention.
+                if (Throwables.getCausalChain(e).stream().anyMatch(t -> t instanceof LockTimeoutException)) {
+                    lockFailedTimes += 1;
+                    logger.warn("refresh mv failed at {}th time because try lock failed: {}",
+                            lockFailedTimes, DebugUtil.getStackTrace(e));
+                } else {
+                    refreshFailedTimes += 1;
+                    logger.warn("refresh mv failed at {}th time: {}", refreshFailedTimes, e);
+                }
                 lastException = e;
             }
 

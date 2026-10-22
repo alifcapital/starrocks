@@ -22,6 +22,7 @@
 #include "common/config.h"
 #include "gutil/strings/fastmem.h"
 #include "runtime/current_thread.h"
+#include "util/raw_container.h"
 #include "util/runtime_profile.h"
 
 namespace starrocks::io {
@@ -732,8 +733,12 @@ Status SharedBufferedInputStream::get_bytes(const uint8_t** buffer, size_t offse
         // buffer. We fear that a read which fails leaves the reserved capacity behind, and then the next read serves
         // bytes that no one wrote. So we read into a vector of our own and give it to the buffer only after the read
         // succeeds. A failed read leaves the buffer unloaded, and the next read of the range loads it again.
+        // A range larger than max_buffer_size gets a shared buffer of its own size, so sb.size is
+        // the size of a whole column chunk and is bounded only by the file. check_mem_limit() above
+        // only reports a tracker that is already over its limit; it does not account for the bytes
+        // about to be allocated here, which is what TRY_CATCH_BAD_ALLOC adds.
         std::vector<uint8_t> loaded;
-        loaded.reserve(sb.size);
+        TRY_CATCH_BAD_ALLOC(loaded.reserve(sb.size));
         RETURN_IF_ERROR(_stream->read_at_fully(sb.offset, loaded.data(), sb.size));
         sb.buffer.swap(loaded);
         _shared_io_count += 1;

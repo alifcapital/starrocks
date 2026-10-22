@@ -37,7 +37,6 @@ class SegmentPKIterator;
 class LakePrimaryIndex : public PrimaryIndex {
 public:
     LakePrimaryIndex() : PrimaryIndex() {}
-    LakePrimaryIndex(const Schema& pk_schema) : PrimaryIndex(pk_schema) {}
     ~LakePrimaryIndex() override;
 
     // Fetch all primary keys from the tablet associated with this index into memory
@@ -98,6 +97,14 @@ public:
     // |del_rssid| rssid stamped for these deletes (rowset_id + op_offset). Used as the rebuild point
     // (cloud native index only).
     Status erase(const TabletMetadataPtr& metadata, const Column& pks, DeletesMap* deletes, uint32_t del_rssid);
+
+    // Same as erase(), but applies the delete by ingesting the tombstone sstable |del_sst_meta| that was
+    // pre-built at import time, instead of accumulating every tombstone in the memtable and triggering
+    // additional flushes. |pks| still supplies the keys reverse-looked-up to build the delete vector; that
+    // lookup can run in parallel in both erase paths. Cloud-native index only.
+    Status bulk_erase(const TabletMetadataPtr& metadata, const Column& pks, DeletesMap* deletes, uint32_t del_rssid,
+                      const FileMetaPB& del_sst_meta, const PersistentIndexSstableRangePB& del_sst_range,
+                      int64_t version);
 
     int32_t current_fileset_index() const;
 

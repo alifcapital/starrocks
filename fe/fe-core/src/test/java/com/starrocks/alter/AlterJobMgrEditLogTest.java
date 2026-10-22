@@ -14,15 +14,20 @@
 
 package com.starrocks.alter;
 
+import com.google.gson.JsonObject;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.MockedLocalMetaStore;
 import com.starrocks.catalog.Table;
 import com.starrocks.catalog.View;
+import com.starrocks.common.MaterializedViewExceptions;
+import com.starrocks.persist.AlterMaterializedViewStatusLog;
 import com.starrocks.persist.AlterViewInfo;
 import com.starrocks.persist.EditLog;
 import com.starrocks.persist.OperationType;
+import com.starrocks.persist.gson.GsonUtils;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.sql.ast.AlterMaterializedViewStatusClause;
 import com.starrocks.transaction.MockedMetadataMgr;
 import com.starrocks.utframe.UtFrameUtils;
 import org.junit.jupiter.api.AfterEach;
@@ -32,10 +37,15 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
 
 public class AlterJobMgrEditLogTest {
     private AlterJobMgr alterJobMgr;
@@ -284,6 +294,72 @@ public class AlterJobMgrEditLogTest {
         View unchangedView = (View) localMetastore.getTable("test_db", "test_view");
         Assertions.assertNotNull(unchangedView);
         Assertions.assertEquals(originalViewDef, unchangedView.getInlineViewDef());
+    }
+
+    @Test
+    public void testAlterViewDroppedBeforeTheLockFails() throws Exception {
+        localMetastore.createDb("test_db");
+        Database db = localMetastore.getDb("test_db");
+        List<Column> columns = new ArrayList<>();
+        columns.add(new Column("c1", com.starrocks.type.IntegerType.INT));
+        View view = new View(1L, "test_view", columns);
+        view.setInlineViewDefWithSqlMode("SELECT 1 as c1", 0L);
+        db.registerTableUnlocked(view);
+
+        // A DROP VIEW lands right after alterView looked the view up and before it takes the lock.
+        MockedLocalMetaStore spyMetastore = spy(localMetastore);
+        doAnswer(invocation -> {
+            Table table = (Table) invocation.callRealMethod();
+            db.unRegisterTableUnlocked(table);
+            return table;
+        }).when(spyMetastore).getTable(eq(db.getId()), eq(view.getId()));
+        GlobalStateMgr.getCurrentState().setLocalMetastore(spyMetastore);
+
+        EditLog spyEditLog = spy(GlobalStateMgr.getCurrentState().getEditLog());
+        GlobalStateMgr.getCurrentState().setEditLog(spyEditLog);
+
+        AlterViewInfo alterViewInfo = new AlterViewInfo(db.getId(), view.getId(), "SELECT 2 as c1", columns, 0L,
+                "test comment", "SELECT 2 as c1");
+        AlterJobException exception = Assertions.assertThrows(AlterJobException.class,
+                () -> alterJobMgr.alterView(alterViewInfo));
+        Assertions.assertTrue(exception.getMessage().contains("was dropped concurrently"), exception.getMessage());
+        verify(spyEditLog, never()).logModifyViewDef(any(AlterViewInfo.class), any());
+        Assertions.assertEquals("SELECT 1 as c1", view.getInlineViewDef());
+    }
+
+    @Test
+    public void testReplayAlterViewOfADroppedViewIsSkipped() throws Exception {
+        localMetastore.createDb("test_db");
+        Database db = localMetastore.getDb("test_db");
+        List<Column> columns = new ArrayList<>();
+        columns.add(new Column("c1", com.starrocks.type.IntegerType.INT));
+        AlterViewInfo alterViewInfo = new AlterViewInfo(db.getId(), 12345L, "SELECT 2 as c1", columns, 0L,
+                "test comment", "SELECT 2 as c1");
+        Assertions.assertDoesNotThrow(() -> alterJobMgr.replayAlterView(alterViewInfo));
+
+        AlterViewInfo infoOfDroppedDb = new AlterViewInfo(db.getId() + 1000, 12345L, "SELECT 2 as c1", columns, 0L,
+                "test comment", "SELECT 2 as c1");
+        Assertions.assertDoesNotThrow(() -> alterJobMgr.replayAlterView(infoOfDroppedDb));
+    }
+
+    private static AlterMaterializedViewStatusLog withoutClearVersionMap(AlterMaterializedViewStatusLog log) {
+        JsonObject json = GsonUtils.GSON.toJsonTree(log).getAsJsonObject();
+        json.remove("clearVersionMap");
+        return GsonUtils.GSON.fromJson(json, AlterMaterializedViewStatusLog.class);
+    }
+
+    // Entries written before the version map clear was journaled carry no flag.
+    @Test
+    public void testReplayClearOfInactiveEntriesWithAndWithoutTheFlag() {
+        String columnChanged = MaterializedViewExceptions.inactiveReasonForColumnChanged(Set.of("c1"));
+        AlterMaterializedViewStatusLog inactive = new AlterMaterializedViewStatusLog(96000L, 96001L,
+                AlterMaterializedViewStatusClause.INACTIVE, columnChanged);
+        Assertions.assertFalse(AlterJobMgr.clearsOnInactivation(inactive, columnChanged));
+        inactive.setClearVersionMap(true);
+        Assertions.assertTrue(AlterJobMgr.clearsOnInactivation(inactive, columnChanged));
+        AlterMaterializedViewStatusLog oldInactive = withoutClearVersionMap(inactive);
+        Assertions.assertTrue(AlterJobMgr.clearsOnInactivation(oldInactive, columnChanged));
+        Assertions.assertFalse(AlterJobMgr.clearsOnInactivation(oldInactive, AlterJobMgr.MANUAL_INACTIVE_MV_REASON));
     }
 }
 

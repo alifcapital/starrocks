@@ -47,8 +47,12 @@ public final class ConvertTzStatisticUtils {
 
     public static OptionalDouble convertTzDateTime(double dateTimeStat, ConstantOperator fromTz,
                                                    ConstantOperator toTz) {
+        Optional<LocalDateTime> dateTime = Utils.getDatetimeFromStatistic(dateTimeStat);
+        if (dateTime.isEmpty()) {
+            return OptionalDouble.empty();
+        }
         try {
-            ConstantOperator input = ConstantOperator.createDatetime(Utils.getDatetimeFromLong((long) dateTimeStat));
+            ConstantOperator input = ConstantOperator.createDatetime(dateTime.get());
             ConstantOperator converted = ScalarOperatorFunctions.convert_tz(input, fromTz, toTz);
             return OptionalDouble.of(Utils.getLongFromDateTime(converted.getDatetime()));
         } catch (DateTimeException | SemanticException e) {
@@ -68,11 +72,17 @@ public final class ConvertTzStatisticUtils {
      */
     public static boolean hasTimezoneOffsetDrift(double minValue, double maxValue,
                                                  ConstantOperator fromTz, ConstantOperator toTz) {
+        Optional<LocalDateTime> minDateTime = Utils.getDatetimeFromStatistic(minValue);
+        Optional<LocalDateTime> maxDateTime = Utils.getDatetimeFromStatistic(maxValue);
+        if (minDateTime.isEmpty() || maxDateTime.isEmpty()) {
+            // A bound outside the DATETIME domain: keep the widened range.
+            return true;
+        }
         try {
             ZoneId from = ZoneId.of(fromTz.getVarchar());
             ZoneId to = ZoneId.of(toTz.getVarchar());
-            LocalDateTime minLocal = Utils.getDatetimeFromLong((long) minValue);
-            LocalDateTime maxLocal = Utils.getDatetimeFromLong((long) maxValue);
+            LocalDateTime minLocal = minDateTime.get();
+            LocalDateTime maxLocal = maxDateTime.get();
             if (isSkippedOrAmbiguous(from, minLocal) || isSkippedOrAmbiguous(from, maxLocal)) {
                 return true;
             }

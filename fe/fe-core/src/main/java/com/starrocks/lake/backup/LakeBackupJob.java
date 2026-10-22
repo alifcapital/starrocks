@@ -48,8 +48,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 
 public class LakeBackupJob extends BackupJob {
     private static final Logger LOG = LogManager.getLogger(LakeBackupJob.class);
@@ -212,8 +210,9 @@ public class LakeBackupJob extends BackupJob {
             Iterator<Map.Entry<SnapshotInfo, Future<LockTabletMetadataResponse>>> entries = lockResponses.entrySet().iterator();
             while (entries.hasNext()) {
                 Map.Entry<SnapshotInfo, Future<LockTabletMetadataResponse>> entry = entries.next();
-                getLockTabletMetadataResponse(entry);
-                entries.remove();
+                if (getLockTabletMetadataResponse(entry)) {
+                    entries.remove();
+                }
             }
             super.waitingAllSnapshotsFinished();
         } catch (InterruptedException | ExecutionException e) {
@@ -221,16 +220,17 @@ public class LakeBackupJob extends BackupJob {
         }
     }
 
-    private void getLockTabletMetadataResponse(Map.Entry<SnapshotInfo, Future<LockTabletMetadataResponse>> entry)
+    // Returns false while the response has not arrived; the entry is then kept and polled again on the next run.
+    private boolean getLockTabletMetadataResponse(Map.Entry<SnapshotInfo, Future<LockTabletMetadataResponse>> entry)
             throws ExecutionException, InterruptedException {
-        try {
-            entry.getValue().get(1000, TimeUnit.MILLISECONDS);
-            unfinishedTaskIds.remove(entry.getKey().getTabletId());
-            taskProgress.remove(entry.getKey().getTabletId());
-            snapshotInfos.put(entry.getKey().getTabletId(), entry.getKey());
-        } catch (TimeoutException e) {
-            // Maybe there are many snapshot tasks, so we ignore timeout exception.
+        if (!entry.getValue().isDone()) {
+            return false;
         }
+        entry.getValue().get();
+        unfinishedTaskIds.remove(entry.getKey().getTabletId());
+        taskProgress.remove(entry.getKey().getTabletId());
+        snapshotInfos.put(entry.getKey().getTabletId(), entry.getKey());
+        return true;
     }
 
     @Override
@@ -240,8 +240,9 @@ public class LakeBackupJob extends BackupJob {
             Iterator<Map.Entry<Long, Future<UploadSnapshotsResponse>>> entries = uploadResponses.entrySet().iterator();
             while (entries.hasNext()) {
                 Map.Entry<Long, Future<UploadSnapshotsResponse>> entry = entries.next();
-                getUploadSnapshotsResponse(entry);
-                entries.remove();
+                if (getUploadSnapshotsResponse(entry)) {
+                    entries.remove();
+                }
             }
             super.waitingAllUploadingFinished();
         } catch (InterruptedException | ExecutionException e) {
@@ -249,13 +250,14 @@ public class LakeBackupJob extends BackupJob {
         }
     }
 
-    private void getUploadSnapshotsResponse(Map.Entry<Long, Future<UploadSnapshotsResponse>> entry)
+    // Returns false while the response has not arrived; the entry is then kept and polled again on the next run.
+    private boolean getUploadSnapshotsResponse(Map.Entry<Long, Future<UploadSnapshotsResponse>> entry)
             throws ExecutionException, InterruptedException {
-        try {
-            entry.getValue().get(1000, TimeUnit.MILLISECONDS);
-            unfinishedTaskIds.remove(entry.getKey());
-        } catch (TimeoutException e) {
-            // Maybe there are many upload tasks, so we ignore timeout exception.
+        if (!entry.getValue().isDone()) {
+            return false;
         }
+        entry.getValue().get();
+        unfinishedTaskIds.remove(entry.getKey());
+        return true;
     }
 }

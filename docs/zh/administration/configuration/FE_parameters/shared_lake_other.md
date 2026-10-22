@@ -390,6 +390,24 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 - 描述: 集群级默认 Group Provider 列表，多个之间用逗号分隔。对使用本地认证的用户生效；从 v4.2 起，未设置自身 `group_provider` 属性的 Security Integration 也会回退到该值，此前版本在这种情况下不会查询任何 Group Provider。参见[认证用户组](../../user_privs/group_provider.md)。
 - 引入版本: v3.5
 
+### `group_provider_http_connect_timeout_ms`
+
+- 默认值: 5000
+- 类型: Int
+- 单位: 毫秒
+- 是否可变: Yes
+- 描述: `group_file_url` 为 `http://` 或 `https://` URL 的 File Group Provider 的连接超时，必须为正数。服务端在该时间内未接受连接时，CREATE 或 ALTER GROUP PROVIDER 语句失败，Group Provider 保持原有配置。若没有上限，一个永不响应的服务端不仅会卡住该语句，还会卡住每台 FE 的日志回放。
+- 引入版本: v4.2
+
+### `group_provider_http_read_timeout_ms`
+
+- 默认值: 30000
+- 类型: Int
+- 单位: 毫秒
+- 是否可变: Yes
+- 描述: `group_file_url` 为 `http://` 或 `https://` URL 的 File Group Provider 的读取超时，必须为正数。限制已建立连接的服务端最多可以静默多久，超时后读取失败；失败后的行为见 `group_provider_http_connect_timeout_ms`。
+- 引入版本: v4.2
+
 ### `hdfs_file_system_expire_seconds`
 
 - 默认值: 300
@@ -613,6 +631,15 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 - 描述:
 - 引入版本: -
 
+### `star_client_get_shard_info_batch_size`
+
+- 默认值: 1024
+- 类型: Int
+- 单位: -
+- 是否可变: Yes
+- 描述: 存算分离集群中，FE 需要一次性确定大量 tablet 所在的计算节点时（例如为大表规划查询或导入、AutoVacuum 清理分区、FE 删除 tablet），单次向 StarMgr 查询的 tablet 数量上限。超出该数量时，FE 会将查询拆分为多次请求依次发送，每次最多包含该数量的 tablet。StarMgr 处理每次请求时都持有 tablet 元数据锁，期间 StarMgr 的元数据变更以及 Follower FE 上的 StarMgr 元数据回放都会被阻塞。如果一次请求就查询大表的全部 tablet，阻塞可能长达数秒。调小该值可以缩短每次阻塞的时间，代价是请求次数增加。小于 `1` 的值按 `1` 处理。
+- 引入版本: v4.2.0
+
 ### `lake_scheduler_enable_colocate_group_sample`
 
 - 默认值: true
@@ -730,7 +757,7 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 - 类型: boolean
 - 单位: -
 - 是否可变: Yes
-- 描述: 启用后，StarRocks 在存算分离模式下优化云原生表和物化视图的 tablet 创建，通过为物理分区下的所有 tablet 创建单个共享 tablet 元数据，而不是为每个 tablet 创建不同的元数据。这减少了表创建、rollup 和 schema 变更作业期间创建的 tablet 任务和元数据/文件数量。优化仅适用于云原生表/物化视图，并与 `file_bundling` 结合（后者重用相同的优化逻辑）。注意：schema 变更和 rollup 作业明确禁用使用 `file_bundling` 的表的优化，以避免使用相同名称的文件被覆盖。谨慎启用——它改变了创建的 tablet 元数据的粒度，并可能影响副本创建和文件命名行为。
+- 描述: 启用后，StarRocks 在存算分离模式下优化云原生表和物化视图的 tablet 创建，通过为物理分区下的所有 tablet 创建单个共享 tablet 元数据，而不是为每个 tablet 创建不同的元数据。这减少了表创建、rollup 和 schema 变更作业期间创建的 tablet 任务和元数据/文件数量。优化仅适用于云原生表/物化视图，并与 `file_bundling` 结合（后者重用相同的优化逻辑）。注意：schema 变更和 rollup 作业明确禁用使用 `file_bundling` 的表的优化，以避免使用相同名称的文件被覆盖。Range 分布的表不使用该优化：这类表的每个 tablet 都有自己的键范围，元数据始终按 tablet 单独创建。谨慎启用——它改变了创建的 tablet 元数据的粒度，并可能影响副本创建和文件命名行为。
 - 引入版本: v3.3.1, v3.4.0, v3.5.0
 
 ### `lake_create_tablet_max_retries`

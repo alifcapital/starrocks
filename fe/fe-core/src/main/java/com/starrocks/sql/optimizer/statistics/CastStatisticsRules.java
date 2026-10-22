@@ -18,6 +18,9 @@ import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.type.ScalarType;
 import com.starrocks.type.Type;
 
+import java.time.LocalDateTime;
+import java.util.Optional;
+
 /**
  * What a CAST between two types does to the order of the values, as the BE computes the cast. The statistics of a
  * cast and the estimates of comparisons over it follow from this order: a cast that keeps the order maps the range
@@ -188,7 +191,8 @@ public final class CastStatisticsRules {
      */
     static double nextValue(Type type, double value) {
         if (type.isDate()) {
-            return Utils.getLongFromDateTime(Utils.getDatetimeFromLong((long) Math.floor(value)).toLocalDate()
+            Optional<LocalDateTime> day = Utils.getDatetimeFromStatistic(Math.floor(value));
+            return day.isEmpty() ? Double.NaN : Utils.getLongFromDateTime(day.get().toLocalDate()
                     .plusDays(1).atStartOfDay());
         }
         if (type.isFixedPointType()) {

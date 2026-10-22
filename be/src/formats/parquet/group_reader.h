@@ -251,6 +251,8 @@ private:
 
     // column readers for column chunk in row group
     std::unordered_map<SlotId, std::unique_ptr<ColumnReader>> _column_readers;
+    // Own the initial-default values the FixedValueColumnReaders of not existed columns point into.
+    std::vector<ColumnPtr> _not_existed_default_columns;
 
     // The provider of the stream that names the cached pages of this row group. It holds the readers of the chunks, so
     // the destructor takes it out of the stream first. Null when the page cache is not used.

@@ -530,6 +530,8 @@ Status FragmentExecutor::_prepare_exec_plan(ExecEnv* exec_env, const UnifiedExec
 
         if (scan_ranges_per_driver_seq.empty()) {
             _fragment_ctx->set_enable_cache(false);
+        } else {
+            _fragment_ctx->set_has_per_driver_scan_ranges();
         }
 
         bool should_compute_cache_key_prefix = _fragment_ctx->enable_cache() &&
@@ -818,6 +820,9 @@ Status FragmentExecutor::_prepare_pipeline_driver(ExecEnv* exec_env, const Unifi
         }
     });
 
+    // Pipeline preparation determines total_dop. Reserve the budget before allocating drivers and operators.
+    ASSIGN_OR_RETURN(auto driver_token, exec_env->driver_limiter()->try_acquire(_fragment_ctx->total_dop()));
+
     // Feed the initial (upfront) scan ranges into the footer prefetcher now that operators exist
     // and the prefetch state is installed. Incremental batches arrive later via the per-RPC append
     // path. No-op for non-connector sources or when prefetch was not installed (state == nullptr).
@@ -852,8 +857,7 @@ Status FragmentExecutor::_prepare_pipeline_driver(ExecEnv* exec_env, const Unifi
         create_adaptive_group_initialize_events(runtime_state, _wg.get(), std::move(unready_pipeline_groups));
     }
 
-    // Acquire driver token to avoid overload
-    ASSIGN_OR_RETURN(auto driver_token, exec_env->driver_limiter()->try_acquire(_fragment_ctx->total_dop()));
+    // Keep the reservation local during instantiation so cancellation cannot release it prematurely.
     _fragment_ctx->set_driver_token(std::move(driver_token));
 
     return Status::OK();

@@ -23,6 +23,7 @@ import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.Table;
 import com.starrocks.common.Config;
 import com.starrocks.common.DdlException;
+import com.starrocks.common.FeConstants;
 import com.starrocks.common.jmockit.Deencapsulation;
 import com.starrocks.connector.statistics.ConnectorColumnStatsCacheLoader;
 import com.starrocks.connector.statistics.ConnectorTableColumnKey;
@@ -55,6 +56,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class CachedStatisticStorageTest {
     public static ConnectContext connectContext;
@@ -582,5 +584,68 @@ public class CachedStatisticStorageTest {
         Assertions.assertEquals(Double.NEGATIVE_INFINITY, columnStatistic.getMinValue(), 0.001);
         Assertions.assertEquals(0, columnStatistic.getAverageRowSize(), 0.001);
         Assertions.assertEquals(0, columnStatistic.getNullsFraction(), 0.001);
+    }
+
+    @Test
+    public void testFailedNativeColumnLoadIsNotCached() throws Exception {
+        AtomicInteger queries = new AtomicInteger();
+        new MockUp<StatisticExecutor>() {
+            @Mock
+            public List<TStatisticData> queryStatisticSync(ConnectContext context, Long dbId, Long tableId,
+                                                           List<String> columnNames) {
+                if (queries.incrementAndGet() == 1) {
+                    throw new RuntimeException("transient statistics query failure");
+                }
+                return ImmutableList.of();
+            }
+        };
+        boolean enableUnitStatistics = FeConstants.enableUnitStatistics;
+        FeConstants.enableUnitStatistics = false;
+        try {
+            AsyncLoadingCache<ColumnStatsCacheKey, Optional<ColumnStatistic>> cache =
+                    Caffeine.newBuilder().executor(Runnable::run).buildAsync(new ColumnBasicStatsCacheLoader());
+            ColumnStatsCacheKey key = new ColumnStatsCacheKey(1L, "c1");
+
+            // A failed load completes exceptionally and is not cached as "no statistics".
+            Assertions.assertThrows(ExecutionException.class, () -> cache.get(key).get());
+            Assertions.assertNull(cache.synchronous().getIfPresent(key));
+
+            // The next access loads again; a column that really has no statistics is cached as empty.
+            Assertions.assertFalse(cache.get(key).get().isPresent());
+            Assertions.assertEquals(2, queries.get());
+            Assertions.assertNotNull(cache.synchronous().getIfPresent(key));
+        } finally {
+            FeConstants.enableUnitStatistics = enableUnitStatistics;
+        }
+    }
+
+    @Test
+    public void testRefreshNativeColumnStatisticsKeepsOldValueOnFailure() {
+        Database db = connectContext.getGlobalStateMgr().getLocalMetastore().getDb("test");
+        Table table = GlobalStateMgr.getCurrentState().getLocalMetastore().getTable(db.getFullName(), "t0");
+        new MockUp<StatisticExecutor>() {
+            @Mock
+            public List<TStatisticData> queryStatisticSync(ConnectContext context, Long dbId, Long tableId,
+                                                           List<String> columnNames) {
+                throw new RuntimeException("statistics query failure");
+            }
+        };
+        boolean enableUnitStatistics = FeConstants.enableUnitStatistics;
+        FeConstants.enableUnitStatistics = false;
+        try {
+            CachedStatisticStorage cachedStatisticStorage = new CachedStatisticStorage();
+            ColumnStatsCacheKey key = new ColumnStatsCacheKey(table.getId(), "v1");
+            cachedStatisticStorage.columnStatistics.synchronous()
+                    .put(key, Optional.of(ColumnStatistic.builder().setDistinctValuesCount(1).build()));
+
+            // We expect a transient statistics query failure. Dropping the value would plan with unknown statistics
+            // until the next load succeeds, so a failed refresh keeps the cached value.
+            cachedStatisticStorage.refreshColumnStatistics(table, ImmutableList.of("v1"), true);
+            Optional<ColumnStatistic> cached = cachedStatisticStorage.columnStatistics.synchronous().getIfPresent(key);
+            Assertions.assertNotNull(cached);
+            Assertions.assertEquals(1, cached.get().getDistinctValuesCount(), 0.001);
+        } finally {
+            FeConstants.enableUnitStatistics = enableUnitStatistics;
+        }
     }
 }

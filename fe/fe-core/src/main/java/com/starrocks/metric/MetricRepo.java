@@ -46,6 +46,7 @@ import com.starrocks.alter.AlterJobV2;
 import com.starrocks.alter.AlterMetricRegistry;
 import com.starrocks.alter.reshard.TabletReshardJob;
 import com.starrocks.alter.reshard.TabletReshardJobMgr;
+import com.starrocks.authorization.ranger.RangerAccessController;
 import com.starrocks.backup.AbstractJob;
 import com.starrocks.backup.BackupJob;
 import com.starrocks.backup.RestoreJob;
@@ -371,9 +372,15 @@ public final class MetricRepo {
             new MetricWithLabelGroup<>("reason",
                     () -> new LongCounterMetric("tablet_pre_split_eligibility_skipped",
                             MetricUnit.REQUESTS, "total eligibility-gate skips by reason"));
+    public static final MetricWithLabelGroup<LongCounterMetric> COUNTER_TABLET_PRE_SPLIT_DATA_TIER_FILE_SELECTION =
+            new MetricWithLabelGroup<>("mode",
+                    () -> new LongCounterMetric("tablet_pre_split_data_tier_file_selection",
+                            MetricUnit.REQUESTS,
+                            "total data-tier FILES samples by how their scanned files were chosen"));
     public static Histogram HISTO_TABLET_PRE_SPLIT_PRE_SUBMIT_WAIT_MS;
     public static Histogram HISTO_TABLET_PRE_SPLIT_POST_SUBMIT_WAIT_MS;
     public static Histogram HISTO_TABLET_PRE_SPLIT_BOUNDARIES_PLANNED;
+    public static Histogram HISTO_TABLET_PRE_SPLIT_DATA_TIER_SCANNED_BYTES_PERCENT;
 
     public static Histogram HISTO_QUERY_LATENCY;
 
@@ -468,6 +475,7 @@ public final class MetricRepo {
     public static LongCounterMetric COUNTER_THRIFT_SERVER_REJECTED_CONNECTIONS;
     public static LongCounterMetric COUNTER_THRIFT_SERVER_EXPIRED_CONNECTIONS;
     public static Histogram HISTO_THRIFT_SERVER_QUEUE_WAIT_MS;
+    public static LongCounterMetric COUNTER_THRIFT_CLIENT_RETRIES;
 
     private static final ScheduledThreadPoolExecutor METRIC_TIMER =
             ThreadPoolManager.newDaemonScheduledThreadPool(1, "Metric-Timer-Pool", true);
@@ -514,6 +522,11 @@ public final class MetricRepo {
                 "total connections the thrift server closed unserved because they waited in the pending "
                         + "queue longer than thrift_server_queue_timeout_ms");
         STARROCKS_METRIC_REGISTER.addMetric(COUNTER_THRIFT_SERVER_EXPIRED_CONNECTIONS);
+
+        COUNTER_THRIFT_CLIENT_RETRIES = new LongCounterMetric(
+                "thrift_client_retries_total", MetricUnit.REQUESTS,
+                "total requests FE thrift rpc calls resent on a reopened connection after the previous one broke");
+        STARROCKS_METRIC_REGISTER.addMetric(COUNTER_THRIFT_CLIENT_RETRIES);
 
         // 1. gauge
         // load jobs
@@ -826,6 +839,15 @@ public final class MetricRepo {
                 "encryption_key_num", MetricUnit.NOUNIT, "number of encryption keys in key manager");
         GAUGE_ENCRYPTION_KEY_NUM.setValue(0L);
         STARROCKS_METRIC_REGISTER.addMetric(GAUGE_ENCRYPTION_KEY_NUM);
+
+        // Per-FE: each FE initializes Ranger audit in its own process.
+        STARROCKS_METRIC_REGISTER.addMetric(new GaugeMetric<Long>("ranger_audit_init_failed", MetricUnit.NOUNIT,
+                "1 if this FE failed to initialize Ranger audit and writes no Ranger audit event, otherwise 0") {
+            @Override
+            public Long getValue() {
+                return RangerAccessController.isAuditInitFailed() ? 1L : 0L;
+            }
+        });
 
         GAUGE_QUERY_LATENCY_MEAN =
                 new GaugeMetricImpl<>("query_latency", MetricUnit.MILLISECONDS, "mean of query latency");
@@ -1183,6 +1205,8 @@ public final class MetricRepo {
                 MetricRegistry.name("tablet_pre_split", "post_submit_wait", "ms"));
         HISTO_TABLET_PRE_SPLIT_BOUNDARIES_PLANNED = METRIC_REGISTER.histogram(
                 MetricRegistry.name("tablet_pre_split", "boundaries_planned"));
+        HISTO_TABLET_PRE_SPLIT_DATA_TIER_SCANNED_BYTES_PERCENT = METRIC_REGISTER.histogram(
+                MetricRegistry.name("tablet_pre_split", "data_tier_scanned_bytes", "percent"));
         // Compaction score (rounded to the nearest integer) of the most recent partition that
         // triggered a lake compaction. The trigger picks partitions by *max* tablet score, so we
         // expose the max (not the average) — keeps the metric aligned with the scheduler's

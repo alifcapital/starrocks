@@ -33,6 +33,7 @@ import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.rewrite.ScalarOperatorRewriteContext;
 import com.starrocks.type.ArrayType;
 import com.starrocks.type.BooleanType;
+import com.starrocks.type.CharType;
 import com.starrocks.type.DateType;
 import com.starrocks.type.IntegerType;
 import com.starrocks.type.NullType;
@@ -45,6 +46,7 @@ import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -98,6 +100,24 @@ public class FoldConstantsRuleTest {
                 Lists.newArrayList(ConstantOperator.createVarchar("a"), ConstantOperator.createVarchar("b")), fn);
         assertEquals(ConstantOperator.createVarchar("ab"), rule.apply(concat, null));
         assertEquals(concat, new FoldConstantsRule(true).apply(concat, null));
+    }
+
+    @Test
+    public void arrayElementAdaptationPreservesFullCharValues() {
+        ArrayOperator input = new ArrayOperator(new ArrayType(VarcharType.VARCHAR), false,
+                Lists.newArrayList(ConstantOperator.createVarchar("hello world")));
+        for (boolean implicit : new boolean[] {false, true}) {
+            ScalarOperator result = rule.apply(new CastOperator(new ArrayType(new CharType(5)), input, implicit), null);
+            assertEquals("hello world", ((ConstantOperator) result.getChild(0)).getVarchar());
+        }
+    }
+
+    @Test
+    public void arrayFunctionResultAdaptationPreservesFullCharValue() {
+        ArrayOperator input = new ArrayOperator(new ArrayType(new CharType(5)), false,
+                Lists.newArrayList(ConstantOperator.createChar("hello world", new CharType(5))));
+        ScalarOperator result = rule.apply(new CallOperator("array_min", new CharType(5), List.of(input)), null);
+        assertEquals("hello world", ((ConstantOperator) result).getVarchar());
     }
 
     @Test
@@ -212,6 +232,20 @@ public class FoldConstantsRuleTest {
         // cast(96.1 as int)-> 96
         CastOperator cast8 = new CastOperator(IntegerType.INT, ConstantOperator.createDouble(96.1));
         assertEquals(ConstantOperator.createInt(96), rule.apply(cast8, null));
+    }
+
+    @Test
+    public void explicitCharCastTruncatesButAssignmentCastPreservesValue() {
+        ConstantOperator value = ConstantOperator.createBigint(1775580223839L);
+        CharType target = new CharType(10);
+        assertEquals("1775580223", ((ConstantOperator) rule.apply(new CastOperator(target, value), null)).getVarchar());
+        assertEquals("1775580223839",
+                ((ConstantOperator) rule.apply(new CastOperator(target, value, true), null)).getVarchar());
+        assertEquals(ConstantOperator.createNull(target),
+                rule.apply(new CastOperator(target, ConstantOperator.createNull(VarcharType.VARCHAR)), null));
+        CastOperator numeric = new CastOperator(IntegerType.BIGINT,
+                rule.apply(new CastOperator(target, value), null));
+        assertEquals(ConstantOperator.createBigint(1775580223L), rule.apply(numeric, null));
     }
 
     @Test
