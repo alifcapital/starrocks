@@ -1,7 +1,7 @@
 {
   "upstream": {
     "tag": "starrocks/dev-env-ubuntu:4.1-latest",
-    "image": "starrocks/dev-env-ubuntu@sha256:41effd8c1cabf853a4a1e062aba0303028d5a1da96966ff6cca32038f473dc05",
+    "image": "starrocks/dev-env-ubuntu@sha256:f6f8184d480f961beb3868b6aa5951143588dabe75838c9b854a6f249ba69e9e",
     "platforms": [
       {
         "architecture": "amd64",
