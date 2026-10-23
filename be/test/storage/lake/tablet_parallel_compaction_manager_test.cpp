@@ -5198,6 +5198,13 @@ TEST_F(TabletParallelCompactionManagerTest, test_parked_token_is_returned_at_sea
 
     _manager->cleanup_tablet(tablet_id, txn_id);
     EXPECT_EQ(1, released);
+
+    // The callback keeps the accepted contexts, which hold the callback, until the whole RPC completes. We complete
+    // the sibling, so the RPC frees them as it does in production.
+    callback->finish_task(
+            std::make_unique<CompactionTaskContext>(txn_id, tablet_id + 1, version, false, true, nullptr));
+    EXPECT_TRUE(closure.is_finished());
+    EXPECT_EQ(1, released);
 }
 
 // finish_task() can fail before it accepts the merged context (its allocations come first). The sealer
