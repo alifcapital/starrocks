@@ -86,7 +86,7 @@ public class DistributedEnvPlanWithCostTest extends DistributedEnvPlanTestBase {
                 " WHEN NOT CASE  WHEN DAYOFWEEK(l_shipdate) = 1 THEN 6  ELSE -1 END + DAYOFWEEK(l_shipdate) = 1 " +
                 "THEN l_shipdate ELSE NULL END, 3))), 2) ELSE NULL END) from lineitem";
         String plan = getCostExplain(sql);
-        assertContains(plan, "CONCAT-->[-Infinity, Infinity, 0.7037037037037036, 29.0, 442.29411764705884] ESTIMATE");
+        assertContains(plan, "CONCAT-->[-Infinity, Infinity, 0.7037037037037036, 29.0, 443.05882352941177] ESTIMATE");
     }
 
     @Test

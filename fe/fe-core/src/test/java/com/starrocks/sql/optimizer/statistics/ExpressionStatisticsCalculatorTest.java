@@ -1255,7 +1255,7 @@ public class ExpressionStatisticsCalculatorTest {
         builder.addColumnStatistic(left, leftStatistic);
         builder.addColumnStatistic(right, rightStatistic);
         columnStatistic = ExpressionStatisticCalculator.calculate(week, builder.build());
-        Assertions.assertEquals(53, columnStatistic.getDistinctValuesCount(), 0.1);
+        Assertions.assertEquals(54, columnStatistic.getDistinctValuesCount(), 0.1);
 
         min = Utils.getLongFromDateTime(DateUtils.parseStringWithDefaultHSM("2022-01-20", DateUtils.DATE_FORMATTER_UNIX));
         max = Utils.getLongFromDateTime(DateUtils.parseStringWithDefaultHSM("2023-08-01", DateUtils.DATE_FORMATTER_UNIX));

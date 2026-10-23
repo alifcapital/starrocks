@@ -1903,7 +1903,7 @@ public class ExpressionStatisticCalculator {
 
             // the range is more than one year
             if (min.plusYears(1).compareTo(max) <= 0) {
-                return 53;
+                return 54;
             } else if (min.getYear() < max.getYear()) {
                 // 54 = 53 + 1 to include startWeek itself in the count (inclusive)
                 return (54 - min.get(IsoFields.WEEK_OF_WEEK_BASED_YEAR)) + max.get(IsoFields.WEEK_OF_WEEK_BASED_YEAR);
