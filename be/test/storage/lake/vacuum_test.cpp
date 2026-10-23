@@ -43,7 +43,9 @@
 #include "util/uid_util.h"
 
 #if defined(ADDRESS_SANITIZER)
-#include <sanitizer/allocator_interface.h>
+// GCC installs no sanitizer/allocator_interface.h, while the ASAN runtime of GCC and of Clang both export this
+// function. We declare it ourselves so that the test builds with either compiler.
+extern "C" size_t __sanitizer_get_current_allocated_bytes();
 #elif STARROCKS_ENABLE_JEMALLOC_MEM_HOOK
 #include "jemalloc/jemalloc.h"
 #endif
