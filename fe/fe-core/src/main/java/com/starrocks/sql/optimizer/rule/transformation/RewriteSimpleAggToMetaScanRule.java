@@ -76,14 +76,20 @@ public class RewriteSimpleAggToMetaScanRule extends TransformationRule {
     }
 
     private List<String> calculatePartitionNames(LogicalOlapScanOperator scanOperator) {
-        Set<String> partitionNames = scanOperator.getPartitionNames() != null ?
-                new HashSet<>(scanOperator.getPartitionNames().getPartitionNames()) : new HashSet<>();
+        Set<String> partitionNames = new HashSet<>();
         List<Long> selectedPartitionIds = scanOperator.getSelectedPartitionId() != null ?
                 scanOperator.getSelectedPartitionId() : new ArrayList<>();
         Table table = scanOperator.getTable();
         for (Long selectedPartitionId : selectedPartitionIds) {
             String partitionName = table.getPartition(selectedPartitionId).getName();
             partitionNames.add(partitionName);
+        }
+        // The selected partitions are what is left of the named ones after pruning, and the scan may no longer have
+        // the predicate that pruned them. We fear that adding the named partitions back makes the meta scan read
+        // partitions that the query excludes and return a MIN/MAX of their rows, so the names are used only when
+        // no partition is selected.
+        if (partitionNames.isEmpty() && scanOperator.getPartitionNames() != null) {
+            partitionNames.addAll(scanOperator.getPartitionNames().getPartitionNames());
         }
         return new ArrayList<>(partitionNames);
     }

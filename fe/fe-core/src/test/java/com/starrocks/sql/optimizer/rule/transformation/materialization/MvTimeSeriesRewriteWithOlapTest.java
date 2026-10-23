@@ -41,6 +41,10 @@ public class MvTimeSeriesRewriteWithOlapTest extends MVTestBase {
 
         connectContext.getSessionVariable().setMaterializedViewRewriteMode("force");
         connectContext.getSessionVariable().setEnableLowCardinalityOptimize(false);
+        // These tests check which tables a plan reads. We expect a MIN/MAX over a scan without predicate to be answered
+        // from the metadata of its partitions, which changes the scan of a view into a meta scan, so the rewrite is
+        // off here and is tested on its own in testMetaScanOfAViewReadsOnlyThePartitionsTheQueryKeeps.
+        connectContext.getSessionVariable().setEnableRewriteSimpleAggToMetaScan(false);
         UtFrameUtils.mockTimelinessForAsyncMVTest(connectContext);
         UtFrameUtils.mockLogicalScanIsEmptyOutputRows(false);
 
@@ -464,6 +468,31 @@ public class MvTimeSeriesRewriteWithOlapTest extends MVTestBase {
                 PlanTestBase.assertContains(plan, "     TABLE: t0");
             }
             starRocksAssert.dropMaterializedView(mvName);
+        }
+    }
+
+    @Test
+    public void testMetaScanOfAViewReadsOnlyThePartitionsTheQueryKeeps() throws Exception {
+        // The view answers the days after 2024-01-01 and the base table answers the rest. We fear that the meta scan
+        // of a MAX over the view reads the partitions that the query excludes and returns the maximum of their rows,
+        // so it must list the partitions that the query keeps and no other.
+        connectContext.getSessionVariable().setEnableRewriteSimpleAggToMetaScan(true);
+        try {
+            starRocksAssert.withRefreshedMaterializedView("create MATERIALIZED VIEW test_mv_meta_scan\n" +
+                    "PARTITION BY (dt)\n" +
+                    "DISTRIBUTED BY RANDOM\n" +
+                    "REFRESH DEFERRED MANUAL\n" +
+                    "as select date_trunc('day', k1) as dt, max(v1) as agg0, max(v1) as agg1 " +
+                    "from t0 group by date_trunc('day', k1);");
+            String plan = getFragmentPlan("select max(v1) as agg0, max(v1) as agg1 from t0 " +
+                    "where k1 >= '2024-01-01 01:00:00'");
+            PlanTestBase.assertContains(plan, "MetaScan\n     Table: test_mv_meta_scan");
+            PlanTestBase.assertContains(plan, "p20240102_20240103");
+            PlanTestBase.assertNotContains(plan, "p00010101_20240101");
+            PlanTestBase.assertNotContains(plan, "p20240101_20240102");
+            starRocksAssert.dropMaterializedView("test_mv_meta_scan");
+        } finally {
+            connectContext.getSessionVariable().setEnableRewriteSimpleAggToMetaScan(false);
         }
     }
 
