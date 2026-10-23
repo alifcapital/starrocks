@@ -31,14 +31,23 @@ if (NOT PGO_MODE STREQUAL "OFF")
         message(FATAL_ERROR "PGO_PROFILE_DIR must be absolute and use only letters, digits, _, ., /, :, + and -")
     endif()
     if (PGO_MODE STREQUAL "GENERATE")
-        set(_pgo_flags "-fprofile-generate=${PGO_PROFILE_DIR} -fprofile-update=atomic")
+        # Atomic counters, which GCC picks for -pthread, stop vectorization and make all threads update one cache
+        # line: the training BE ran queries up to 40 times slower. Plain counters lose some updates when threads race,
+        # which the profile-use build corrects (-fprofile-correction).
+        set(_pgo_flags "-fprofile-generate=${PGO_PROFILE_DIR} -fprofile-update=single")
+        # The training binary only counts. -g does not change the generated code, so the profile fits the optimized
+        # build, and without debug information the training binary links much faster.
+        set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -g0")
+        set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -g0")
     elseif (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         file(GLOB_RECURSE _pgo_data "${PGO_PROFILE_DIR}/*.gcda")
         if (NOT _pgo_data)
             message(FATAL_ERROR "No .gcda files in PGO_PROFILE_DIR; collect and merge profiles first")
         endif()
         # Unexecuted translation units are expected. Stale/mismatching profiles remain errors.
-        set(_pgo_flags "-fprofile-use=${PGO_PROFILE_DIR} -Wno-error=missing-profile -Werror=coverage-mismatch")
+        # Production runs queries that training did not. GCC optimizes code that training never ran for size, so we
+        # keep it optimized for speed with -fprofile-partial-training.
+        set(_pgo_flags "-fprofile-use=${PGO_PROFILE_DIR} -fprofile-correction -fprofile-partial-training -Wno-error=missing-profile -Werror=coverage-mismatch")
     else()
         if (NOT EXISTS "${PGO_PROFILE_DIR}/merged.profdata")
             message(FATAL_ERROR "Missing merged.profdata; run llvm-profdata merge first")

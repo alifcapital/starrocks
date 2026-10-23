@@ -29,16 +29,20 @@ rebuild third-party dependencies. Save each binary before building the next.
 
 Use `python3 build-support/pgo.py`. Run these commands **inside the build
 container**. The source checkout must be clean, and experiment directories must
-be outside the checkout. Adjust paths and job count to the machine.
+be outside the checkout. Adjust paths and job count to the machine. The wrapper
+runs git: when the checkout is a git worktree, mount the main repository's
+`.git` into the container at the same absolute path, so the worktree's `.git`
+file resolves. The 4.1 build image sets STARROCKS_LINKER=lld; set it to bfd
+for GCC LTO.
 
 ```sh
 # Save an ordinary Release binary as the baseline first.
 ./build.sh --be -j 16
-cp be/output/lib/starrocks_be /profiles/baseline-be
+cp output/be/lib/starrocks_be /profiles/baseline-be
 
 # GCC example. For Clang set CC/CXX to the chosen LLVM installation instead.
 python3 build-support/pgo.py build generate /profiles/gcc-training --jobs 16
-cp be/output/lib/starrocks_be /profiles/training-be
+cp output/be/lib/starrocks_be /profiles/training-be
 ```
 
 The wrapper saves training.json with the revision, compiler, build arguments,
@@ -52,9 +56,24 @@ unset for this workflow.
 Replay a representative mixture of scans, joins, aggregation, JSON and spill
 with representative concurrency. Counters add overhead: training timings are
 not performance results. Include native and Iceberg paths you intend to use.
+The training BE uses plain counters (-fprofile-update=single): with atomic
+counters, which GCC picks for -pthread, loops lose vectorization and all
+threads update the same cache line, and a GCC training BE with LTO ran corpus
+queries 4 to 40 times slower than the Release BE. Plain counters lose some
+updates when threads race; the optimized build corrects that with
+-fprofile-correction. The training BE has no debug information and, with
+`--bolt`, no relocations, because both only slow down its link. GCC builds the
+optimized BE with -fprofile-partial-training, so code that training did not run
+stays optimized for speed.
+Concurrency leaves each query less memory and makes it spill more, so run the
+large queries one at a time and only small ones concurrently. Start every
+training and measured run from an empty data cache directory, so that each
+binary reads the same bytes from the same places.
 
 After training, stop sending queries, drain the node, and shut down BE gracefully
 with SIGTERM; wait for exit. Do not use SIGKILL or the quick-stop HTTP endpoint.
+`bin/stop_cn.sh` and `bin/stop_be.sh` send SIGKILL unless given `--graceful`
+(with `--timeout` long enough for the node to drain).
 The normal exit path writes profiles, and the resulting .gcda/.profraw files
 must actually exist before continuing. Background/detached threads and shutdown
 behavior still need validation on the complete training BE; do not assume a
@@ -75,7 +94,7 @@ python3 build-support/pgo.py merge --llvm-profdata /opt/llvm/bin/llvm-profdata \
 
 # In the original build checkout/container, using the same compiler/options:
 python3 build-support/pgo.py build use /profiles/gcc-merged --jobs 16
-cp be/output/lib/starrocks_be /profiles/pgo-be
+cp output/be/lib/starrocks_be /profiles/pgo-be
 ```
 
 One node also works; pass a single input to merge. Clang always needs this merge
@@ -98,6 +117,10 @@ Alternate measured runs after warmup; use both training and held-out queries,
 including different selectivities. Fix source revision, data snapshots, query
 settings, hardware and cache policy. Do not compare an instrumented binary's
 latency with an optimized binary and call that PGO speedup.
+
+With `--bolt` GCC keeps every function in one piece
+(-fno-reorder-blocks-and-partition), because BOLT does not support the hot and
+cold parts GCC otherwise splits functions into.
 
 BOLT is a separate follow-up: build the selected candidate with relocations,
 record a BOLT-compatible profile of that exact binary (or use BOLT instrumentation),

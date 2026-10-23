@@ -53,12 +53,16 @@ def write_json(path, data):
 
 
 def compiler():
-    cache = ROOT / 'be/build_Release/CMakeCache.txt'
-    for line in cache.read_text().splitlines():
-        if line.startswith(('CMAKE_CXX_COMPILER:FILEPATH=', 'CMAKE_CXX_COMPILER:STRING=')):
-            executable = line.split('=', 1)[1]
+    # be/CMakeLists.txt sets CMAKE_CXX_COMPILER before project(), so CMakeCache.txt does not hold it. We read the
+    # compiler that CMake detected for the build tree.
+    detected = sorted((ROOT / 'be/build_Release/CMakeFiles').glob('*/CMakeCXXCompiler.cmake'))
+    if len(detected) != 1:
+        raise ValueError(f'Expected one detected C++ compiler in the Release build tree, found {len(detected)}')
+    for line in detected[0].read_text().splitlines():
+        if line.startswith('set(CMAKE_CXX_COMPILER "'):
+            executable = line.split('"')[1]
             return {'path': executable, 'version': output(executable, '--version')}
-    raise ValueError('Cannot find C++ compiler in Release CMake cache')
+    raise ValueError(f'Cannot find C++ compiler in {detected[0]}')
 
 
 def build(args):
@@ -102,7 +106,8 @@ def build(args):
         cmd.append('--with-bolt')
     subprocess.run(cmd + extra, cwd=ROOT, env=env, check=True)
     stamp['compiler'] = compiler()
-    binary = ROOT / 'be/output/lib/starrocks_be'
+    # The receipt identifies the binary that nodes run: build.sh installs it into output/ without debug sections.
+    binary = ROOT / 'output/be/lib/starrocks_be'
     if not binary.is_file():
         raise ValueError(f'Build finished but binary missing: {binary}')
     stamp['binary_sha256'] = digest(binary)

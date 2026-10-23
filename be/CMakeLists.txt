@@ -194,7 +194,18 @@ if (WITH_LTO)
         endif()
         set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -flto")
         set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -flto")
-        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -flto")
+        # We fear the GNU make jobserver at the link: make 4.3 does not pass its jobserver pipe to the link command,
+        # but MAKEFLAGS still names it, and GCC LTO reads the closed descriptor and aborts after the whole-program
+        # analysis, also with an explicit number of jobs. So the link runs without MAKEFLAGS. Without a jobserver a
+        # plain -flto compiles the LTRANS partitions one at a time, which takes hours for the BE, so the link gives
+        # LTRANS an explicit number of jobs.
+        set(CMAKE_CXX_LINKER_LAUNCHER env -u MAKEFLAGS ${CMAKE_CXX_LINKER_LAUNCHER})
+        include(ProcessorCount)
+        ProcessorCount(_lto_jobs)
+        if (_lto_jobs EQUAL 0)
+            set(_lto_jobs 1)
+        endif()
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -flto=${_lto_jobs}")
     else()
         set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -flto=thin")
         set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -flto=thin")
@@ -213,7 +224,15 @@ endif()
 
 if (WITH_BOLT)
     message(STATUS "BOLT support enabled (adding --emit-relocs)")
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--emit-relocs")
+    # BOLT does not support the hot and cold parts that GCC splits functions into, so we keep functions whole.
+    if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -fno-reorder-blocks-and-partition")
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-reorder-blocks-and-partition")
+    endif()
+    # BOLT never rewrites a PGO training binary, and relocations make its link much slower.
+    if (NOT PGO_MODE STREQUAL "GENERATE")
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--emit-relocs")
+    endif()
 endif()
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake_modules/PGO.cmake)
@@ -655,6 +674,11 @@ else()
 endif()
 
 set(WRAP_LINKER_FLAGS "-Wl,-wrap,__cxa_throw -Wl,-wrap,__floattidf")
+if (WITH_LTO)
+    # Code generation calls __floattidf only in LTRANS, after the whole-program analysis, which therefore sees no use
+    # of __wrap___floattidf and drops it; the link then fails. We keep the wrapper by naming it undefined to the linker.
+    set(WRAP_LINKER_FLAGS "${WRAP_LINKER_FLAGS} -Wl,--undefined=__wrap___floattidf")
+endif()
 
 FUNCTION(ADD_BE_LIB LIB_NAME)
     IF(ENABLE_MULTI_DYNAMIC_LIBS)
