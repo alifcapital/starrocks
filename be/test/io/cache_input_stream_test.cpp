@@ -697,7 +697,9 @@ TEST_F(CacheInputStreamTest, failed_shared_buffer_read_does_not_populate_cache) 
     ASSERT_EQ(2, stream->read_count());
     ASSERT_EQ(data, result);
     ASSERT_EQ(1, cache_stream.stats().write_block_cache_count);
-    ASSERT_EQ(2, sb_stream->shared_io_count());
+    // The shared IO counters count the loads that worked, so the failed read adds nothing.
+    ASSERT_EQ(1, sb_stream->shared_io_count());
+    ASSERT_EQ(block_size, sb_stream->shared_io_bytes());
 
     // A new stream with the same cache key must find the complete, correct block.
     std::string wrong_data(block_size, 'z');
