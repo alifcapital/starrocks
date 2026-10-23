@@ -45,13 +45,14 @@ private:
     std::unique_ptr<CountingAllocatorWithHook> _allocator;
 };
 TEST_F(AggregateTest, test_hll_convert_to_serialize_format) {
-    FunctionUtils hll_utils;
-    auto* ctx = hll_utils.get_fn_ctx();
     auto check = [&](const char* name, LogicalType input_type, const ColumnPtr& input) {
         SCOPED_TRACE(name);
         SCOPED_TRACE(input_type);
         SCOPED_TRACE(input->is_nullable());
         const auto return_type = std::string(name) == "hll_raw" ? TYPE_HLL : TYPE_BIGINT;
+        // A unary aggregate checks that its context has exactly one argument when it updates a single row.
+        FunctionUtils hll_utils(nullptr, TypeDescriptor(return_type), {TypeDescriptor(input_type)});
+        auto* ctx = hll_utils.get_fn_ctx();
         const auto* func = get_aggregate_function(name, input_type, return_type, input->is_nullable());
         ASSERT_NE(nullptr, func);
         auto make_output = [&]() -> MutableColumnPtr {
