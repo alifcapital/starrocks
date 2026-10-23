@@ -45,6 +45,7 @@
 #include "fs/fs_util.h"
 #include "runtime/mem_tracker.h"
 #include "storage/olap_define.h"
+#include "util/defer_op.h"
 
 #ifndef BE_TEST
 #define BE_TEST
@@ -165,12 +166,16 @@ TEST_F(KVStoreTest, calc_rocksdb_write_buffer_size_test) {
     auto size = KVStore::calc_rocksdb_write_buffer_size(&mem_tracker);
     ASSERT_EQ(size, 4294967296 * config::rocksdb_write_buffer_memory_percent / 100 / 2);
 
-    // case2: two paths
-    std::string old_val2 = config::storage_root_path;
-    config::storage_root_path = "/storage;/storage2";
+    // case2: two paths. A store path must exist to count as a disk, so we create both.
+    const std::string old_val2 = config::storage_root_path;
+    DeferOp restore_root_path([&] { config::storage_root_path = old_val2; });
+    const std::string disk1 = std::filesystem::absolute(_root_path + "/disk1").string();
+    const std::string disk2 = std::filesystem::absolute(_root_path + "/disk2").string();
+    ASSERT_TRUE(fs::create_directories(disk1).ok());
+    ASSERT_TRUE(fs::create_directories(disk2).ok());
+    config::storage_root_path = disk1 + ";" + disk2;
     auto size2 = KVStore::calc_rocksdb_write_buffer_size(&mem_tracker);
     ASSERT_EQ(size2, 67108864L);
-    config::storage_root_path = old_val2;
 }
 
 TEST_F(KVStoreTest, iterate_with_compact_on_timeout_test) {
