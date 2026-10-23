@@ -22,6 +22,7 @@
 #include "exprs/json_functions.h"
 #include "testutil/assert.h"
 #include "testutil/parallel_test.h"
+#include "util/defer_op.h"
 #include "util/simdjson_util.h"
 
 namespace starrocks {
@@ -31,10 +32,16 @@ public:
     JsonParserTest() = default;
     ~JsonParserTest() override = default;
 
-    void SetUp() override {}
+    // Tests set config::json_parse_many_batch_size, a process-wide setting; we restore it so that it does not change
+    // the batches of the tests that run later in the same process.
+    void SetUp() override { _batch_size = config::json_parse_many_batch_size; }
+    void TearDown() override { config::json_parse_many_batch_size = _batch_size; }
 
     void test_parse_error_msg_base(JsonParser* parser, std::string& data, const std::string& operation,
                                    const std::string& custom_msg);
+
+private:
+    int32_t _batch_size = 0;
 };
 
 TEST_F(JsonParserTest, test_json_document_stream_parser_with_dynamic_batch_size_1) {
@@ -318,8 +325,11 @@ TEST_F(JsonParserTest, test_json_document_stream_parser_with_dynamic_batch_size_
 class JsonDocumentStreamParserTest : public ::testing::Test {
 public:
     void SetUp() override;
+    // As in JsonParserTest, we restore the process-wide batch size that tests set.
+    void TearDown() override { config::json_parse_many_batch_size = _batch_size; }
 
 protected:
+    int32_t _batch_size = 0;
     void _check_row(simdjson::ondemand::object& row, const std::string& key, int64_t value);
 
     simdjson::ondemand::parser _simdjson_parser;
@@ -328,6 +338,7 @@ protected:
 };
 
 void JsonDocumentStreamParserTest::SetUp() {
+    _batch_size = config::json_parse_many_batch_size;
     _parser = std::make_unique<JsonDocumentStreamParser>(&_simdjson_parser);
 }
 
@@ -869,6 +880,8 @@ PARALLEL_TEST(JsonParserTest, test_big_value) {
 }
 
 PARALLEL_TEST(JsonParserTest, test_big_json) {
+    const int32_t batch_size = config::json_parse_many_batch_size;
+    DeferOp restore_batch_size([batch_size] { config::json_parse_many_batch_size = batch_size; });
     config::json_parse_many_batch_size = 1;
     simdjson::ondemand::parser simdjson_parser;
     // The padded_string would allocate memory with simdjson::SIMDJSON_PADDING bytes padding.
