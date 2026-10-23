@@ -313,7 +313,10 @@ if [[ -d ${RUN_UT_HADOOP_COMMON_HOME} ]] ; then
     export HADOOP_CLASSPATH=${RUN_UT_HADOOP_COMMON_HOME}/*:${RUN_UT_HADOOP_COMMON_HOME}/lib/*:
     # get rid of StackOverflowError on the process reaper thread, which has a small stack size.
     # https://bugs.openjdk.org/browse/JDK-8153057
-    export LIBHDFS_OPTS="$LIBHDFS_OPTS -Djdk.lang.processReaperUseDefaultStackSize=true"
+    # Tests reach HDFS from the main thread, so the JVM attaches to it and limits its stack to -Xss, 1 MB by
+    # default. Later tests on the main thread need more under ASAN, e.g. for JSON nested 1000 levels deep, so
+    # we give it the 8 MB of a usual main thread.
+    export LIBHDFS_OPTS="$LIBHDFS_OPTS -Djdk.lang.processReaperUseDefaultStackSize=true -Xss8m"
 else
     # exclude HdfsFileSystemTest related test case if no hadoop env found
     echo "[INFO] Can't find available HADOOP common lib, disable HdfsFileSystemTest related test!"
