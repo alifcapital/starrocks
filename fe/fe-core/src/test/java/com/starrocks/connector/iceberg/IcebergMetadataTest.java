@@ -3794,6 +3794,87 @@ public class IcebergMetadataTest extends TableTestBase {
         table.refresh();
     }
 
+    // rewrite_equality_delete_files converts an equality delete of a spec-0 partition after the spec evolved. The
+    // position delete it writes must keep the spec and partition of the spec-0 data file it masks, so replacing a
+    // partition of the new spec keeps it.
+    @Test
+    public void testConvertedPositionDeleteKeepsDataFileSpecAfterPartitionEvolution() throws Exception {
+        TestTables.TestTable table = create(SCHEMA_A, SPEC_A, "ta_v2_evolved_convert", 2);
+        table.newFastAppend().appendFile(FILE_A).commit();
+        table.newRowDelta().addDeletes(FILE_A2_DELETES).commit();
+        long baseSnapshotId = table.currentSnapshot().snapshotId();
+        // The conversion removes the equality delete as the scan read it, with its sequence number.
+        DeleteFile equalityDelete = Iterables.getOnlyElement(
+                Iterables.getOnlyElement(table.newScan().planFiles()).deletes());
+        table.updateSpec().addField("id").commit();
+
+        IcebergMetadata.IcebergSinkExtra extra = new IcebergMetadata.IcebergSinkExtra();
+        extra.setConvertEqualityDeletes(true);
+        extra.setBaseSnapshotId(baseSnapshotId);
+        extra.addEqualityDeleteFilesToRemove(Set.of(equalityDelete));
+        // Planned on spec 1: the BE partitions the delete rows by spec 1, so the path carries spec 1's tuple.
+        extra.setWriteSpecId(table.spec().specId());
+        IcebergMetadata metadata = new IcebergMetadata(CATALOG_NAME, HDFS_ENVIRONMENT,
+                new IcebergHiveCatalog(CATALOG_NAME, new Configuration(), DEFAULT_CONFIG),
+                Executors.newSingleThreadExecutor(), DEFAULT_CATALOG_PROPERTIES);
+        IcebergTable icebergTable = new IcebergTable(1, "srTableName", CATALOG_NAME, "resource_name", "iceberg_db",
+                "iceberg_table", "", Lists.newArrayList(), table, Maps.newHashMap());
+        new Expectations(metadata) {
+            {
+                metadata.getTable((ConnectContext) any, anyString, anyString);
+                result = icebergTable;
+                minTimes = 0;
+            }
+        };
+        new MockUp<NodeMgr>() {
+            @Mock
+            public Frontend getMySelf() {
+                return new Frontend(FrontendNodeType.LEADER, "test-fe", "127.0.0.1", 9010);
+            }
+        };
+        new MockUp<Frontend>() {
+            @Mock
+            public String getFeVersion() {
+                return "test-version";
+            }
+        };
+        String partitionPath = table.location() + "/data/data_bucket=0/id=5/";
+        TIcebergDataFile deleteFile = new TIcebergDataFile();
+        deleteFile.setPath(partitionPath + "delete.parquet");
+        deleteFile.setFormat("parquet");
+        deleteFile.setRecord_count(1);
+        deleteFile.setFile_size_in_bytes(100);
+        deleteFile.setPartition_path(partitionPath);
+        deleteFile.setPartition_null_fingerprint("00");
+        deleteFile.setFile_content(TIcebergFileContent.POSITION_DELETES);
+        deleteFile.setReferenced_data_file(FILE_A.location());
+        deleteFile.setColumn_stats(new TIcebergColumnStats());
+        TSinkCommitInfo commitInfo = new TSinkCommitInfo();
+        commitInfo.setIceberg_data_file(deleteFile);
+
+        metadata.finishSink("iceberg_db", "iceberg_table", Lists.newArrayList(commitInfo), null, extra,
+                connectContext);
+        table.refresh();
+
+        // The equality delete is gone and the position delete sits under the data file's spec and partition.
+        DeleteFile committed = Iterables.getOnlyElement(
+                Iterables.getOnlyElement(table.newScan().planFiles()).deletes());
+        Assertions.assertEquals(FileContent.POSITION_DELETES, committed.content());
+        Assertions.assertEquals(FILE_A.specId(), committed.specId());
+        Assertions.assertEquals(FILE_A.partition(), committed.partition());
+
+        DataFile replacement = DataFiles.builder(table.spec())
+                .withPath(table.location() + "/data/data_bucket=0/id=5/new.parquet")
+                .withFileSizeInBytes(10)
+                .withPartitionPath("data_bucket=0/id=5")
+                .withRecordCount(1)
+                .build();
+        table.newReplacePartitions().addFile(replacement).commit();
+        FileScanTask oldFileTask = Iterables.getOnlyElement(Iterables.filter(table.newScan().planFiles(),
+                task -> task.file().location().equals(FILE_A.location())));
+        Assertions.assertEquals(1, oldFileTask.deletes().size());
+    }
+
     @Test
     public void testDeleteOperationWithConflictDetection() throws Exception {
         IcebergHiveCatalog icebergHiveCatalog = new IcebergHiveCatalog(CATALOG_NAME, new Configuration(), DEFAULT_CONFIG);

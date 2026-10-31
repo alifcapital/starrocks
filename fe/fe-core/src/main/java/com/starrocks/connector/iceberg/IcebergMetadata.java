@@ -3068,10 +3068,6 @@ public class IcebergMetadata implements ConnectorMetadata {
                 .mapToLong(org.apache.iceberg.DeleteFile::dataSequenceNumber)
                 .max().orElse(0L);
 
-        PartitionSpec partitionSpec = nativeTbl.spec();
-        for (TIcebergDataFile dataFile : dataFiles) {
-            rewrite.addFile(buildPositionDeleteFile(dataFile, partitionSpec, nativeTbl, Map.of()), maxSeq);
-        }
         for (org.apache.iceberg.DeleteFile eqDeleteFile : eqDeleteFilesToRemove) {
             rewrite.deleteFile(eqDeleteFile);
         }
@@ -3087,8 +3083,22 @@ public class IcebergMetadata implements ConnectorMetadata {
             updateCommitInfo(rewrite, context);
         }
 
-        commitWithCleanup(rewrite::commit,
-                () -> invalidateCacheAfterCommit(dbName, tableName), dataFiles, dbName, tableName);
+        final Long lookupSnapshotId = baseSnapshotId;
+        // Build the files inside commitWithCleanup so a failed lookup deletes the BE-written files.
+        commitWithCleanup(() -> {
+            // An equality delete removes rows of data files of any spec, so after spec evolution a converted
+            // position delete can reference a data file of an older spec. We fear that ReplacePartitions or
+            // dangling-delete removal drops a delete registered under the plan-time spec while the data file
+            // it masks stays, so each delete is registered under the spec and partition of its data file.
+            PartitionSpec partitionSpec = writeSpec(nativeTbl, extra);
+            Map<String, DataFile> otherSpecDataFiles =
+                    findOtherSpecDataFiles(nativeTbl, dataFiles, partitionSpec, lookupSnapshotId);
+            for (TIcebergDataFile dataFile : dataFiles) {
+                rewrite.addFile(buildPositionDeleteFile(dataFile, partitionSpec, nativeTbl, otherSpecDataFiles),
+                        maxSeq);
+            }
+            rewrite.commit();
+        }, () -> invalidateCacheAfterCommit(dbName, tableName), dataFiles, dbName, tableName);
 
         // Refresh peer FEs so they don't keep planning from a cached snapshot that still has the
         // removed equality-delete files, matching the other Iceberg commit paths.

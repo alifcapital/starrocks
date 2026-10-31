@@ -275,6 +275,8 @@ public class ConvertEqualityDeletesPlanner {
         IcebergMetadata.IcebergSinkExtra extra = new IcebergMetadata.IcebergSinkExtra();
         extra.setConvertEqualityDeletes(true);
         extra.setBaseSnapshotId(snapshotId);
+        // The BE partitions the output by the spec of the table descriptor built now.
+        extra.setWriteSpecId(icebergTable.getReadSpec().specId());
         // The equality-delete files to remove are read back from the scan nodes after execution (in
         // StmtExecutor's Iceberg delete-sink branch), once the scan layer has assigned its ranges and
         // recorded which delete files it actually applied -- they aren't known yet at plan time.
