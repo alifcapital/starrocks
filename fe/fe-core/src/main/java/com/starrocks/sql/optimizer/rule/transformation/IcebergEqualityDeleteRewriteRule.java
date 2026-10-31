@@ -264,7 +264,8 @@ public class IcebergEqualityDeleteRewriteRule extends TransformationRule {
                 noDeleteTable.getCatalogName(), noDeleteTable.getResourceName(), noDeleteTable.getCatalogDBName(),
                 noDeleteTable.getCatalogTableName(), "iceberg_table_with_delete", noDeleteTable.getFullSchema(),
                 noDeleteTable.getNativeTable(), ImmutableMap.of());
-        Table nativeTable = noDeleteTable.getNativeTable();
+        // The data scan keeps the read view of the scan it replaces, so a time-travel read keeps its snapshot schema.
+        withDeleteIcebergTable.inheritReadView(noDeleteTable);
 
         Map<ColumnRefOperator, Column> colRefToColumnMetaMap = scanOperator.getColRefToColumnMetaMap();
         Map<Column, ColumnRefOperator> columnMetaToColRefMap = scanOperator.getColumnMetaToColRefMap();
@@ -273,7 +274,7 @@ public class IcebergEqualityDeleteRewriteRule extends TransformationRule {
                 .map(IcebergDeleteSchema::equalityIds)
                 .flatMap(List::stream)
                 .distinct()
-                .map(fieldId -> nativeTable.schema().findColumnName(fieldId))
+                .map(fieldId -> IcebergEqualityDeleteScanBuilder.findEqualityColumnName(noDeleteTable, fieldId))
                 .map(withDeleteIcebergTable::getColumn)
                 .collect(Collectors.toMap(columnMetaToColRefMap::get, column -> column));
 

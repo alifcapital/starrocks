@@ -163,7 +163,6 @@ public class ConvertEqualityDeletesPlanner {
     private LegPlan buildLegPlan(IcebergMORParams leg, IcebergTable icebergTable, ColumnRefFactory columnRefFactory,
                                  TvrVersionRange tvr, IcebergTableMORParams tableFullMorParams) {
         boolean partitionLeg = leg.getEqDeleteScope() == EqDeleteScope.PARTITIONED;
-        Table nativeTable = icebergTable.getNativeTable();
 
         // Project order = ($file_path, $pos, partition cols); these are the conversion output.
         List<Column> outputCols = new ArrayList<>();
@@ -178,7 +177,7 @@ public class ConvertEqualityDeletesPlanner {
         // name, since a partition column may also be an equality-key column.
         Map<String, Column> baseColumns = new LinkedHashMap<>();
         for (Integer fieldId : leg.getEqualityIds()) {
-            String name = nativeTable.schema().findColumnName(fieldId);
+            String name = IcebergEqualityDeleteScanBuilder.findEqualityColumnName(icebergTable, fieldId);
             baseColumns.put(name, icebergTable.getColumn(name));
         }
         for (Column col : outputCols) {

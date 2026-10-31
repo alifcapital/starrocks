@@ -35,7 +35,6 @@ import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.type.IntegerType;
 import com.starrocks.type.VarbinaryType;
 import org.apache.iceberg.PartitionSpec;
-import org.apache.iceberg.Table;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -104,13 +103,12 @@ public class IcebergEqualityDeleteScanBuilder {
             ScalarOperator originPredicate,
             IcebergTableMORParams tableFullMorParams,
             TvrVersionRange tvrVersionRange) {
-        Table table = icebergTable.getNativeTable();
         List<Integer> equalityIds = leg.getEqualityIds();
         boolean partitionLeg = leg.getEqDeleteScope() == EqDeleteScope.PARTITIONED;
         String equalityDeleteTableName = buildEqualityDeleteTableName(icebergTable, equalityIds)
                 + "_" + leg.getEqDeleteScope();
         List<String> columnNames = equalityIds.stream()
-                .map(id -> table.schema().findColumnName(id))
+                .map(id -> findEqualityColumnName(icebergTable, id))
                 .toList();
         List<Column> deleteColumns = columnNames.stream().map(icebergTable::getColumn).collect(Collectors.toList());
         IcebergTable equalityDeleteTable = new IcebergTable(
@@ -118,6 +116,7 @@ public class IcebergEqualityDeleteScanBuilder {
                 icebergTable.getCatalogName(), icebergTable.getResourceName(), icebergTable.getCatalogDBName(),
                 icebergTable.getCatalogTableName(), EQUALITY_DELETE_TABLE_COMMENT, deleteColumns,
                 icebergTable.getNativeTable(), ImmutableMap.of());
+        equalityDeleteTable.inheritReadView(icebergTable);
 
         ImmutableMap.Builder<ColumnRefOperator, Column> colRefToColumn = ImmutableMap.builder();
         ImmutableMap.Builder<Column, ColumnRefOperator> columnToColRef = ImmutableMap.builder();
@@ -166,10 +165,22 @@ public class IcebergEqualityDeleteScanBuilder {
         return newColumnRef;
     }
 
+    // A time-travel scan reads with the schema of its snapshot, so a key column renamed or dropped since then
+    // has another name or none in the current schema. We resolve equality columns by field id under the schema
+    // the scan reads with, and fail with a clear error for an id it does not have.
+    public static String findEqualityColumnName(IcebergTable icebergTable, int fieldId) {
+        String name = icebergTable.getReadSchema().findColumnName(fieldId);
+        if (name == null) {
+            throw new StarRocksConnectorException("Equality delete column with field id %s is not in the read schema " +
+                    "of table %s", fieldId, icebergTable.getCatalogTableName());
+        }
+        return name;
+    }
+
     // equality table name format : origin_table_name + "_eq_delete_" + [pk1_pk2_pk3_..._]
     public static String buildEqualityDeleteTableName(IcebergTable icebergTable, List<Integer> equalityIds) {
         return icebergTable.getCatalogTableName() + "_eq_delete_" + equalityIds.stream()
-                .map(id -> icebergTable.getNativeTable().schema().findColumnName(id))
+                .map(id -> findEqualityColumnName(icebergTable, id))
                 .collect(Collectors.joining("_"));
     }
 }
