@@ -32,15 +32,17 @@ import java.io.IOException;
 import java.util.TimeZone;
 
 public class IcebergPartitionUtilsTest extends TableTestBase {
+    // A static field named temp would hide the per-test temp of TableTestBase, which JUnit then leaves null, and
+    // setupTable would create its tables under a relative "junit" directory that breaks the next run.
     @TempDir
-    public static File temp;
+    public static File catalogTemp;
     private static ConnectContext connectContext;
 
     @BeforeAll
     public static void beforeClass() throws Exception {
         UtFrameUtils.createMinStarRocksCluster();
         connectContext = UtFrameUtils.createDefaultCtx();
-        ConnectorPlanTestBase.mockAllCatalogs(connectContext, newFolder(temp, "junit").toURI().toString());
+        ConnectorPlanTestBase.mockAllCatalogs(connectContext, newFolder(catalogTemp, "junit").toURI().toString());
     }
 
     @Test
