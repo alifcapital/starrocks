@@ -150,9 +150,17 @@ public class IcebergEqualityDeleteRewriteRule extends TransformationRule {
         scanOperator.setTableFullMORParams(icebergTableFullMorParams);
         scanOperator.setFromEqDeleteRewriteRule(true);
 
+        Map<IcebergMORParams, Set<String>> pruningColumnsByLeg = new HashMap<>();
+        for (IcebergMORParams leg : eqDeleteLegs) {
+            pruningColumnsByLeg.put(leg, runtimeFilterPruningColumns(context, scanOperator, icebergTable, deleteSchemas, leg));
+        }
+        Set<String> allPruningColumns = pruningColumnsByLeg.values().stream()
+                .flatMap(Set::stream)
+                .collect(Collectors.toSet());
+
         ImmutableMap.Builder<ColumnRefOperator, ScalarOperator> projectForUnion = ImmutableMap.builder();
         LogicalIcebergScanOperator icebergDataFileWithDeleteScanOp = buildNewScanOperatorWithUnselectedAndExtendedField(
-                deleteSchemas, scanOperator, columnRefFactory, projectForUnion, hasPartitionLeg);
+                deleteSchemas, allPruningColumns, scanOperator, columnRefFactory, projectForUnion, hasPartitionLeg);
         icebergDataFileWithDeleteScanOp.setMORParam(IcebergMORParams.DATA_FILE_WITH_EQ_DELETE);
         icebergDataFileWithDeleteScanOp.setTableFullMORParams(icebergTableFullMorParams);
         icebergDataFileWithDeleteScanOp.setFromEqDeleteRewriteRule(true);
@@ -162,7 +170,8 @@ public class IcebergEqualityDeleteRewriteRule extends TransformationRule {
             IcebergMORParams leg = eqDeleteLegs.get(i);
             LogicalIcebergEqualityDeleteScanOperator eqScanOp =
                     IcebergEqualityDeleteScanBuilder.buildEqualityDeleteScanOperator(leg, icebergTable, columnRefFactory,
-                            scanOperator.getPredicate(), icebergTableFullMorParams, scanOperator.getTvrVersionRange());
+                            scanOperator.getPredicate(), icebergTableFullMorParams, scanOperator.getTvrVersionRange(),
+                            pruningColumnsByLeg.get(leg));
 
             ScalarOperator onPredicate = IcebergEqualityDeleteScanBuilder.buildOnPredicate(
                     icebergDataFileWithDeleteScanOp.getColumnNameToColRefMap(), eqScanOp.getOutputColumns());
@@ -205,6 +214,23 @@ public class IcebergEqualityDeleteRewriteRule extends TransformationRule {
 
         optExpression = OptExpression.create(unionOperator, optExpressionWithoutDelete, optExpression);
         return Collections.singletonList(optExpression);
+    }
+
+    // See IcebergEqualityDeleteScanBuilder.runtimeFilterPruningColumns. DELETE, UPDATE and MERGE read row locators and
+    // need every delete, so they get no pruning columns.
+    private static Set<String> runtimeFilterPruningColumns(OptimizerContext context, LogicalIcebergScanOperator scan,
+                                                           IcebergTable icebergTable,
+                                                           Set<IcebergDeleteSchema> deleteSchemas, IcebergMORParams leg) {
+        if (!context.getSessionVariable().isEnableIcebergEqDeleteRuntimeFilterPruning()) {
+            return Set.of();
+        }
+        Map<String, Column> scanColumns = scan.getColRefToColumnMetaMap().values().stream()
+                .collect(Collectors.toMap(Column::getName, column -> column, (a, b) -> a));
+        if (scanColumns.containsKey(IcebergTable.FILE_PATH) || scanColumns.containsKey(IcebergTable.ROW_POSITION)) {
+            return Set.of();
+        }
+        return IcebergEqualityDeleteScanBuilder.runtimeFilterPruningColumns(icebergTable.getNativeTable(),
+                icebergTable.getReadSchema(), deleteSchemas, leg, scanColumns);
     }
 
     private LogicalIcebergScanOperator buildNewScanOperatorWithoutDelete(
@@ -253,6 +279,7 @@ public class IcebergEqualityDeleteRewriteRule extends TransformationRule {
 
     private LogicalIcebergScanOperator buildNewScanOperatorWithUnselectedAndExtendedField(
             Set<IcebergDeleteSchema> deleteSchemas,
+            Set<String> runtimeFilterPruningColumns,
             LogicalIcebergScanOperator scanOperator,
             ColumnRefFactory columnRefFactory,
             ImmutableMap.Builder<ColumnRefOperator, ScalarOperator> projectForUnion,
@@ -270,11 +297,15 @@ public class IcebergEqualityDeleteRewriteRule extends TransformationRule {
         Map<ColumnRefOperator, Column> colRefToColumnMetaMap = scanOperator.getColRefToColumnMetaMap();
         Map<Column, ColumnRefOperator> columnMetaToColRefMap = scanOperator.getColumnMetaToColRefMap();
 
-        Map<ColumnRefOperator, Column> deleteColumns = deleteSchemas.stream()
-                .map(IcebergDeleteSchema::equalityIds)
-                .flatMap(List::stream)
+        // The data scan reads every equality key column and every runtime-filter pruning column for the anti joins.
+        Map<ColumnRefOperator, Column> deleteColumns = Stream.concat(
+                        deleteSchemas.stream()
+                                .map(IcebergDeleteSchema::equalityIds)
+                                .flatMap(List::stream)
+                                .map(fieldId -> IcebergEqualityDeleteScanBuilder.findEqualityColumnName(
+                                        noDeleteTable, fieldId)),
+                        runtimeFilterPruningColumns.stream())
                 .distinct()
-                .map(fieldId -> IcebergEqualityDeleteScanBuilder.findEqualityColumnName(noDeleteTable, fieldId))
                 .map(withDeleteIcebergTable::getColumn)
                 .collect(Collectors.toMap(columnMetaToColRefMap::get, column -> column));
 

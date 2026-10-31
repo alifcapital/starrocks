@@ -34,9 +34,13 @@ import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.type.IntegerType;
 import com.starrocks.type.VarbinaryType;
+import org.apache.iceberg.PartitionField;
 import org.apache.iceberg.PartitionSpec;
+import org.apache.iceberg.Schema;
+import org.apache.iceberg.Table;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -45,12 +49,15 @@ import java.util.stream.Collectors;
 import static com.starrocks.catalog.IcebergTable.DATA_SEQUENCE_NUMBER;
 import static com.starrocks.catalog.IcebergTable.EQUALITY_DELETE_TABLE_COMMENT;
 import static com.starrocks.catalog.IcebergTable.PARTITION_ID;
+import static com.starrocks.catalog.IcebergTable.SPEC_ID;
 
 // Shared by the read path (IcebergEqualityDeleteRewriteRule, anti-join) and the equality-delete ->
 // position-delete conversion procedure (semi-join). Centralized so the null-safe match predicate and
 // the GLOBAL/PARTITIONED scope split stay identical on both, and conversion can't drift from how reads
 // decide which rows an equality delete removes.
 public class IcebergEqualityDeleteScanBuilder {
+    private static final Set<String> EXTENDED_COLUMN_NAMES = Set.of(DATA_SEQUENCE_NUMBER, SPEC_ID, PARTITION_ID);
+
     private IcebergEqualityDeleteScanBuilder() {
     }
 
@@ -102,7 +109,8 @@ public class IcebergEqualityDeleteScanBuilder {
             ColumnRefFactory columnRefFactory,
             ScalarOperator originPredicate,
             IcebergTableMORParams tableFullMorParams,
-            TvrVersionRange tvrVersionRange) {
+            TvrVersionRange tvrVersionRange,
+            Set<String> runtimeFilterPruningColumns) {
         List<Integer> equalityIds = leg.getEqualityIds();
         boolean partitionLeg = leg.getEqDeleteScope() == EqDeleteScope.PARTITIONED;
         String equalityDeleteTableName = buildEqualityDeleteTableName(icebergTable, equalityIds)
@@ -111,6 +119,12 @@ public class IcebergEqualityDeleteScanBuilder {
                 .map(id -> findEqualityColumnName(icebergTable, id))
                 .toList();
         List<Column> deleteColumns = columnNames.stream().map(icebergTable::getColumn).collect(Collectors.toList());
+        // A pruning column outside the key gets a delete-side slot that holds the identity partition value of each
+        // delete file, and buildOnPredicate matches it with `<=>` like a key column.
+        runtimeFilterPruningColumns.stream()
+                .filter(name -> !columnNames.contains(name))
+                .sorted()
+                .forEach(name -> deleteColumns.add(icebergTable.getColumn(name)));
         IcebergTable equalityDeleteTable = new IcebergTable(
                 ConnectorTableId.CONNECTOR_ID_GENERATOR.getNextId().asLong(), equalityDeleteTableName,
                 icebergTable.getCatalogName(), icebergTable.getResourceName(), icebergTable.getCatalogDBName(),
@@ -134,7 +148,53 @@ public class IcebergEqualityDeleteScanBuilder {
         eqScanOp.setOriginPredicate(originPredicate);
         eqScanOp.setTableFullMORParams(tableFullMorParams);
         eqScanOp.setMORParams(leg);
+        eqScanOp.setRuntimeFilterPruningColumns(runtimeFilterPruningColumns);
         return eqScanOp;
+    }
+
+    // The identity partition columns that let a runtime filter on the data column skip the delete files of the
+    // partitions it rejects, for a partitioned leg. A partitioned delete applies only to data files of its own spec
+    // and partition, and the leg matches that with $partition_id. If a column is an identity field in every spec of
+    // the leg's delete files, `data.c <=> delete.c` holds for every pair that $partition_id matches, so adding it
+    // keeps the result and lets a filter that rejects c = v drop the deletes of partition v: the join that built
+    // the filter drops the data rows with c = v anyway (JoinNode pushes only such filters into a delete scan). The
+    // delete scan takes c from the partition value of the delete file, so the field must carry the column's name,
+    // and the type must read back exactly: a timestamp partition value depends on the session time zone.
+    public static Set<String> runtimeFilterPruningColumns(Table table, Schema readSchema,
+                                                          Set<IcebergDeleteSchema> deleteSchemas,
+                                                          IcebergMORParams leg, Map<String, Column> scanColumns) {
+        if (leg.getEqDeleteScope() != EqDeleteScope.PARTITIONED) {
+            return Set.of();
+        }
+        List<PartitionSpec> legSpecs = deleteSchemas.stream()
+                .filter(deleteSchema -> deleteSchema.equalityIds().equals(leg.getEqualityIds()))
+                .map(deleteSchema -> table.specs().get(deleteSchema.specId()))
+                .filter(spec -> spec != null && spec.isPartitioned())
+                .distinct()
+                .toList();
+        Set<String> columns = null;
+        for (PartitionSpec spec : legSpecs) {
+            Set<String> specColumns = new HashSet<>();
+            for (PartitionField field : spec.fields()) {
+                String name = readSchema.findColumnName(field.sourceId());
+                if (field.transform().isIdentity() && name != null && field.name().equals(name) &&
+                        EXTENDED_COLUMN_NAMES.stream().noneMatch(name::equalsIgnoreCase) &&
+                        isRuntimeFilterPruningType(scanColumns.get(name))) {
+                    specColumns.add(name);
+                }
+            }
+            if (columns == null) {
+                columns = specColumns;
+            } else {
+                columns.retainAll(specColumns);
+            }
+        }
+        return columns == null ? Set.of() : Set.copyOf(columns);
+    }
+
+    private static boolean isRuntimeFilterPruningType(Column column) {
+        return column != null && (column.getType().isIntegerType() || column.getType().isDate() ||
+                column.getType().isStringType());
     }
 
     public static void fillExtendedColumns(ColumnRefFactory columnRefFactory,

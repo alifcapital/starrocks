@@ -205,7 +205,8 @@ public class ConvertEqualityDeletesPlanner {
         dataScan.setFromEqDeleteRewriteRule(true);
 
         LogicalIcebergEqualityDeleteScanOperator eqScan = IcebergEqualityDeleteScanBuilder
-                .buildEqualityDeleteScanOperator(leg, icebergTable, columnRefFactory, null, tableFullMorParams, tvr);
+                .buildEqualityDeleteScanOperator(leg, icebergTable, columnRefFactory, null, tableFullMorParams, tvr,
+                        Set.of());
 
         ScalarOperator onPredicate = IcebergEqualityDeleteScanBuilder.buildOnPredicate(
                 dataScan.getColumnNameToColRefMap(), eqScan.getOutputColumns());
