@@ -572,9 +572,12 @@ public class CachingIcebergCatalog implements IcebergCatalog {
             if (!currentLocation.equals(updateLocation)) {
                 LOG.info("Refresh iceberg caching catalog table {}.{} from {} to {}",
                         dbName, tableName, currentLocation, updateLocation);
+                // We expect the footers of the snapshot cached before this refresh to be warm already, so the
+                // footer warmup gets that snapshot and warms only the files added after it.
+                Snapshot cachedSnapshot = currentTable.currentSnapshot();
                 refreshTable(updateTable, dbName, tableName, executorService, active);
                 if (active) {
-                    warmFooters(dbName, tableName, ctx);
+                    warmFooters(dbName, tableName, cachedSnapshot, ctx);
                 }
                 LOG.info("Finished to refresh iceberg table {}.{}", dbName, tableName);
             } else {
@@ -595,10 +598,13 @@ public class CachingIcebergCatalog implements IcebergCatalog {
     }
 
     // The footer warmup is a CACHE SELECT that takes the table from the cache like a query does, so it
-    // runs after the table to warm is the cached one.
-    private void warmFooters(String dbName, String tableName, ConnectContext ctx) {
+    // runs after the table to warm is the cached one. A table without a snapshot before the refresh has no
+    // warm files, so its warmup covers every file.
+    private void warmFooters(String dbName, String tableName, Snapshot cachedSnapshot, ConnectContext ctx) {
+        long baseSnapshotId = cachedSnapshot != null
+                ? cachedSnapshot.snapshotId() : SessionVariable.CACHE_SELECT_FOOTER_BASE_NOT_SET;
         IcebergMetadataRefreshFooterPrefetcher.warmup(
-                catalogName, dbName, tableName, ctx, footerPrefetchOrchestratorExecutor);
+                catalogName, dbName, tableName, baseSnapshotId, ctx, footerPrefetchOrchestratorExecutor);
     }
 
     private void refreshTable(BaseTable updatedTable, String dbName, String tableName,

@@ -46,6 +46,7 @@ import org.apache.iceberg.io.CloseableIterator;
 import org.apache.iceberg.metrics.MetricsReporter;
 import org.apache.iceberg.metrics.ScanMetricsUtil;
 import org.apache.iceberg.util.SerializationUtil;
+import org.apache.iceberg.util.SnapshotUtil;
 import org.apache.iceberg.util.TableScanUtil;
 import org.apache.iceberg.util.Tasks;
 import org.apache.logging.log4j.LogManager;
@@ -53,12 +54,14 @@ import org.apache.logging.log4j.Logger;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 import static com.starrocks.connector.PartitionUtil.executeInNewThread;
@@ -181,17 +184,75 @@ public class StarRocksIcebergTableScan
 
     @Override
     protected CloseableIterable<FileScanTask> doPlanFiles() {
+        // Null means every file is planned, as for any ordinary scan.
+        Set<Long> addedSnapshotIds = null;
+        Long footerBaseSnapshotId = scanContext.getFooterBaseSnapshotId();
+        if (footerBaseSnapshotId != null) {
+            addedSnapshotIds = snapshotIdsAddedSince(footerBaseSnapshotId);
+            if (addedSnapshotIds.isEmpty()) {
+                return CloseableIterable.empty();
+            }
+        }
+
         List<ManifestFile> dataManifests = findMatchingDataManifests(snapshot());
+        if (addedSnapshotIds != null) {
+            dataManifests = manifestsWrittenIn(dataManifests, addedSnapshotIds);
+        }
         List<ManifestFile> deleteManifests = findMatchingDeleteManifests(snapshot());
 
         boolean mayHaveEqualityDeletes = !deleteManifests.isEmpty() && mayHaveEqualityDeletes(snapshot());
         boolean loadColumnStats = mayHaveEqualityDeletes || shouldReturnColumnStats();
 
-        if (shouldPlanLocally(dataManifests, loadColumnStats)) {
-            return planFileTasksLocally(dataManifests, deleteManifests);
+        // Remote planning reads all manifests of the snapshot on the BE and ignores the manifest list and
+        // the entry filter here, so the restricted plan has to be made locally.
+        if (addedSnapshotIds != null || shouldPlanLocally(dataManifests, loadColumnStats)) {
+            return planFileTasksLocally(dataManifests, deleteManifests, addedSnapshotIds);
         } else {
             return planFileTasksRemotely(dataManifests, deleteManifests);
         }
+    }
+
+    // We expect the footers of the files in the base snapshot to be warm, so the footer warmup plans only
+    // the files added by the snapshots between the base and the scanned snapshot, and this returns their ids.
+    // We fear that a base outside the history of the scanned snapshot (a rollback, a branch switch or an
+    // expired chain) makes the difference meaningless, so then this returns no ids and nothing is planned:
+    // the queries read those footers themselves.
+    private Set<Long> snapshotIdsAddedSince(long baseSnapshotId) {
+        Set<Long> addedSnapshotIds = new HashSet<>();
+        for (Snapshot ancestor : SnapshotUtil.ancestorsOf(snapshot().snapshotId(), table()::snapshot)) {
+            if (baseSnapshotId == ancestor.snapshotId()) {
+                return addedSnapshotIds;
+            }
+            addedSnapshotIds.add(ancestor.snapshotId());
+        }
+        LOG.info("Footer base snapshot {} is not an ancestor of snapshot {} of table {}.{}, plan no files",
+                baseSnapshotId, snapshot().snapshotId(), dbName, tableName);
+        return Collections.emptySet();
+    }
+
+    // A manifest cannot hold an entry added by a snapshot newer than the snapshot that wrote the manifest,
+    // so a manifest written before the base holds no new file. A manifest of a new snapshot can still hold
+    // old files as existing entries, which the entry filter drops. We keep a manifest of unknown writer,
+    // because dropping it could lose a new file.
+    private List<ManifestFile> manifestsWrittenIn(List<ManifestFile> manifests, Set<Long> snapshotIds) {
+        List<ManifestFile> kept = manifests.stream()
+                .filter(manifest -> manifest.snapshotId() == null || snapshotIds.contains(manifest.snapshotId()))
+                .collect(Collectors.toList());
+        scanMetrics().skippedDataManifests().increment(manifests.size() - kept.size());
+        return kept;
+    }
+
+    // We keep an entry of unknown snapshot, because dropping it could lose a new file; the cost of keeping
+    // it is one extra footer.
+    private static Predicate<ManifestEntry<DataFile>> entryAddedIn(Set<Long> snapshotIds) {
+        return entry -> entry.snapshotId() == null || snapshotIds.contains(entry.snapshotId());
+    }
+
+    // A cached file written by a reader without provenance has no entry snapshot id; it is kept for the
+    // same reason as an entry of unknown snapshot.
+    private static boolean cachedFileAddedIn(DataFile file, Set<Long> snapshotIds) {
+        Long entrySnapshotId = file instanceof DataFileWrapper ? ((DataFileWrapper) file).entrySnapshotId() : null;
+        return entrySnapshotId == null || snapshotIds.contains(entrySnapshotId);
     }
 
     private CloseableIterable<FileScanTask> planFileTasksRemotely(
@@ -268,12 +329,15 @@ public class StarRocksIcebergTableScan
     }
 
     private CloseableIterable<FileScanTask> planFileTasksLocally(
-            List<ManifestFile> dataManifests, List<ManifestFile> deleteManifests) {
+            List<ManifestFile> dataManifests, List<ManifestFile> deleteManifests, Set<Long> addedSnapshotIds) {
         if (useCache()) {
             planDeletesLocallyWithCache(deleteManifests);
-            return planTaskWithCache(dataManifests);
+            return planTaskWithCache(dataManifests, addedSnapshotIds);
         } else {
             ManifestGroup manifestGroup = newManifestGroup(dataManifests, deleteManifests);
+            if (addedSnapshotIds != null) {
+                manifestGroup = manifestGroup.filterManifestEntries(entryAddedIn(addedSnapshotIds));
+            }
             return manifestGroup.planFiles();
         }
     }
@@ -317,7 +381,8 @@ public class StarRocksIcebergTableScan
         this.deleteFileIndex = planDeletesLocally(deleteManifestWithoutCache, matchingCachedDeleteFiles);
     }
 
-    private CloseableIterable<FileScanTask> planTaskWithCache(List<ManifestFile> dataManifests) {
+    private CloseableIterable<FileScanTask> planTaskWithCache(List<ManifestFile> dataManifests,
+                                                              Set<Long> addedSnapshotIds) {
         List<Pair<ManifestFile, Set<DataFile>>> dataManifestWithCache = new ArrayList<>();
         List<ManifestFile> dataManifestWithoutCache = new ArrayList<>();
         for (ManifestFile manifestFile : dataManifests) {
@@ -338,7 +403,8 @@ public class StarRocksIcebergTableScan
         }
 
         Iterable<CloseableIterable<FileScanTask>> tasks =
-                CloseableIterable.transform(CloseableIterable.withNoopClose(dataManifestWithCache), this::filterDataFiles);
+                CloseableIterable.transform(CloseableIterable.withNoopClose(dataManifestWithCache),
+                        manifestWithFiles -> filterDataFiles(manifestWithFiles, addedSnapshotIds));
 
         // Cached manifests are fully in memory; their scan tasks are assembled lazily on the
         // consumer thread, since there is no IO here for a worker pool to overlap. Routing them
@@ -348,18 +414,26 @@ public class StarRocksIcebergTableScan
             return tasksWithCache;
         } else {
             CloseableIterable<FileScanTask> fileScanTaskWithoutCache =
-                    planFileTasks(dataManifestWithoutCache, new ArrayList<>());
+                    planFileTasks(dataManifestWithoutCache, new ArrayList<>(), addedSnapshotIds);
             return CloseableIterable.concat(Lists.newArrayList(fileScanTaskWithoutCache, tasksWithCache));
         }
     }
 
-    private CloseableIterable<FileScanTask> filterDataFiles(Pair<ManifestFile, Set<DataFile>> manifestFile) {
+    private CloseableIterable<FileScanTask> filterDataFiles(Pair<ManifestFile, Set<DataFile>> manifestFile,
+                                                            Set<Long> addedSnapshotIds) {
         CloseableIterable<DataFile> matchedDataFiles = CloseableIterable.withNoopClose(manifestFile.second);
+
+        if (addedSnapshotIds != null) {
+            matchedDataFiles = CloseableIterable.filter(
+                    scanMetrics().skippedDataFiles(),
+                    matchedDataFiles,
+                    file -> cachedFileAddedIn(file, addedSnapshotIds));
+        }
 
         if (filter() != Expressions.alwaysTrue()) {
             matchedDataFiles = CloseableIterable.filter(
                     scanMetrics().skippedDataFiles(),
-                    CloseableIterable.withNoopClose(manifestFile.second),
+                    matchedDataFiles,
                     file -> partitionEvaluatorCache.get(file.specId()).eval(file.partition()));
         }
 
@@ -376,6 +450,13 @@ public class StarRocksIcebergTableScan
 
     private CloseableIterable<FileScanTask> planFileTasks(
             List<ManifestFile> dataManifests, List<ManifestFile> deleteManifests) {
+        return planFileTasks(dataManifests, deleteManifests, null);
+    }
+
+    // The entry filter runs after the manifest reader has put the whole manifest into the data file cache,
+    // so a restricted plan does not leave a partial cache entry.
+    private CloseableIterable<FileScanTask> planFileTasks(
+            List<ManifestFile> dataManifests, List<ManifestFile> deleteManifests, Set<Long> addedSnapshotIds) {
         LOG.info("Planning file tasks locally for table {}", table().name());
 
         ManifestGroup manifestGroup =
@@ -390,6 +471,10 @@ public class StarRocksIcebergTableScan
                         .preparedDeleteFileIndex(deleteFileIndex)
                         .identifierFieldIds(getIdentifierFieldIds())
                         .cacheWithMetrics(dataFileCacheWithMetrics);
+
+        if (addedSnapshotIds != null) {
+            manifestGroup = manifestGroup.filterManifestEntries(entryAddedIn(addedSnapshotIds));
+        }
 
         if (shouldIgnoreResiduals()) {
             manifestGroup = manifestGroup.ignoreResiduals();

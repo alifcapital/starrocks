@@ -16,12 +16,22 @@ package org.apache.iceberg;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.google.common.collect.ImmutableMap;
+import com.starrocks.connector.PlanMode;
+import com.starrocks.connector.iceberg.DataFileWrapper;
+import com.starrocks.connector.iceberg.StarRocksIcebergTableScanContext;
+import com.starrocks.connector.iceberg.TestTables;
+import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.types.Types;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
+import java.util.TreeSet;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class StarRocksIcebergTableScanTest {
     @Test
@@ -178,6 +188,220 @@ public class StarRocksIcebergTableScanTest {
         Set<DataFile> served = StarRocksIcebergTableScan.getCompleteCachedFiles(cache, manifest);
         Assertions.assertSame(corrupted, served, "the corrupted entry is served to the query verbatim");
         Mockito.verify(cache, Mockito.never()).invalidate(manifest.path());
+    }
+
+    private static final Schema FOOTER_SCHEMA = new Schema(Types.NestedField.required(1, "id", Types.IntegerType.get()));
+
+    private static DataFile footerDataFile(String name) {
+        return DataFiles.builder(PartitionSpec.unpartitioned()).withPath(name).withFileSizeInBytes(100)
+                .withRecordCount(10).withFormat(FileFormat.PARQUET).build();
+    }
+
+    private static BaseTable footerTable(java.nio.file.Path dir, boolean mergeManifestsOnEveryAppend) {
+        BaseTable table = TestTables.create(dir.resolve(UUID.randomUUID().toString()).toFile(),
+                UUID.randomUUID().toString(), FOOTER_SCHEMA, PartitionSpec.unpartitioned(), 2);
+        if (mergeManifestsOnEveryAppend) {
+            table.updateProperties().set(TableProperties.MANIFEST_MIN_MERGE_COUNT, "1").commit();
+        }
+        return table;
+    }
+
+    private static long append(BaseTable table, String name) {
+        table.newAppend().appendFile(footerDataFile(name)).commit();
+        return table.currentSnapshot().snapshotId();
+    }
+
+    private static StarRocksIcebergTableScanContext footerContext(PlanMode planMode,
+                                                                  Cache<String, Set<DataFile>> dataFileCache) {
+        StarRocksIcebergTableScanContext context =
+                new StarRocksIcebergTableScanContext("catalog", "db", "tbl", planMode);
+        if (dataFileCache != null) {
+            context.setDataFileCache(dataFileCache);
+            context.setDeleteFileCache(com.github.benmanes.caffeine.cache.Caffeine.newBuilder().build());
+            context.setMetaFileCacheMap(new ConcurrentHashMap<>());
+        }
+        return context;
+    }
+
+    private static StarRocksIcebergTableScanContext footerContext(Cache<String, Set<DataFile>> dataFileCache) {
+        return footerContext(PlanMode.LOCAL, dataFileCache);
+    }
+
+    private static Set<String> planned(BaseTable table, long snapshotId, StarRocksIcebergTableScanContext context)
+            throws Exception {
+        StarRocksIcebergTableScan scan =
+                new StarRocksIcebergTableScan(table, table.schema(), TableScanContext.empty(), context);
+        Set<String> paths = new TreeSet<>();
+        try (CloseableIterable<FileScanTask> tasks = scan.useSnapshot(snapshotId).planFiles()) {
+            for (FileScanTask task : tasks) {
+                paths.add(task.file().path().toString());
+            }
+        }
+        return paths;
+    }
+
+    private static Cache<String, Set<DataFile>> newDataFileCache() {
+        return com.github.benmanes.caffeine.cache.Caffeine.newBuilder().build();
+    }
+
+    // The scan reads manifests with the data file cache absent, cold and already filled, and each of them
+    // must plan the same files.
+    private static void assertFooterPlan(BaseTable table, long snapshotId, long baseSnapshotId,
+                                         Set<String> expected) throws Exception {
+        StarRocksIcebergTableScanContext uncached = footerContext(null);
+        uncached.setFooterBaseSnapshotId(baseSnapshotId);
+        Assertions.assertEquals(expected, planned(table, snapshotId, uncached), "without the data file cache");
+
+        Cache<String, Set<DataFile>> cache = newDataFileCache();
+        StarRocksIcebergTableScanContext cold = footerContext(cache);
+        cold.setFooterBaseSnapshotId(baseSnapshotId);
+        Assertions.assertEquals(expected, planned(table, snapshotId, cold), "with a cold data file cache");
+
+        // A restricted plan must leave complete cache entries, since ordinary queries read them as they are.
+        Set<String> all = planned(table, snapshotId, footerContext(null));
+        Assertions.assertEquals(all, planned(table, snapshotId, footerContext(cache)));
+        for (ManifestFile manifest : table.snapshot(snapshotId).dataManifests(table.io())) {
+            Assertions.assertNotNull(StarRocksIcebergTableScan.getCompleteCachedFiles(cache, manifest));
+        }
+
+        StarRocksIcebergTableScanContext warm = footerContext(cache);
+        warm.setFooterBaseSnapshotId(baseSnapshotId);
+        Assertions.assertEquals(expected, planned(table, snapshotId, warm), "with a warm data file cache");
+    }
+
+    @Test
+    public void testFooterWarmupPlansOnlyFilesAddedAfterBase(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir)
+            throws Exception {
+        BaseTable table = footerTable(dir, false);
+        append(table, "a.parquet");
+        long base = append(table, "b.parquet");
+        append(table, "c.parquet");
+        long current = append(table, "d.parquet");
+
+        assertFooterPlan(table, current, base, Set.of("c.parquet", "d.parquet"));
+        // Nothing was added after the current snapshot itself.
+        assertFooterPlan(table, current, current, Set.of());
+    }
+
+    @Test
+    public void testFooterWarmupDropsOldEntriesOfMergedManifest(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir)
+            throws Exception {
+        BaseTable table = footerTable(dir, true);
+        append(table, "a.parquet");
+        long base = append(table, "b.parquet");
+        append(table, "c.parquet");
+        long current = append(table, "d.parquet");
+
+        // The merge rewrote the old files into the manifest of the newest snapshot as existing entries; without
+        // this the test would not reach the entry filter.
+        List<ManifestFile> manifests = table.currentSnapshot().dataManifests(table.io());
+        Assertions.assertEquals(1, manifests.size());
+        Assertions.assertEquals(current, manifests.get(0).snapshotId());
+        Assertions.assertEquals(3, manifests.get(0).existingFilesCount());
+
+        assertFooterPlan(table, current, base, Set.of("c.parquet", "d.parquet"));
+    }
+
+    @Test
+    public void testFooterWarmupSkipsFilesKeptByManifestRewrite(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir)
+            throws Exception {
+        BaseTable table = footerTable(dir, false);
+        append(table, "a.parquet");
+        long base = append(table, "b.parquet");
+        // Without a cluster function Iceberg keeps the manifests as they are.
+        table.rewriteManifests().rewriteIf(manifest -> true).clusterBy(file -> "all").commit();
+        long rewritten = table.currentSnapshot().snapshotId();
+
+        // The rewrite wrote every manifest and kept both files as existing entries; without this the test would
+        // not reach manifests of a new snapshot that hold only old files.
+        List<ManifestFile> manifests = table.currentSnapshot().dataManifests(table.io());
+        Assertions.assertTrue(manifests.stream().allMatch(manifest -> manifest.snapshotId() == rewritten));
+        Assertions.assertEquals(2, manifests.stream().mapToInt(ManifestFile::existingFilesCount).sum());
+
+        // The rewrite adds no file, so there is nothing to warm.
+        assertFooterPlan(table, rewritten, base, Set.of());
+        long current = append(table, "c.parquet");
+        assertFooterPlan(table, current, base, Set.of("c.parquet"));
+    }
+
+    @Test
+    public void testFooterWarmupPlansNothingWhenBaseIsNotAnAncestor(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir)
+            throws Exception {
+        BaseTable table = footerTable(dir, false);
+        long first = append(table, "a.parquet");
+        long abandoned = append(table, "b.parquet");
+        table.manageSnapshots().rollbackTo(first).commit();
+        long current = append(table, "c.parquet");
+
+        // The base is on a history the table left, so we cannot tell which files are new.
+        assertFooterPlan(table, current, abandoned, Set.of());
+        // A base that the table does not know, as after the snapshot expired.
+        assertFooterPlan(table, current, 123456789L, Set.of());
+        assertFooterPlan(table, current, first, Set.of("c.parquet"));
+    }
+
+    @Test
+    public void testScanWithoutFooterRestrictionPlansEveryFile(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir)
+            throws Exception {
+        for (boolean merge : List.of(false, true)) {
+            BaseTable table = footerTable(dir, merge);
+            append(table, "a.parquet");
+            append(table, "b.parquet");
+            long current = append(table, "c.parquet");
+            Set<String> all = Set.of("a.parquet", "b.parquet", "c.parquet");
+
+            StarRocksIcebergTableScanContext context = footerContext(null);
+            Assertions.assertNull(context.getFooterBaseSnapshotId());
+            Assertions.assertEquals(all, planned(table, current, context));
+            Assertions.assertEquals(all, planned(table, current, footerContext(newDataFileCache())));
+        }
+    }
+
+    @Test
+    public void testFooterWarmupPlansLocallyWhateverThePlanMode(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir)
+            throws Exception {
+        BaseTable table = footerTable(dir, false);
+        append(table, "a.parquet");
+        long base = append(table, "b.parquet");
+        long current = append(table, "c.parquet");
+
+        // Distributed planning would hand the snapshot to the BE, which ignores the manifests chosen here.
+        for (Cache<String, Set<DataFile>> cache : java.util.Arrays.asList(null, newDataFileCache())) {
+            StarRocksIcebergTableScanContext context = footerContext(PlanMode.DISTRIBUTED, cache);
+            context.setFooterBaseSnapshotId(base);
+            Assertions.assertEquals(Set.of("c.parquet"), planned(table, current, context));
+        }
+    }
+
+    @Test
+    public void testFooterWarmupKeepsCachedFilesWithoutProvenance(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir)
+            throws Exception {
+        BaseTable table = footerTable(dir, true);
+        append(table, "a.parquet");
+        long base = append(table, "b.parquet");
+        long current = append(table, "c.parquet");
+
+        Cache<String, Set<DataFile>> cache = newDataFileCache();
+        Assertions.assertEquals(3, planned(table, current, footerContext(cache)).size());
+        ManifestFile manifest = table.currentSnapshot().dataManifests(table.io()).get(0);
+        Set<DataFile> withProvenance = cache.getIfPresent(manifest.path());
+        Assertions.assertNotNull(withProvenance);
+        Assertions.assertTrue(withProvenance.stream()
+                .allMatch(file -> ((DataFileWrapper) file).entrySnapshotId() != null));
+        StarRocksIcebergTableScanContext restricted = footerContext(cache);
+        restricted.setFooterBaseSnapshotId(base);
+        Assertions.assertEquals(Set.of("c.parquet"), planned(table, current, restricted));
+
+        // A file cached by a reader that did not record the snapshot of its entry could be a new file, and
+        // dropping it would leave its footer cold, so it is warmed even if it is old.
+        Set<DataFile> withoutProvenance = new HashSet<>();
+        for (DataFile file : withProvenance) {
+            withoutProvenance.add(DataFileWrapper.wrap(file.copy()));
+        }
+        cache.put(manifest.path(), withoutProvenance);
+        StarRocksIcebergTableScanContext unknown = footerContext(cache);
+        unknown.setFooterBaseSnapshotId(base);
+        Assertions.assertEquals(Set.of("a.parquet", "b.parquet", "c.parquet"), planned(table, current, unknown));
     }
 
     private ManifestFile mockManifestFile(String path, Integer existingFilesCount, Integer addedFilesCount) {

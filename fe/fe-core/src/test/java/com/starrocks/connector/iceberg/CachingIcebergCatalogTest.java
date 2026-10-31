@@ -173,6 +173,63 @@ public class CachingIcebergCatalogTest {
         }
     }
 
+    // The footers of the files of the snapshot cached before a refresh are warm, so the footer warmup of the
+    // refresh must be told that snapshot, whether the refresh moves to a new snapshot, keeps the snapshot with
+    // new metadata, or finds a table that had none.
+    @Test
+    public void testRefreshTellsFooterWarmupTheSnapshotCachedBefore() {
+        long everyFile = SessionVariable.CACHE_SELECT_FOOTER_BASE_NOT_SET;
+        // cached snapshot (null: the cached table has none), refreshed snapshot, expected base
+        List<Long[]> cases = List.of(
+                new Long[] {1L, 2L, 1L},
+                new Long[] {1L, 1L, 1L},
+                new Long[] {null, 2L, everyFile});
+        for (Long[] testCase : cases) {
+            IcebergCatalog delegate = Mockito.mock(IcebergCatalog.class);
+            Mockito.when(delegate.getIcebergCatalogType()).thenReturn(IcebergCatalogType.REST_CATALOG);
+            ExecutorService workers = Executors.newFixedThreadPool(2);
+            try (MockedStatic<IcebergMetadataRefreshFooterPrefetcher> prefetcher =
+                         Mockito.mockStatic(IcebergMetadataRefreshFooterPrefetcher.class)) {
+                CachingIcebergCatalog catalog = new CachingIcebergCatalog(
+                        CATALOG_NAME, delegate, DEFAULT_CATALOG_PROPERTIES, workers);
+                BaseTable oldTable = testCase[0] == null
+                        ? mockRefreshCandidateWithoutSnapshot("old.json")
+                        : mockRefreshCandidate(testCase[0], "old.json");
+                BaseTable candidate = mockRefreshCandidate(testCase[1], "new.json");
+                Cache<IcebergTableName, Table> tables = Deencapsulation.getField(catalog, "tables");
+                IcebergTableName key = new IcebergTableName("db", "tbl");
+                tables.put(key, oldTable);
+                Map<IcebergTableName, Long> access = Deencapsulation.getField(catalog, "tableLatestAccessTime");
+                access.put(key, System.currentTimeMillis());
+                Mockito.when(delegate.getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl")))
+                        .thenReturn(candidate);
+                Mockito.when(delegate.getPartitions(Mockito.any(), Mockito.anyLong(), Mockito.any(), Mockito.any()))
+                        .thenReturn(Map.of());
+                ConnectContext ctx = new ConnectContext();
+
+                catalog.refreshTable("db", "tbl", ctx, workers);
+
+                prefetcher.verify(() -> IcebergMetadataRefreshFooterPrefetcher.warmup(
+                        Mockito.eq(CATALOG_NAME), Mockito.eq("db"), Mockito.eq("tbl"), Mockito.eq(testCase[2].longValue()),
+                        Mockito.same(ctx), Mockito.any()));
+                Assertions.assertSame(candidate, tables.getIfPresent(key));
+            } finally {
+                workers.shutdownNow();
+            }
+        }
+    }
+
+    private BaseTable mockRefreshCandidateWithoutSnapshot(String location) {
+        BaseTable table = Mockito.mock(BaseTable.class);
+        TableOperations ops = Mockito.mock(TableOperations.class);
+        TableMetadata metadata = Mockito.mock(TableMetadata.class);
+        Mockito.when(table.operations()).thenReturn(ops);
+        Mockito.when(ops.current()).thenReturn(metadata);
+        Mockito.when(metadata.metadataFileLocation()).thenReturn(location);
+        Mockito.when(table.currentSnapshot()).thenReturn(null);
+        return table;
+    }
+
     @Test
     public void testRefreshPublishesOnlyAfterWarmup() throws Exception {
         for (boolean sameMetadata : List.of(false, true)) {

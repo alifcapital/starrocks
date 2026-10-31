@@ -18,6 +18,7 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.LoadingCache;
 import com.starrocks.common.Config;
 import com.starrocks.common.jmockit.Deencapsulation;
+import com.starrocks.common.util.UUIDUtil;
 import com.starrocks.datacache.DataCacheSelectExecutor;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.SessionVariable;
@@ -36,8 +37,10 @@ import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Deque;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
@@ -70,15 +73,129 @@ public class IcebergMetadataRefreshFooterPrefetcherTest {
     }
 
     private void warmup() {
-        IcebergMetadataRefreshFooterPrefetcher.warmup("iceberg", "db", "table", caller, executor);
+        warmup(100L);
+    }
+
+    private void warmup(long baseSnapshotId) {
+        IcebergMetadataRefreshFooterPrefetcher.warmup("iceberg", "db", "table", baseSnapshotId, caller, executor);
+    }
+
+    // Records the base snapshot id every cache select of the prefetcher runs with.
+    private static List<Long> recordBases(MockedStatic<DataCacheSelectExecutor> cacheSelect, Runnable duringRun) {
+        List<Long> bases = new ArrayList<>();
+        cacheSelect.when(() -> DataCacheSelectExecutor.cacheSelect(Mockito.any(), Mockito.any()))
+                .thenAnswer(invocation -> {
+                    ConnectContext ctx = invocation.getArgument(1);
+                    bases.add(ctx.getSessionVariable().getCacheSelectFooterBaseSnapshotId());
+                    if (bases.size() == 1 && duringRun != null) {
+                        duringRun.run();
+                    }
+                    return null;
+                });
+        return bases;
     }
 
     @Test
     public void testDisabledDoesNotQueueWork() {
         caller.getSessionVariable().setEnableIcebergMetadataRefreshFooterPrefetch(false);
         warmup();
-        IcebergMetadataRefreshFooterPrefetcher.warmup("iceberg", "db", "table", null, executor);
+        IcebergMetadataRefreshFooterPrefetcher.warmup("iceberg", "db", "table", 100L, null, executor);
         Mockito.verifyNoInteractions(executor);
+    }
+
+    @Test
+    public void testWarmupCarriesBaseSnapshotOnlyOnItsOwnSessionVariable() {
+        try (MockedStatic<DataCacheSelectExecutor> cacheSelect = Mockito.mockStatic(DataCacheSelectExecutor.class)) {
+            List<Long> bases = recordBases(cacheSelect, null);
+            warmup(42L);
+            queue.removeFirst().run();
+            Assertions.assertEquals(List.of(42L), bases);
+            Assertions.assertEquals(SessionVariable.CACHE_SELECT_FOOTER_BASE_NOT_SET,
+                    caller.getSessionVariable().getCacheSelectFooterBaseSnapshotId());
+        }
+    }
+
+    @Test
+    public void testWarmupWithoutBaseWarmsEveryFile() {
+        try (MockedStatic<DataCacheSelectExecutor> cacheSelect = Mockito.mockStatic(DataCacheSelectExecutor.class)) {
+            List<Long> bases = recordBases(cacheSelect, null);
+            warmup(SessionVariable.CACHE_SELECT_FOOTER_BASE_NOT_SET);
+            queue.removeFirst().run();
+            Assertions.assertEquals(List.of(SessionVariable.CACHE_SELECT_FOOTER_BASE_NOT_SET), bases);
+        }
+    }
+
+    @Test
+    public void testPendingRequestsMergeIntoTheOldestBase() {
+        try (MockedStatic<DataCacheSelectExecutor> cacheSelect = Mockito.mockStatic(DataCacheSelectExecutor.class)) {
+            List<Long> bases = recordBases(cacheSelect, null);
+            warmup(5L);
+            warmup(6L);
+            warmup(7L);
+            Assertions.assertEquals(1, queue.size());
+            queue.removeFirst().run();
+            // The files added by the refreshes that queued 5 and 6 are still cold, so the one run covers them.
+            Assertions.assertEquals(List.of(5L), bases);
+            Assertions.assertTrue(queue.isEmpty());
+        }
+    }
+
+    @Test
+    public void testPendingRequestForEveryFileAbsorbsTheOther() {
+        long everyFile = SessionVariable.CACHE_SELECT_FOOTER_BASE_NOT_SET;
+        for (long[] order : List.of(new long[] {everyFile, 6L}, new long[] {6L, everyFile})) {
+            try (MockedStatic<DataCacheSelectExecutor> cacheSelect =
+                         Mockito.mockStatic(DataCacheSelectExecutor.class)) {
+                List<Long> bases = recordBases(cacheSelect, null);
+                warmup(order[0]);
+                warmup(order[1]);
+                queue.removeFirst().run();
+                Assertions.assertEquals(List.of(everyFile), bases);
+                Assertions.assertTrue(queue.isEmpty());
+            }
+        }
+    }
+
+    @Test
+    public void testRequestQueuedDuringRunKeepsItsOwnBase() {
+        try (MockedStatic<DataCacheSelectExecutor> cacheSelect = Mockito.mockStatic(DataCacheSelectExecutor.class)) {
+            List<Long> bases = recordBases(cacheSelect, () -> {
+                warmup(6L);
+                warmup(7L);
+            });
+            warmup(5L);
+            queue.removeFirst().run();
+            // The running warmup may have planned already, so the request of 6 is not merged into it.
+            Assertions.assertEquals(List.of(5L), bases);
+            Assertions.assertEquals(1, queue.size());
+            queue.removeFirst().run();
+            Assertions.assertEquals(List.of(5L, 6L), bases);
+            Assertions.assertTrue(queue.isEmpty());
+        }
+    }
+
+    @Test
+    public void testCacheSelectSubContextKeepsFooterVariables() {
+        ConnectContext ctx = UtFrameUtils.createDefaultCtx();
+        ctx.setQueryId(UUIDUtil.genUUID());
+        ctx.getSessionVariable().setCacheSelectFooterOnly(true);
+        ctx.getSessionVariable().setCacheSelectFooterBaseSnapshotId(42L);
+        DataCacheSelectStatement stmt = Mockito.mock(DataCacheSelectStatement.class);
+        Mockito.when(stmt.getCatalog()).thenReturn("iceberg");
+
+        SessionVariable sub = DataCacheSelectExecutor.buildCacheSelectConnectContext(stmt, ctx, true)
+                .getSessionVariable();
+
+        Assertions.assertTrue(sub.isCacheSelectFooterOnly());
+        Assertions.assertEquals(42L, sub.getCacheSelectFooterBaseSnapshotId());
+        Assertions.assertNotSame(ctx.getSessionVariable(), sub);
+    }
+
+    @Test
+    public void testFooterBaseVariableDefaultsToNotSet() {
+        Assertions.assertEquals(SessionVariable.CACHE_SELECT_FOOTER_BASE_NOT_SET,
+                new SessionVariable().getCacheSelectFooterBaseSnapshotId());
+        Assertions.assertFalse(new SessionVariable().isCacheSelectFooterOnly());
     }
 
     @Test
@@ -190,8 +307,9 @@ public class IcebergMetadataRefreshFooterPrefetcherTest {
         try (MockedStatic<IcebergMetadataRefreshFooterPrefetcher> prefetch =
                      Mockito.mockStatic(IcebergMetadataRefreshFooterPrefetcher.class)) {
             catalog.refreshTable("db", "table", caller, executor);
+            // The table cached before the refresh had snapshot 1, so the warmup is told to cover what came after it.
             prefetch.verify(() -> IcebergMetadataRefreshFooterPrefetcher.warmup(
-                    Mockito.eq("iceberg"), Mockito.eq("db"), Mockito.eq("table"),
+                    Mockito.eq("iceberg"), Mockito.eq("db"), Mockito.eq("table"), Mockito.eq(1L),
                     Mockito.same(caller), Mockito.any(ExecutorService.class)));
             Assertions.assertSame(updatedTable,
                     tables.getIfPresent(new CachingIcebergCatalog.IcebergTableName("db", "table")));

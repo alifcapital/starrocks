@@ -1919,6 +1919,16 @@ public class IcebergMetadata implements ConnectorMetadata {
                 catalogName, dbName, tableName, planMode, connectContext);
         scanContext.setLocalParallelism(catalogProperties.getIcebergJobPlanningThreadNum());
         scanContext.setLocalPlanningMaxSlotSize(catalogProperties.getLocalPlanningMaxSlotBytes());
+        // The footer warmup after a refresh must read the footers of only the files added since the snapshot
+        // cached before the refresh. We fear that an ordinary query or a user CACHE SELECT would lose files
+        // if it took this restriction, so it applies only together with the footer-only mode that the warmup
+        // alone enables.
+        SessionVariable sessionVariable = connectContext != null ? connectContext.getSessionVariable() : null;
+        if (sessionVariable != null && sessionVariable.isCacheSelectFooterOnly()
+                && sessionVariable.getCacheSelectFooterBaseSnapshotId()
+                != SessionVariable.CACHE_SELECT_FOOTER_BASE_NOT_SET) {
+            scanContext.setFooterBaseSnapshotId(sessionVariable.getCacheSelectFooterBaseSnapshotId());
+        }
 
         final long snapshotId = tvrVersionRange.end().orElseThrow(() -> new StarRocksConnectorException(
                 "Snapshot ID is not present in tvrVersionRange: " + tvrVersionRange));

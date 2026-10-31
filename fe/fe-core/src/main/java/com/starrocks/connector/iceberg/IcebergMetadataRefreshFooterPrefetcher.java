@@ -58,6 +58,11 @@ import java.util.concurrent.ExecutorService;
 // The two knobs are deliberately split so a user opting into the public feature does not
 // accidentally turn their own ad-hoc CACHE SELECT into a footer-only no-op.
 //
+// A big table with frequent commits must not get a footer pass over every file on each commit. The
+// refresh passes the snapshot the cache held before it, and the INVISIBLE session var
+// cache_select_footer_base_snapshot_id carries it to Iceberg scan planning, which then plans only the
+// data files added after that snapshot.
+//
 // Submitted fire-and-forget to the caller-provided single-thread executor so the refresh thread
 // returns immediately; a failed warm-up only logs a warning and never propagates.
 public class IcebergMetadataRefreshFooterPrefetcher {
@@ -67,12 +72,25 @@ public class IcebergMetadataRefreshFooterPrefetcher {
     // replaces the pending request; it needs another scan because planning may have finished.
     private static final Map<List<String>, WarmupTask> INFLIGHT = new HashMap<>();
 
+    // A request warms the data files added after baseSnapshotId, the snapshot the table cache held before
+    // the refresh. SessionVariable.CACHE_SELECT_FOOTER_BASE_NOT_SET warms every file.
+    private static final class WarmupRequest {
+        private final long baseSnapshotId;
+        private final SessionVariable sessionVariable;
+
+        private WarmupRequest(long baseSnapshotId, SessionVariable sessionVariable) {
+            this.baseSnapshotId = baseSnapshotId;
+            this.sessionVariable = sessionVariable;
+        }
+    }
+
     private static final class WarmupTask implements Runnable {
+        // catalog, database, table and warehouse
         private final List<String> key;
         private final ExecutorService executor;
-        private Runnable pending;
+        private WarmupRequest pending;
 
-        private WarmupTask(List<String> key, ExecutorService executor, Runnable pending) {
+        private WarmupTask(List<String> key, ExecutorService executor, WarmupRequest pending) {
             this.key = key;
             this.executor = executor;
             this.pending = pending;
@@ -91,13 +109,14 @@ public class IcebergMetadataRefreshFooterPrefetcher {
 
         @Override
         public void run() {
-            Runnable request;
+            WarmupRequest request;
             synchronized (INFLIGHT) {
                 request = pending;
                 pending = null;
             }
             try {
-                request.run();
+                runWarmup(key.get(0), key.get(1), key.get(2), request.sessionVariable, key.get(3),
+                        request.baseSnapshotId);
             } finally {
                 boolean resubmit;
                 synchronized (INFLIGHT) {
@@ -114,7 +133,10 @@ public class IcebergMetadataRefreshFooterPrefetcher {
         }
     }
 
-    public static void warmup(String catalogName, String dbName, String tableName,
+    // baseSnapshotId is the snapshot the table cache held before the refresh that calls this, or
+    // SessionVariable.CACHE_SELECT_FOOTER_BASE_NOT_SET when the table had none. We expect the files of that
+    // snapshot to be warm already, so the warmup covers only the files added after it.
+    public static void warmup(String catalogName, String dbName, String tableName, long baseSnapshotId,
                               ConnectContext callerCtx, ExecutorService executor) {
         if (executor == null || catalogName == null || dbName == null || tableName == null) {
             return;
@@ -131,24 +153,39 @@ public class IcebergMetadataRefreshFooterPrefetcher {
                 : WarehouseManager.DEFAULT_WAREHOUSE_NAME;
         final List<String> key = ImmutableList.of(catalogName, dbName, tableName, warehouseName);
         final SessionVariable clonedSv = callerSv.clone();
-        Runnable request = () -> runWarmup(catalogName, dbName, tableName, clonedSv, warehouseName);
         WarmupTask task;
         synchronized (INFLIGHT) {
             task = INFLIGHT.get(key);
             if (task != null) {
-                task.pending = request;
+                // The pending request has not started, so the files added by its refresh are still cold.
+                // We fear that the later base would leave them cold, so the merged request covers the files
+                // of both requests. Without a pending request a warmup is running and may have planned
+                // already, so the new request keeps its own base.
+                long mergedBase = task.pending != null
+                        ? coveringBase(task.pending.baseSnapshotId, baseSnapshotId) : baseSnapshotId;
+                task.pending = new WarmupRequest(mergedBase, clonedSv);
                 return;
             }
-            task = new WarmupTask(key, executor, request);
+            task = new WarmupTask(key, executor, new WarmupRequest(baseSnapshotId, clonedSv));
             INFLIGHT.put(key, task);
         }
         task.submit();
     }
 
+    // The pending request came from the earlier refresh, so its base covers the files of both requests,
+    // unless either of them warms every file.
+    private static long coveringBase(long pendingBase, long newBase) {
+        if (pendingBase == SessionVariable.CACHE_SELECT_FOOTER_BASE_NOT_SET
+                || newBase == SessionVariable.CACHE_SELECT_FOOTER_BASE_NOT_SET) {
+            return SessionVariable.CACHE_SELECT_FOOTER_BASE_NOT_SET;
+        }
+        return pendingBase;
+    }
+
     private static void runWarmup(String catalogName, String dbName, String tableName,
-                                  SessionVariable clonedSv, String warehouseName) {
+                                  SessionVariable clonedSv, String warehouseName, long baseSnapshotId) {
         try {
-            ConnectContext ctx = buildContext(catalogName, dbName, clonedSv, warehouseName);
+            ConnectContext ctx = buildContext(catalogName, dbName, clonedSv, warehouseName, baseSnapshotId);
             DataCacheSelectStatement stmt = buildStatement(catalogName, dbName, tableName);
             DataCacheSelectExecutor.cacheSelect(stmt, ctx);
         } catch (Throwable t) {
@@ -160,7 +197,8 @@ public class IcebergMetadataRefreshFooterPrefetcher {
     }
 
     private static ConnectContext buildContext(String catalogName, String dbName,
-                                                SessionVariable clonedSv, String warehouseName) {
+                                                SessionVariable clonedSv, String warehouseName,
+                                                long baseSnapshotId) {
         ConnectContext ctx = new ConnectContext();
         ctx.setGlobalStateMgr(GlobalStateMgr.getCurrentState());
         // Force the internal footer-only signal on for this cache_select run so
@@ -169,6 +207,10 @@ public class IcebergMetadataRefreshFooterPrefetcher {
         // enable_iceberg_metadata_refresh_footer_prefetch knob must not see footer-only mode
         // leak into their own CACHE SELECT statements.
         clonedSv.setCacheSelectFooterOnly(true);
+        // We expect the footers of the files that existed at the base snapshot to be warm, so scan planning
+        // keeps only the files added after it. Like cache_select_footer_only, this variable is set only
+        // here and read only by FE planning.
+        clonedSv.setCacheSelectFooterBaseSnapshotId(baseSnapshotId);
         // Stamp the warehouse name onto the cloned session var directly. We must NOT call
         // ctx.setCurrentWarehouse(): that helper replaces sessionVariable with a fresh default,
         // discarding cacheSelectFooterOnly and every caller setting we just cloned.

@@ -775,6 +775,12 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     // feature via `enable_iceberg_metadata_refresh_footer_prefetch` must not affect plain
     // CACHE SELECT semantics for ordinary queries on their session.
     public static final String CACHE_SELECT_FOOTER_ONLY = "cache_select_footer_only";
+    // Internal and FE-only, set only by IcebergMetadataRefreshFooterPrefetcher together with
+    // cache_select_footer_only. We do not want a refresh of a big table to read the footers of all its files,
+    // so the footer-only CACHE SELECT plans only the Iceberg data files added after this snapshot.
+    // CACHE_SELECT_FOOTER_BASE_NOT_SET plans every file.
+    public static final String CACHE_SELECT_FOOTER_BASE_SNAPSHOT_ID = "cache_select_footer_base_snapshot_id";
+    public static final long CACHE_SELECT_FOOTER_BASE_NOT_SET = -1L;
     public static final String IO_TASKS_PER_SCAN_OPERATOR = "io_tasks_per_scan_operator";
     public static final String CONNECTOR_IO_TASKS_PER_SCAN_OPERATOR = "connector_io_tasks_per_scan_operator";
     public static final String ENABLE_CONNECTOR_ADAPTIVE_IO_TASKS = "enable_connector_adaptive_io_tasks";
@@ -2838,6 +2844,9 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     @VariableMgr.VarAttr(name = CACHE_SELECT_FOOTER_ONLY, flag = VariableMgr.INVISIBLE)
     private boolean cacheSelectFooterOnly = false;
 
+    @VariableMgr.VarAttr(name = CACHE_SELECT_FOOTER_BASE_SNAPSHOT_ID, flag = VariableMgr.INVISIBLE)
+    private long cacheSelectFooterBaseSnapshotId = CACHE_SELECT_FOOTER_BASE_NOT_SET;
+
     @VariableMgr.VarAttr(name = ENABLE_DYNAMIC_PRUNE_SCAN_RANGE)
     private boolean enableDynamicPruneScanRange = true;
 
@@ -3940,6 +3949,14 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     public boolean isCacheSelectFooterOnly() {
         return cacheSelectFooterOnly;
+    }
+
+    public void setCacheSelectFooterBaseSnapshotId(long v) {
+        this.cacheSelectFooterBaseSnapshotId = v;
+    }
+
+    public long getCacheSelectFooterBaseSnapshotId() {
+        return cacheSelectFooterBaseSnapshotId;
     }
 
     public void setConnectorIoTasksPerScanOperator(int connectorIoTasksPerScanOperator) {

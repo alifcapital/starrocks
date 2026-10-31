@@ -44,6 +44,9 @@ public class StarRocksIcebergTableScanContext {
     // current table schema for an ordinary read (so a metadata-only ADD COLUMN, which advances the
     // schema without a new snapshot, is visible). Null means keep Iceberg's default per-snapshot schema.
     private Schema readSchema;
+    // Set only for the footer warmup after a refresh. The scan then plans only the data files added after
+    // this snapshot; null plans every file.
+    private Long footerBaseSnapshotId;
 
     public StarRocksIcebergTableScanContext(String catalogName, String dbName, String tableName, PlanMode planMode) {
         this(catalogName, dbName, tableName, planMode, null);
@@ -155,5 +158,13 @@ public class StarRocksIcebergTableScanContext {
 
     public void setReadSchema(Schema readSchema) {
         this.readSchema = readSchema;
+    }
+
+    public Long getFooterBaseSnapshotId() {
+        return footerBaseSnapshotId;
+    }
+
+    public void setFooterBaseSnapshotId(long footerBaseSnapshotId) {
+        this.footerBaseSnapshotId = footerBaseSnapshotId;
     }
 }

@@ -19,6 +19,7 @@ import com.starrocks.common.jmockit.Deencapsulation;
 import com.starrocks.connector.iceberg.CachingIcebergCatalog.IcebergTableName;
 import com.starrocks.mysql.MysqlCommand;
 import com.starrocks.qe.ConnectContext;
+import com.starrocks.qe.SessionVariable;
 import org.apache.iceberg.BaseTable;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.ManifestFile;
@@ -68,6 +69,10 @@ class ActiveIcebergCacheTest {
     }
 
     private BaseTable table(String location, ManifestFile... manifests) {
+        return table(location, 7L, manifests);
+    }
+
+    private BaseTable table(String location, long snapshotId, ManifestFile... manifests) {
         TableOperations ops = Mockito.mock(TableOperations.class);
         TableMetadata metadata = Mockito.mock(TableMetadata.class);
         Snapshot snapshot = Mockito.mock(Snapshot.class);
@@ -75,9 +80,19 @@ class ActiveIcebergCacheTest {
         Mockito.when(metadata.metadataFileLocation()).thenReturn(location);
         Mockito.when(metadata.currentSnapshot()).thenReturn(snapshot);
         Mockito.when(metadata.snapshots()).thenReturn(List.of(snapshot));
-        Mockito.when(snapshot.snapshotId()).thenReturn(7L);
+        Mockito.when(snapshot.snapshotId()).thenReturn(snapshotId);
         Mockito.when(snapshot.timestampMillis()).thenReturn(1L);
         Mockito.when(snapshot.dataManifests(Mockito.any())).thenReturn(List.of(manifests));
+        return new BaseTable(ops, "db.tbl");
+    }
+
+    private BaseTable tableWithoutSnapshot(String location) {
+        TableOperations ops = Mockito.mock(TableOperations.class);
+        TableMetadata metadata = Mockito.mock(TableMetadata.class);
+        Mockito.when(ops.current()).thenReturn(metadata);
+        Mockito.when(metadata.metadataFileLocation()).thenReturn(location);
+        Mockito.when(metadata.currentSnapshot()).thenReturn(null);
+        Mockito.when(metadata.snapshots()).thenReturn(List.of());
         return new BaseTable(ops, "db.tbl");
     }
 
@@ -103,10 +118,14 @@ class ActiveIcebergCacheTest {
     }
 
     private StarRocksIcebergTableScan scan(BaseTable table) {
+        return scan(table, 7L);
+    }
+
+    private StarRocksIcebergTableScan scan(BaseTable table, long snapshotId) {
         StarRocksIcebergTableScan scan = Mockito.mock(StarRocksIcebergTableScan.class);
         Mockito.when(delegate.getTableScan(Mockito.same(table), Mockito.any())).thenReturn(scan);
         Mockito.when(scan.planWith(Mockito.any())).thenReturn(scan);
-        Mockito.when(scan.useSnapshot(7L)).thenReturn(scan);
+        Mockito.when(scan.useSnapshot(snapshotId)).thenReturn(scan);
         return scan;
     }
 
@@ -361,7 +380,13 @@ class ActiveIcebergCacheTest {
 
     private static void verifyFooterWarmups(MockedStatic<IcebergMetadataRefreshFooterPrefetcher> prefetcher, int count) {
         prefetcher.verify(() -> IcebergMetadataRefreshFooterPrefetcher.warmup(Mockito.eq("test"), Mockito.eq("db"),
-                Mockito.eq("tbl"), Mockito.any(), Mockito.any()), Mockito.times(count));
+                Mockito.eq("tbl"), Mockito.anyLong(), Mockito.any(), Mockito.any()), Mockito.times(count));
+    }
+
+    private static void verifyFooterWarmupBase(MockedStatic<IcebergMetadataRefreshFooterPrefetcher> prefetcher,
+                                               long baseSnapshotId) {
+        prefetcher.verify(() -> IcebergMetadataRefreshFooterPrefetcher.warmup(Mockito.eq("test"), Mockito.eq("db"),
+                Mockito.eq("tbl"), Mockito.eq(baseSnapshotId), Mockito.any(), Mockito.any()), Mockito.times(1));
     }
 
     @Test
@@ -445,12 +470,12 @@ class ActiveIcebergCacheTest {
             // New metadata: the new snapshot is warmed and cached before its footers are warmed, since the
             // footer warmup takes the table from the cache.
             ManifestFile newManifest = manifest("new-manifest");
-            BaseTable newTable = table("new", newManifest);
-            StarRocksIcebergTableScan newScan = scan(newTable);
+            BaseTable newTable = table("new", 8L, newManifest);
+            StarRocksIcebergTableScan newScan = scan(newTable, 8L);
             Mockito.when(delegate.getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl"))).thenReturn(newTable);
             AtomicReference<Table> cachedAtFooterWarmup = new AtomicReference<>();
             prefetcher.when(() -> IcebergMetadataRefreshFooterPrefetcher.warmup(Mockito.any(), Mockito.any(),
-                    Mockito.any(), Mockito.any(), Mockito.any()))
+                    Mockito.any(), Mockito.anyLong(), Mockito.any(), Mockito.any()))
                     .thenAnswer(inv -> {
                         cachedAtFooterWarmup.set(tables(catalog).getIfPresent(key));
                         return null;
@@ -458,7 +483,28 @@ class ActiveIcebergCacheTest {
             catalog.refreshTable("db", "tbl", new ConnectContext(), executor);
             Mockito.verify(newScan).refreshDataFileCache(List.of(newManifest));
             verifyFooterWarmups(prefetcher, 1);
+            // The footers of the snapshot cached before the refresh are warm, so only the files after it are warmed.
+            verifyFooterWarmupBase(prefetcher, 7L);
             assertSame(newTable, cachedAtFooterWarmup.get());
         }
+    }
+
+    @Test
+    void firstSnapshotOfCachedTableWarmsFootersOfEveryFile() {
+        CachingIcebergCatalog catalog = catalog(true);
+        tables(catalog).put(key, tableWithoutSnapshot("empty"));
+        ManifestFile newManifest = manifest("new-manifest");
+        BaseTable newTable = table("new", 8L, newManifest);
+        scan(newTable, 8L);
+        Mockito.when(delegate.getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl"))).thenReturn(newTable);
+        long now = System.currentTimeMillis();
+        times(catalog, "tableLatestAccessTime").put(key, now);
+        times(catalog, "tableLatestRefreshTime").put(key, now);
+        try (MockedStatic<IcebergMetadataRefreshFooterPrefetcher> prefetcher =
+                Mockito.mockStatic(IcebergMetadataRefreshFooterPrefetcher.class)) {
+            catalog.refreshTable("db", "tbl", new ConnectContext(), executor);
+            verifyFooterWarmupBase(prefetcher, SessionVariable.CACHE_SELECT_FOOTER_BASE_NOT_SET);
+        }
+        assertSame(newTable, tables(catalog).getIfPresent(key));
     }
 }
