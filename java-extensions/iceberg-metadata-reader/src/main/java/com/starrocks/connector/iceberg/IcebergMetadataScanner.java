@@ -26,6 +26,7 @@ import org.apache.iceberg.ManifestFile;
 import org.apache.iceberg.ManifestFiles;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.StructLike;
+import org.apache.iceberg.Table;
 import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.io.CloseableIterator;
@@ -181,7 +182,7 @@ public class IcebergMetadataScanner extends AbstractIcebergMetadataScanner {
             case "spec_id":
                 return file.specId();
             case "partition_data":
-                return table.spec().isPartitioned() ? getPartitionData(file) : null;
+                return hasPartitionData(table, file) ? getPartitionData(file) : null;
             case "record_count":
                 return file.recordCount();
             case "file_size_in_bytes":
@@ -203,6 +204,13 @@ public class IcebergMetadataScanner extends AbstractIcebergMetadataScanner {
             default:
                 throw new IllegalArgumentException("Unrecognized column name " + columnName);
         }
+    }
+
+    // A file keeps the partition of the spec it was written with. We fear that a check of the current spec drops
+    // the partition of the files of an older partitioned spec once the table dropped its partition fields: then
+    // their identity partition columns read as NULL and their partitioned deletes no longer reach them.
+    static boolean hasPartitionData(Table table, ContentFile<?> file) {
+        return table.specs().get(file.specId()).isPartitioned();
     }
 
     private byte[] getPartitionData(ContentFile<?> file) {

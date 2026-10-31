@@ -16,6 +16,7 @@ package org.apache.iceberg;
 
 import com.esotericsoftware.kryo.Kryo;
 import com.esotericsoftware.kryo.io.Input;
+import com.google.common.annotations.VisibleForTesting;
 import com.starrocks.connector.exception.StarRocksConnectorException;
 import com.starrocks.connector.metadata.MetadataCollectJob;
 import com.starrocks.connector.share.iceberg.CommonMetadataBean;
@@ -60,7 +61,6 @@ public class MetadataParser {
     private final ScanMetrics metrics;
     private final DeleteFileIndex deleteFileIndex;
     private final MetadataCollectJob job;
-    private final boolean isPartitionedTable;
     private final long liveFilesCount;
     private final ConcurrentLinkedQueue<FileScanTask> fileScanTaskQueue = new ConcurrentLinkedQueue<>();
 
@@ -89,7 +89,6 @@ public class MetadataParser {
         this.job = job;
         this.metrics = scanMetrics;
         this.deleteFileIndex = deleteFileIndex;
-        this.isPartitionedTable = table.spec().isPartitioned();
         this.specStringCache = specStringCache;
         this.residualCache = residualCache;
         // Use the scan's read schema (the targeted snapshot's schema for a time-travel read), not the
@@ -203,7 +202,8 @@ public class MetadataParser {
     }
 
     // TODO(stephen): support distributed plan with delete file if necessary.
-    private ContentFile<?> parseThriftToIcebergDataFile(TMetadataEntry entry) {
+    @VisibleForTesting
+    ContentFile<?> parseThriftToIcebergDataFile(TMetadataEntry entry) {
         if (!entry.isSetIceberg_metadata()) {
             throw new StarRocksConnectorException("not found iceberg metadata in the metadata collect job result");
         }
@@ -287,12 +287,13 @@ public class MetadataParser {
     }
 
     private PartitionData buildPartitionData(TIcebergMetadata thrift) {
-        if (!isPartitionedTable) {
-            return EMPTY_PARTITION_DATA;
-        }
-
         Integer specId = thrift.getSpec_id();
         PartitionSpec spec = table.specs().get(specId);
+        // A file keeps the partition of the spec it was written with, so a file of an older partitioned spec has
+        // partition data even after the current spec dropped every partition field.
+        if (spec.isUnpartitioned() || !thrift.isSetPartition_data()) {
+            return EMPTY_PARTITION_DATA;
+        }
         PartitionData partitionDataTemplate = partitionDataTemplates.computeIfAbsent(specId,
                 ignore -> new PartitionData(spec.partitionType()));
 
