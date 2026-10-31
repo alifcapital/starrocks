@@ -1,0 +1,40 @@
+-- name: test_iceberg_eq_delete_partition_scope
+-- Iceberg applies an equality delete of a partitioned spec only to data files of the same spec and partition, and
+-- one of an unpartitioned spec to every data file. The tables are built with the Iceberg Java API, and the expected
+-- rows are those of the Iceberg reference reader.
+create external catalog iceberg_eq_scope_${uuid0} PROPERTIES ("type"="iceberg", "iceberg.catalog.type"="hive", "iceberg.catalog.hive.metastore.uris"="${iceberg_catalog_hive_metastore_uris}", "aws.s3.access_key"="${oss_ak}", "aws.s3.secret_key"="${oss_sk}", "aws.s3.endpoint"="${oss_endpoint}");
+create database iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0};
+call iceberg_eq_scope_${uuid0}.system.register_table("eq_scope_db_${uuid0}", "eq_scope_by_id", "oss://${oss_bucket}/iceberg_ci_db/eq_scope_by_id/metadata/v6.metadata.json");
+call iceberg_eq_scope_${uuid0}.system.register_table("eq_scope_db_${uuid0}", "eq_scope_by_id_p", "oss://${oss_bucket}/iceberg_ci_db/eq_scope_by_id_p/metadata/v4.metadata.json");
+call iceberg_eq_scope_${uuid0}.system.register_table("eq_scope_db_${uuid0}", "eq_scope_mixed", "oss://${oss_bucket}/iceberg_ci_db/eq_scope_mixed/metadata/v7.metadata.json");
+call iceberg_eq_scope_${uuid0}.system.register_table("eq_scope_db_${uuid0}", "eq_scope_global_key", "oss://${oss_bucket}/iceberg_ci_db/eq_scope_global_key/metadata/v6.metadata.json");
+call iceberg_eq_scope_${uuid0}.system.register_table("eq_scope_db_${uuid0}", "eq_scope_two_keys", "oss://${oss_bucket}/iceberg_ci_db/eq_scope_two_keys/metadata/v4.metadata.json");
+call iceberg_eq_scope_${uuid0}.system.register_table("eq_scope_db_${uuid0}", "eq_scope_rename_tt", "oss://${oss_bucket}/iceberg_ci_db/eq_scope_rename_tt/metadata/v4.metadata.json");
+set new_planner_optimize_timeout = 30000;
+-- deletes by id: id 1 in p=a and id 2 in p=b only
+select * from iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_by_id order by p, id;
+select count(*) from iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_by_id;
+select * from iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_by_id where p = 'b' order by id;
+select * from iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_by_id where id = 1 order by p;
+-- the key contains the identity partition column, as in a Flink upsert table
+select * from iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_by_id_p order by p, id;
+-- a global delete of id 1 (unpartitioned spec) next to a partitioned delete of id 2 in p=a
+select * from iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_mixed order by p, id;
+select * from iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_mixed where p = 'a' order by id;
+-- a partitioned delete by (id, p) of an older spec next to a global delete by id: the global one deletes id 2
+-- from the older spec's data file as well
+select * from iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_global_key order by id;
+select count(*) from iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_global_key where id = 2;
+-- deletes by a and by b in one partition: the row whose a is NULL stays, a delete by b has no a column
+select * from iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_two_keys order by b;
+-- time travel to the snapshot before the key column id was renamed to key_id
+select * from iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_rename_tt order by v;
+select id, v from iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_rename_tt for version as of 8747614673051169553 order by v;
+drop table iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_by_id;
+drop table iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_by_id_p;
+drop table iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_mixed;
+drop table iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_global_key;
+drop table iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_two_keys;
+drop table iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_rename_tt;
+drop database iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0};
+drop catalog iceberg_eq_scope_${uuid0};

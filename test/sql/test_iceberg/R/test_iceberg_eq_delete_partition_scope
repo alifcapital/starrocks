@@ -1,0 +1,115 @@
+-- name: test_iceberg_eq_delete_partition_scope
+-- Iceberg applies an equality delete of a partitioned spec only to data files of the same spec and partition, and
+-- one of an unpartitioned spec to every data file. The tables are built with the Iceberg Java API, and the expected
+-- rows are those of the Iceberg reference reader.
+create external catalog iceberg_eq_scope_${uuid0} PROPERTIES ("type"="iceberg", "iceberg.catalog.type"="hive", "iceberg.catalog.hive.metastore.uris"="${iceberg_catalog_hive_metastore_uris}", "aws.s3.access_key"="${oss_ak}", "aws.s3.secret_key"="${oss_sk}", "aws.s3.endpoint"="${oss_endpoint}");
+-- result:
+-- !result
+create database iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0};
+-- result:
+-- !result
+call iceberg_eq_scope_${uuid0}.system.register_table("eq_scope_db_${uuid0}", "eq_scope_by_id", "oss://${oss_bucket}/iceberg_ci_db/eq_scope_by_id/metadata/v6.metadata.json");
+-- result:
+-- !result
+call iceberg_eq_scope_${uuid0}.system.register_table("eq_scope_db_${uuid0}", "eq_scope_by_id_p", "oss://${oss_bucket}/iceberg_ci_db/eq_scope_by_id_p/metadata/v4.metadata.json");
+-- result:
+-- !result
+call iceberg_eq_scope_${uuid0}.system.register_table("eq_scope_db_${uuid0}", "eq_scope_mixed", "oss://${oss_bucket}/iceberg_ci_db/eq_scope_mixed/metadata/v7.metadata.json");
+-- result:
+-- !result
+call iceberg_eq_scope_${uuid0}.system.register_table("eq_scope_db_${uuid0}", "eq_scope_global_key", "oss://${oss_bucket}/iceberg_ci_db/eq_scope_global_key/metadata/v6.metadata.json");
+-- result:
+-- !result
+call iceberg_eq_scope_${uuid0}.system.register_table("eq_scope_db_${uuid0}", "eq_scope_two_keys", "oss://${oss_bucket}/iceberg_ci_db/eq_scope_two_keys/metadata/v4.metadata.json");
+-- result:
+-- !result
+call iceberg_eq_scope_${uuid0}.system.register_table("eq_scope_db_${uuid0}", "eq_scope_rename_tt", "oss://${oss_bucket}/iceberg_ci_db/eq_scope_rename_tt/metadata/v4.metadata.json");
+-- result:
+-- !result
+set new_planner_optimize_timeout = 30000;
+-- result:
+-- !result
+-- deletes by id: id 1 in p=a and id 2 in p=b only
+select * from iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_by_id order by p, id;
+-- result:
+2	a2	a
+1	b1	b
+1	c1	c
+-- !result
+select count(*) from iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_by_id;
+-- result:
+3
+-- !result
+select * from iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_by_id where p = 'b' order by id;
+-- result:
+1	b1	b
+-- !result
+select * from iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_by_id where id = 1 order by p;
+-- result:
+1	b1	b
+1	c1	c
+-- !result
+-- the key contains the identity partition column, as in a Flink upsert table
+select * from iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_by_id_p order by p, id;
+-- result:
+2	a2	a
+1	b1	b
+2	b2	b
+-- !result
+-- a global delete of id 1 (unpartitioned spec) next to a partitioned delete of id 2 in p=a
+select * from iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_mixed order by p, id;
+-- result:
+2	b2	b
+-- !result
+select * from iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_mixed where p = 'a' order by id;
+-- result:
+-- !result
+-- a partitioned delete by (id, p) of an older spec next to a global delete by id: the global one deletes id 2
+-- from the older spec's data file as well
+select * from iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_global_key order by id;
+-- result:
+1	a1	a
+-- !result
+select count(*) from iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_global_key where id = 2;
+-- result:
+0
+-- !result
+-- deletes by a and by b in one partition: the row whose a is NULL stays, a delete by b has no a column
+select * from iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_two_keys order by b;
+-- result:
+None	20	x
+2	30	x
+-- !result
+-- time travel to the snapshot before the key column id was renamed to key_id
+select * from iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_rename_tt order by v;
+-- result:
+2	r2
+-- !result
+select id, v from iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_rename_tt for version as of 8747614673051169553 order by v;
+-- result:
+2	r2
+-- !result
+drop table iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_by_id;
+-- result:
+-- !result
+drop table iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_by_id_p;
+-- result:
+-- !result
+drop table iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_mixed;
+-- result:
+-- !result
+drop table iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_global_key;
+-- result:
+-- !result
+drop table iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_two_keys;
+-- result:
+-- !result
+drop table iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0}.eq_scope_rename_tt;
+-- result:
+-- !result
+drop database iceberg_eq_scope_${uuid0}.eq_scope_db_${uuid0};
+-- result:
+-- !result
+drop catalog iceberg_eq_scope_${uuid0};
+-- result:
+-- !result
