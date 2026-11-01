@@ -59,7 +59,7 @@ protected:
                            {"fetch.wait.max.ms", "10"},           {"fetch.message.max.bytes", "1024"},
                            {"queued.min.messages", "100000"},     {"queued.max.messages.kbytes", "64"},
                            {"fetch.queue.backoff.ms", "10"}};
-        _context = std::make_unique<StreamLoadContext>(nullptr);
+        _context = std::make_unique<StreamLoadContext>(ExecEnv::GetInstance());
         _context->kafka_info = std::make_unique<KafkaLoadInfo>(info);
         _consumer = std::make_unique<KafkaDataConsumer>(_context.get());
         ASSERT_OK(_consumer->init(_context.get()));
