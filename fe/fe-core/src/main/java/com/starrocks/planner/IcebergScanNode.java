@@ -77,6 +77,7 @@ public class IcebergScanNode extends ScanNode {
     private PartitionIdGenerator partitionIdGenerator = null;
     private IcebergMetricsReporter icebergScanMetricsReporter;
     private boolean usedForDelete = false;
+    private Set<String> runtimeFilterPruningColumns = Set.of();
     private boolean enableIncrementalScanRanges = false;
     // When set, the scan range source records the equality-delete files it applies, exposed via
     // getAppliedEqualDeleteFiles(). The equality-delete -> position-delete conversion reads it back to
@@ -172,6 +173,7 @@ public class IcebergScanNode extends ScanNode {
         scanRangeSource = new IcebergConnectorScanRangeSource(icebergTable,
                 remoteFileInfoSource, morParams, desc, bucketProperties, partitionIdGenerator, true,
                 scanOptimizeOption.getCanUseMinMaxOpt());
+        scanRangeSource.setRuntimeFilterPruningColumns(runtimeFilterPruningColumns);
         applyTopnReorderToScanRangeSource();
     }
 
@@ -259,6 +261,7 @@ public class IcebergScanNode extends ScanNode {
                 remoteFileInfoSource, morParams, desc, bucketProperties, partitionIdGenerator, recordScanFiles,
                 scanOptimizeOption.getCanUseMinMaxOpt(), usedForDelete);
         scanRangeSource.setIgnorePositionDeletes(ignorePositionDeletes);
+        scanRangeSource.setRuntimeFilterPruningColumns(runtimeFilterPruningColumns);
         applyTopnReorderToScanRangeSource();
     }
 
@@ -293,6 +296,18 @@ public class IcebergScanNode extends ScanNode {
 
     public boolean isUsedForDelete() {
         return usedForDelete;
+    }
+
+    public void setRuntimeFilterPruningColumns(Set<String> runtimeFilterPruningColumns) {
+        this.runtimeFilterPruningColumns = runtimeFilterPruningColumns;
+    }
+
+    // Whether a runtime filter on the data column matching this slot of an equality delete scan may drop delete rows:
+    // the slot holds the identity partition value of each delete file, see IcebergEqualityDeleteRewriteRule.
+    public boolean isRuntimeFilterPruningSlot(SlotId slotId) {
+        SlotDescriptor slot = desc.getSlot(slotId.asInt());
+        return slot != null && slot.getColumn() != null &&
+                runtimeFilterPruningColumns.contains(slot.getColumn().getName());
     }
 
     public void preProcessIcebergPredicate(ScalarOperator predicate) {
@@ -409,28 +424,7 @@ public class IcebergScanNode extends ScanNode {
         }
 
         if (detailLevel == TExplainLevel.VERBOSE && !isResourceMappingCatalog(icebergTable.getCatalogName())) {
-            ConnectorMetadataRequestContext requestContext = new ConnectorMetadataRequestContext();
-            requestContext.setTableVersionRange(tvrVersionRange);
-            List<String> partitionNames = GlobalStateMgr.getCurrentState().getMetadataMgr().listPartitionNames(
-                    icebergTable.getCatalogName(), icebergTable.getCatalogDBName(),
-                    icebergTable.getCatalogTableName(), requestContext);
-
-            if (selectedPartitionCount == -1) {
-                if (scanRangeSource != null) {
-                    // we have to consume all scan ranges to know how many partition been selected.
-                    while (scanRangeSource.hasMoreOutput()) {
-                        scanRangeSource.getOutputs(1000);
-                    }
-                    selectedPartitionCount = scanRangeSource.selectedPartitionCount();
-                } else {
-                    selectedPartitionCount = 0;
-                }
-            }
-
-            output.append(prefix).append(
-                    String.format("partitions=%s/%s", selectedPartitionCount,
-                            partitionNames.isEmpty() ? 1 : partitionNames.size()));
-            output.append("\n");
+            appendPartitionsExplain(output, prefix);
 
             //record scan metrics, should cosume all scan ranges too.
             //print scan metrics
@@ -447,9 +441,43 @@ public class IcebergScanNode extends ScanNode {
                     .collect(Collectors.toList());
             output.append(prefix).append("Iceberg identifier columns: ").append(identifierColumnNames);
             output.append("\n");
+            if (!runtimeFilterPruningColumns.isEmpty()) {
+                output.append(prefix).append("Runtime filter pruning columns: ")
+                        .append(runtimeFilterPruningColumns.stream().sorted().toList()).append("\n");
+            }
         }
 
         return output.toString();
+    }
+
+    // Lists every partition of the table and may plan all scan ranges. Skipped when the finished query's plan is
+    // rendered into its profile: nothing bounds that metadata read once the query has ended.
+    private void appendPartitionsExplain(StringBuilder output, String prefix) {
+        ConnectContext connectContext = ConnectContext.get();
+        if (connectContext != null && connectContext.isExplainForProfile()) {
+            return;
+        }
+        ConnectorMetadataRequestContext requestContext = new ConnectorMetadataRequestContext();
+        requestContext.setTableVersionRange(tvrVersionRange);
+        List<String> partitionNames = GlobalStateMgr.getCurrentState().getMetadataMgr().listPartitionNames(
+                icebergTable.getCatalogName(), icebergTable.getCatalogDBName(),
+                icebergTable.getCatalogTableName(), requestContext);
+        if (selectedPartitionCount == -1) {
+            if (scanRangeSource != null) {
+                // we have to consume all scan ranges to know how many partition been selected.
+                while (scanRangeSource.hasMoreOutput()) {
+                    scanRangeSource.getOutputs(1000);
+                }
+                selectedPartitionCount = scanRangeSource.selectedPartitionCount();
+            } else {
+                selectedPartitionCount = 0;
+            }
+        }
+
+        output.append(prefix).append(
+                String.format("partitions=%s/%s", selectedPartitionCount,
+                        partitionNames.isEmpty() ? 1 : partitionNames.size()));
+        output.append("\n");
     }
 
     @Override

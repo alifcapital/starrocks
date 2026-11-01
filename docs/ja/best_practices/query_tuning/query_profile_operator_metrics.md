@@ -235,6 +235,7 @@ OLAP_SCAN オペレーターに似ていますが、Iceberg/Hive/Hudi/Detal な�
 | RuntimeFilterEvalTime | Parquetリーダー内でデコード済みの行に対してJoin Runtime Filterを評価するのにかかった時間。 |
 | RuntimeFilterInputRows | ParquetリーダーのJoin Runtime Filter評価に入力された行数。 |
 | RuntimeFilterOutputRows | ParquetリーダーのJoin Runtime Filter評価を通過した行数。`RuntimeFilterInputRows` との差が大きいほど、Lazy列がマテリアライズされる前に多くの行がフィルタリングされたことを意味します。 |
+| ScanRangesPrunedByPartitionValue | identity パーティション値が述語または到着済みの Join Runtime Filter で除外されたため、読み取り前にスキップされた Scan Range の数。 |
 
 ### Exchange Operator
 

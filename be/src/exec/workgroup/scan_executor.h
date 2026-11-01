@@ -14,6 +14,8 @@
 
 #pragma once
 
+#include <atomic>
+
 #include "exec/pipeline/pipeline_metrics.h"
 #include "util/limit_setter.h"
 #include "util/threadpool.h"
@@ -34,7 +36,7 @@ class ScanExecutor {
 public:
     explicit ScanExecutor(std::unique_ptr<ThreadPool> thread_pool, std::unique_ptr<ScanTaskQueue> task_queue,
                           pipeline::ScanExecutorMetrics* metrics);
-    virtual ~ScanExecutor() = default;
+    virtual ~ScanExecutor();
 
     void initialize(int32_t num_threads);
     void close();
@@ -51,6 +53,8 @@ public:
 
 private:
     void worker_thread();
+    // Detaches the thread pool from the process-wide metrics. Idempotent.
+    void _stop_monitoring();
 
     LimitSetter _num_threads_setter;
     std::unique_ptr<ScanTaskQueue> _task_queue;
@@ -60,6 +64,8 @@ private:
     // The metrics outlive the executor and are used after close(): a worker of another executor can still call
     // submit or force_submit, and both update the metrics.
     pipeline::ScanExecutorMetrics* _metrics;
+    // Whether the thread pool is still registered in the metrics, cleared by the first _stop_monitoring.
+    std::atomic<bool> _monitoring{true};
 };
 
 } // namespace starrocks::workgroup

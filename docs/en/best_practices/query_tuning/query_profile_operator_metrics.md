@@ -236,6 +236,7 @@ It's similar to OLAP_SCAN operator but used for scan external tables like Iceber
 | RuntimeFilterEvalTime | Time spent evaluating join runtime filters against decoded rows inside the Parquet reader. | 
 | RuntimeFilterInputRows | Number of rows fed into the Parquet reader's join runtime filter evaluation. | 
 | RuntimeFilterOutputRows | Number of rows surviving the Parquet reader's join runtime filter evaluation. A large gap from `RuntimeFilterInputRows` means the filter dropped rows before lazy columns were materialized. | 
+| ScanRangesPrunedByPartitionValue | Number of scan ranges skipped before they are read because a predicate or an arrived join runtime filter rejects their identity partition values. |
 
 ### Exchange Operator
 

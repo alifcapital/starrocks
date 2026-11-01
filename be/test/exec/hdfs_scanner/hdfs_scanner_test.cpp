@@ -16,6 +16,8 @@
 
 #include <gtest/gtest.h>
 
+#include <filesystem>
+#include <limits>
 #include <memory>
 #include <string>
 #include <tuple>
@@ -43,6 +45,7 @@
 #include "storage/types.h"
 #include "testutil/assert.h"
 #include "testutil/exprs_test_helper.h"
+#include "util/defer_op.h"
 
 namespace starrocks {
 
@@ -1561,6 +1564,119 @@ TEST_F(HdfsScannerTest, TestOrcGetNextWithDictFilter) {
 }
 
 // ====================================================================================================
+// Iceberg `_pos` on ORC: the scanner fills it from the ORC row number.
+
+static SlotDesc string_key_value_with_pos_orc_desc[] = {
+        {"key", TypeDescriptor::from_logical_type(LogicalType::TYPE_VARCHAR)},
+        {"value", TypeDescriptor::from_logical_type(LogicalType::TYPE_VARCHAR)},
+        {"_pos", TypeDescriptor::from_logical_type(LogicalType::TYPE_BIGINT)},
+        {""}};
+static const std::string string_key_value_10k_orc_file =
+        "./be/test/exec/test_data/orc_scanner/string_key_value_10k.orc.zstd";
+
+// Reads every row of `scanner` as (key, _pos).
+static Status read_keys_and_row_positions(HdfsScanner* scanner, RuntimeState* state, const TupleDescriptor& tuple_desc,
+                                          std::vector<std::pair<std::string, int64_t>>* rows) {
+    const SlotId key_slot = tuple_desc.slots()[0]->id();
+    const SlotId pos_slot = tuple_desc.slots()[2]->id();
+    ChunkPtr chunk = ChunkHelper::new_chunk(tuple_desc, 0);
+    for (;;) {
+        chunk->reset();
+        Status st = scanner->get_next(state, &chunk);
+        if (!st.ok() && !st.is_end_of_file()) return st;
+        if (chunk->num_rows() > 0) {
+            const auto& keys = chunk->get_column_by_slot_id(key_slot);
+            const auto& positions = chunk->get_column_by_slot_id(pos_slot);
+            for (size_t i = 0; i < chunk->num_rows(); i++) {
+                rows->emplace_back(keys->get(i).get_slice().to_string(), positions->get(i).get_int64());
+            }
+        }
+        if (st.is_end_of_file()) return Status::OK();
+    }
+}
+
+// A dict filter drops rows from the ORC batch; `_pos` must be filtered the same way and stay aligned with its row.
+TEST_F(HdfsScannerTest, TestOrcIcebergRowPositionWithDictFilter) {
+    auto* tuple_desc = _create_tuple_desc(string_key_value_with_pos_orc_desc);
+
+    std::vector<std::pair<std::string, int64_t>> all_rows;
+    {
+        auto scanner = std::make_shared<HdfsOrcScanner>();
+        auto* range = _create_scan_range(string_key_value_10k_orc_file, 0, 0);
+        auto* ctx = _create_ctx(string_key_value_10k_orc_file, range, tuple_desc);
+        ASSERT_OK(scanner->init(_runtime_state, ctx));
+        ASSERT_OK(scanner->open(_runtime_state));
+        ASSERT_OK(read_keys_and_row_positions(scanner.get(), _runtime_state, *tuple_desc, &all_rows));
+        scanner->close();
+    }
+    ASSERT_EQ(10000u, all_rows.size());
+    std::vector<std::string> key_by_pos(all_rows.size());
+    for (size_t i = 0; i < all_rows.size(); i++) {
+        ASSERT_EQ(static_cast<int64_t>(i), all_rows[i].second);
+        key_by_pos[i] = all_rows[i].first;
+    }
+
+    auto scanner = std::make_shared<HdfsOrcScanner>();
+    auto* range = _create_scan_range(string_key_value_10k_orc_file, 0, 0);
+    auto* ctx = _create_ctx(string_key_value_10k_orc_file, range, tuple_desc);
+    {
+        std::vector<TExprNode> nodes;
+        TExprNode lit_node = create_string_literal_node(TPrimitiveType::VARCHAR, "gggggggggg");
+        push_binary_pred_texpr_node(nodes, TExprOpcode::EQ, tuple_desc->slots()[0], TPrimitiveType::VARCHAR, lit_node);
+        ctx->conjuncts.by_slot[tuple_desc->slots()[0]->id()].push_back(create_expr_context(&_pool, nodes));
+    }
+    for (auto& it : ctx->conjuncts.by_slot) {
+        ASSERT_OK(Expr::prepare(it.second, _runtime_state));
+        ASSERT_OK(Expr::open(it.second, _runtime_state));
+    }
+    ASSERT_OK(scanner->init(_runtime_state, ctx));
+    scanner->disable_use_orc_sargs();
+    ASSERT_OK(scanner->open(_runtime_state));
+    std::vector<std::pair<std::string, int64_t>> rows;
+    ASSERT_OK(read_keys_and_row_positions(scanner.get(), _runtime_state, *tuple_desc, &rows));
+    // the dict filter ran on the ORC batch, so only the matching rows were materialized
+    EXPECT_EQ(1000, scanner->raw_rows_read());
+    scanner->close();
+
+    ASSERT_EQ(1000u, rows.size());
+    for (const auto& [key, pos] : rows) {
+        ASSERT_EQ("gggggggggg", key);
+        ASSERT_GE(pos, 0);
+        ASSERT_LT(pos, static_cast<int64_t>(key_by_pos.size()));
+        EXPECT_EQ(key, key_by_pos[pos]) << "pos=" << pos;
+    }
+}
+
+// The scanner fills `_pos` itself, so it also evaluates the conjuncts on `_pos`.
+TEST_F(HdfsScannerTest, TestOrcIcebergRowPositionConjunct) {
+    auto scanner = std::make_shared<HdfsOrcScanner>();
+    auto* range = _create_scan_range(string_key_value_10k_orc_file, 0, 0);
+    auto* tuple_desc = _create_tuple_desc(string_key_value_with_pos_orc_desc);
+    auto* ctx = _create_ctx(string_key_value_10k_orc_file, range, tuple_desc);
+    SlotDescriptor* pos_slot = tuple_desc->slots()[2];
+    {
+        std::vector<TExprNode> nodes;
+        TExprNode lit_node = create_int_literal_node(TPrimitiveType::BIGINT, 10);
+        push_binary_pred_texpr_node(nodes, TExprOpcode::LT, pos_slot, TPrimitiveType::BIGINT, lit_node);
+        ctx->conjuncts.by_slot[pos_slot->id()].push_back(create_expr_context(&_pool, nodes));
+    }
+    for (auto& it : ctx->conjuncts.by_slot) {
+        ASSERT_OK(Expr::prepare(it.second, _runtime_state));
+        ASSERT_OK(Expr::open(it.second, _runtime_state));
+    }
+    ASSERT_OK(scanner->init(_runtime_state, ctx));
+    scanner->disable_use_orc_sargs();
+    ASSERT_OK(scanner->open(_runtime_state));
+    std::vector<std::pair<std::string, int64_t>> rows;
+    ASSERT_OK(read_keys_and_row_positions(scanner.get(), _runtime_state, *tuple_desc, &rows));
+    scanner->close();
+
+    std::vector<int64_t> positions;
+    for (const auto& row : rows) positions.push_back(row.second);
+    EXPECT_EQ((std::vector<int64_t>{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}), positions);
+}
+
+// ====================================================================================================
 
 /**
  *
@@ -2582,6 +2698,97 @@ TEST_F(HdfsScannerTest, TestOrcCompoundConjunct) {
     status = scanner->get_next(_runtime_state, &chunk);
     EXPECT_TRUE(status.is_end_of_file());
     scanner->close();
+}
+
+// The task that splits an ORC file builds its deletes once; its split tasks share them, and since the deletes are
+// keyed by file-level row numbers, a split task starting at a later stripe skips the right rows.
+TEST_F(HdfsScannerTest, TestOrcSplitTasksShareDeletes) {
+    const std::string file = "orc_split_tasks_share_deletes.orc";
+    std::filesystem::remove(file);
+    const size_t num_rows = 20000;
+    {
+        ORC_UNIQUE_PTR<orc::Type> schema(orc::Type::buildTypeFromString("struct<id:bigint>"));
+        orc::WriterOptions options;
+        // force a stripe per batch
+        options.setStripeSize(0);
+        ORC_UNIQUE_PTR<orc::OutputStream> out = orc::writeLocalFile(file);
+        ORC_UNIQUE_PTR<orc::Writer> writer = orc::createWriter(*schema, out.get(), options);
+        const size_t batch_size = 1000;
+        ORC_UNIQUE_PTR<orc::ColumnVectorBatch> batch = writer->createRowBatch(batch_size);
+        auto* root = dynamic_cast<orc::StructVectorBatch*>(batch.get());
+        auto* id = dynamic_cast<orc::LongVectorBatch*>(root->fields[0]);
+        for (size_t start = 0; start < num_rows; start += batch_size) {
+            for (size_t i = 0; i < batch_size; i++) {
+                id->data[i] = start + i;
+            }
+            id->numElements = batch_size;
+            root->numElements = batch_size;
+            writer->add(*batch);
+        }
+        writer->close();
+    }
+    DeferOp remove_file([&]() { std::filesystem::remove(file); });
+    ASSERT_GT(orc::createReader(orc::readLocalFile(file), orc::ReaderOptions{})->getNumberOfStripes(), 2);
+
+    // every 7th row of the file is deleted
+    auto bitmap = std::make_shared<DeletionBitmap>(roaring64_bitmap_create());
+    for (size_t i = 0; i < num_rows; i += 7) {
+        bitmap->add_value(i);
+    }
+
+    SlotDesc descs[] = {{"id", TypeDescriptor::from_logical_type(LogicalType::TYPE_BIGINT)}, {""}};
+    auto* tuple_desc = _create_tuple_desc(descs);
+    auto* range = _create_scan_range(file, 0, 0);
+    auto* ctx = _create_ctx(file, range, tuple_desc);
+    ctx->options.enable_split_tasks = true;
+    auto scanner = std::make_shared<HdfsOrcScanner>();
+    scanner->_skip_rows_ctx->deletion_bitmap = bitmap;
+    ASSERT_OK(scanner->init(_runtime_state, ctx));
+    ASSERT_OK(scanner->open(_runtime_state));
+    const auto& split_tasks = ctx->split.split_tasks;
+    ASSERT_GT(split_tasks.size(), 2);
+    scanner->close();
+
+    // read the last split task alone, over its range as HiveDataSource sets it
+    const HdfsSplitContext* last = split_tasks.back().get();
+    auto* split_range = _create_scan_range(file, last->split_start, last->split_end - last->split_start);
+    auto* split_ctx = _create_ctx(file, split_range, tuple_desc);
+    split_ctx->split_context = last;
+    auto split_scanner = std::make_shared<HdfsOrcScanner>();
+    ASSERT_OK(split_scanner->init(_runtime_state, split_ctx));
+    ASSERT_OK(split_scanner->open(_runtime_state));
+    EXPECT_EQ(bitmap, split_scanner->_skip_rows_ctx->deletion_bitmap);
+
+    ChunkPtr chunk = ChunkHelper::new_chunk(*tuple_desc, 0);
+    int64_t rows = 0;
+    int64_t min_id = std::numeric_limits<int64_t>::max();
+    int64_t max_id = -1;
+    Status status;
+    for (;;) {
+        chunk->reset();
+        status = split_scanner->get_next(_runtime_state, &chunk);
+        if (!status.ok() && !status.is_end_of_file()) break;
+        const Column* col = chunk->get_column_raw_ptr_by_slot_id(0);
+        for (size_t i = 0; i < chunk->num_rows(); i++) {
+            int64_t v = col->get(i).get_int64();
+            EXPECT_NE(0, v % 7) << v;
+            min_id = std::min(min_id, v);
+            max_id = std::max(max_id, v);
+        }
+        rows += chunk->num_rows();
+        if (status.is_end_of_file()) break;
+    }
+    ASSERT_TRUE(status.is_end_of_file()) << status;
+    ASSERT_GT(rows, 0);
+    // the last stripe holds ids [19000, 20000); 19999 is a multiple of 7, so deleted
+    EXPECT_EQ(19000, min_id);
+    EXPECT_EQ(19998, max_id);
+    int64_t live = 0;
+    for (int64_t v = min_id; v < static_cast<int64_t>(num_rows); v++) {
+        live += (v % 7 != 0);
+    }
+    EXPECT_EQ(live, rows);
+    split_scanner->close();
 }
 
 // =============================================================================

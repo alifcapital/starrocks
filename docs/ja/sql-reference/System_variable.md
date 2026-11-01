@@ -275,10 +275,10 @@ MySQL クライアント互換性のために使用されます。実際の用�
 ### blacklist_backup_routing
 
 * **スコープ**: Session
-* **説明**: 共有データ（shared-data）モードでは、スキャンに対してプランが優先する compute node が、現在のクエリで利用可能なワーカーに含まれない場合（例：ノードがダウンしている、またはホストの blocklist に載っているなど）、プランナーはバックアップ用の compute node を選ぶ必要があります。この変数は、（プライマリ以外の）候補ノードのうち、バックアップをどのように選ぶかを設定します。`RANDOM` は候補集合から一様乱択でサンプリングします。`CIRCULAR` はプライマリからソート済みの compute node ID のリング上を走査し、最初に見つかった候補ノードを選びます（決定的）。バックアップとして選べるノードは `skip_black_list` にも依存します。デフォルトではホスト blocklist 上のノードは除外されます。`skip_black_list` が `true` の場合、blocklist に載っていても、（例：生存しておりウェアハウスで利用可能など）他の条件を満たせばバックアップとして選ばれることがあります。
+* **説明**: 共有データ（shared-data）モードでは、スキャンに対してプランが優先する compute node が、現在のクエリで利用可能なワーカーに含まれない場合（例：ノードがダウンしている、またはホストの blocklist に載っているなど）、プランナーはバックアップ用の compute node を選ぶ必要があります。この変数は、（プライマリ以外の）候補ノードのうち、バックアップをどのように選ぶかを設定します。`RANDOM` は候補集合から一様乱択でサンプリングします。`CIRCULAR` はプライマリからソート済みの compute node ID のリング上を走査し、最初に見つかった候補ノードを選びます（決定的）。`TABLET_HASH` は tablet とノードのハッシュ（rendezvous hashing）が最大となる候補ノードを選びます。利用できないノードの tablet は他のノードに均等に分散され、同じ tablet はクエリをまたいで常に同じバックアップに送られるため、そのデータは 1 つのバックアップノードにだけキャッシュされます。Colocate スキャンでは、tablet の代わりに Colocation Group とバケットでハッシュを計算するため、グループ内のすべてのテーブルで同じバケットが同じバックアップに送られます。FE 間でも、候補ノードの集合が同じであれば同じ tablet に対して同じバックアップが選ばれます。ロード（例：`INSERT`）が書き込む tablet の compute node が利用できない場合にも、この変数に従ってバックアップが選ばれます。バックアップとして選べるノードは `skip_black_list` にも依存します。デフォルトではホスト blocklist 上のノードは除外されます。`skip_black_list` が `true` の場合、blocklist に載っていても、（例：生存しておりウェアハウスで利用可能など）他の条件を満たせばバックアップとして選ばれることがあります。
 * **デフォルト**: `CIRCULAR`
 * **データ型**: String
-* **有効な値**: `CIRCULAR`, `RANDOM`
+* **有効な値**: `CIRCULAR`, `RANDOM`, `TABLET_HASH`
 * **導入バージョン**: -
 
 ### catalog
@@ -662,6 +662,12 @@ StarRocks は 2 種類の RF を提供します：ローカル RF とグロー�
 
 * **説明**: `ORDER BY <column> LIMIT <k>` クエリにおいて、Iceberg データファイルをファイルごとの min/max 統計情報に基づいて枝刈りするかどうか。有効にすると、スキャンはソート列の min/max でファイルを並べ替え、TopN Runtime Filter がより早く収束するようにします。さらに、min/max が top-k に到達できないファイルは footer を読む前にスキップするため、読み取るファイル数が減ります。クエリ結果は変わりません。この機能には `enable_topn_runtime_filter` が必要で、先頭のソート列は整数、date、または datetime 型である必要があります。
 * **デフォルト**: false
+
+### enable_iceberg_eq_delete_runtime_filter_pruning
+
+* **説明**: Runtime Filter で Iceberg テーブルの Equality Delete ファイルをスキップできるかどうか。テーブルのパーティション仕様（Partition Spec）が一度も変更されておらず、すべてのパーティションフィールドがクエリで読み取る INT、DATE、または STRING 列の identity 変換である場合に適用されます。この場合、Join がこれらの列に対して生成する Runtime Filter は、除外したパーティションの Equality Delete ファイルをスキップします。`false` に設定すると、すべての Equality Delete ファイルを適用します。たとえば、この変数名を含むエラーでクエリが失敗した場合に使用します。
+* **デフォルト**: true
+* **導入バージョン**: v26.2
 
 ### enable_incremental_mv
 

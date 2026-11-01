@@ -1,5 +1,6 @@
 ---
 displayed_sidebar: docs
+sidebar_position: 4
 description: "Prometheus と Grafana を使用して StarRocks クラスターの稼働状況を監視、可視化、アラートします。"
 ---
 
@@ -371,7 +372,7 @@ StarRocks 監視ダッシュボードに入った後、ページを手動で更�
 
 ## ステップ 2: コア監視メトリックを理解する
 
-開発、運用、DBA などのニーズに対応するために、StarRocks は幅広い監視メトリックを提供します。このセクションでは、ビジネスで一般的に使用される重要なメトリックとそのアラートルールのみを紹介します。他のメトリックの詳細については、[Monitoring Metrics](./metrics.md) を参照してください。
+開発、運用、DBA などのニーズに対応するために、StarRocks は幅広い監視メトリックを提供します。このセクションでは、ビジネスで一般的に使用される重要なメトリックとそのアラートルールのみを紹介します。他のメトリックの詳細については、[Monitoring Metrics](./metric_details/metric_details.mdx) を参照してください。
 
 ### 2.1 FE と BE のステータスのメトリック
 

@@ -284,10 +284,10 @@ Used for MySQL client compatibility. No practical usage.
 ### blacklist_backup_routing
 
 * **Scope**: Session
-* **Description**: In shared-data mode, if the compute node the plan prefers for a scan is not among the workers available to the current query (for example, the node is down or appears on the host blocklist), the planner must choose a backup compute node. This variable sets how that backup is chosen among eligible nodes (other than the primary). `RANDOM` samples uniformly at random from the eligible set. `CIRCULAR` walks the sorted compute node id ring from the primary and takes the first eligible node (deterministic). Which nodes are eligible for backup also depends on `skip_black_list`: by default, nodes on the host blocklist are excluded; if `skip_black_list` is `true`, a node that is on the blocklist may still be chosen as a backup when it is otherwise available (for example, alive and in the warehouse).
+* **Description**: In shared-data mode, if the compute node the plan prefers for a scan is not among the workers available to the current query (for example, the node is down or appears on the host blocklist), the planner must choose a backup compute node. This variable sets how that backup is chosen among eligible nodes (other than the primary). `RANDOM` samples uniformly at random from the eligible set. `CIRCULAR` walks the sorted compute node id ring from the primary and takes the first eligible node (deterministic). `TABLET_HASH` takes the eligible node with the highest hash of the tablet and the node (rendezvous hashing): the tablets of an unavailable node spread evenly over the other nodes, while each tablet keeps going to the same backup across queries, so its data is cached on only one backup node. For a colocated scan, the hash uses the colocation group and the bucket instead of the tablet, so every table in the group sends the same bucket to the same backup. FEs choose the same backup for a tablet as long as they see the same set of eligible nodes. The variable also applies when a load (for example, `INSERT`) writes to a tablet whose compute node is unavailable. Which nodes are eligible for backup also depends on `skip_black_list`: by default, nodes on the host blocklist are excluded; if `skip_black_list` is `true`, a node that is on the blocklist may still be chosen as a backup when it is otherwise available (for example, alive and in the warehouse).
 * **Default**: `CIRCULAR`
 * **Data type**: String
-* **Valid values**: `CIRCULAR`, `RANDOM`
+* **Valid values**: `CIRCULAR`, `RANDOM`, `TABLET_HASH`
 * **Introduced in**: -
 
 ### broadcast_row_limit
@@ -781,6 +781,12 @@ Default value: `true`, which means global RF is enabled. If this feature is disa
 
 * **Description**: Whether to prune Iceberg data files in `ORDER BY <column> LIMIT <k>` queries by their per-file min/max statistics. When enabled, the scan orders files by the sort column's min/max so the TopN runtime filter tightens earlier, and skips files whose min/max cannot reach the top-k before reading their footer, so fewer files are read. Results are unchanged. Requires `enable_topn_runtime_filter`; the leading sort column must be an integer, date, or datetime type.
 * **Default**: false
+
+### enable_iceberg_eq_delete_runtime_filter_pruning
+
+* **Description**: Whether runtime filters can skip the equality delete files of an Iceberg table. It applies when the table has never changed its partition spec and every partition field is an identity transform of an INT, DATE, or STRING column that the query reads. A runtime filter that a join builds on such a column then skips the equality delete files of the partitions it rejects. Set it to `false` to apply every equality delete file, for example when a query fails with an error that names this variable.
+* **Default**: true
+* **Introduced in**: v26.2
 
 ### enable_incremental_mv
 

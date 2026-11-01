@@ -407,6 +407,7 @@ set(EXEC_FILES
         ./runtime/memory/counting_allocator_test.cpp
         ./runtime/memory/jemalloc_conf_updater_test.cpp
         ./runtime/mem_pool_test.cpp
+        ./runtime/current_thread_test.cpp
         ./runtime/mem_tracker_test.cpp
         ./runtime/result_queue_mgr_test.cpp
         ./runtime/batch_write/batch_write_mgr_test.cpp
@@ -650,6 +651,7 @@ SET(DW_TEST_FILES
     ./storage/lake/primary_key_publish_test.cpp
     ./storage/lake/lake_merged_del_op_offset_test.cpp
     ./storage/lake/lake_multi_statement_bundle_mix_test.cpp
+    ./storage/lake/lake_multi_statement_publish_test.cpp
     ./storage/lake/tablet_reshard_helper_test.cpp
     ./storage/lake/tablet_reshard_test.cpp
     ./storage/lake/tablet_splitter_test.cpp

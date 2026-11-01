@@ -163,6 +163,12 @@ description: "Alphabetical s"
 - Unit: Count
 - Description: Number of valid rows read (excluding rows with invalid format). Labels: `file_format`, `scan_type`.
 
+## `starrocks_be_flat_json_compaction_streaming_total`
+
+- Unit: Count
+- Type: Cumulative
+- Description: Number of flat JSON compactions that wrote their output as it arrived instead of buffering the whole output segment. It happens when the buffered input exceeds one eighth of `compaction_memory_limit_per_worker` and all of it shares one flat layout.
+
 ## `starrocks_be_lake_tablet_metadata_get_not_found_total`
 
 - Unit: Count
@@ -193,11 +199,35 @@ description: "Alphabetical s"
 - Type: Instantaneous
 - Description: Number of resource groups assigned to each memory pool.
 
+## `starrocks_be_pipe_connector_scan_expected_worker_threads`
+
+- Unit: Count
+- Type: Instantaneous
+- Description: Number of worker threads the scan executors for external tables are currently supposed to run, summed over all resource groups. It follows configuration and resource group changes right away, so comparing it with `starrocks_be_pipe_connector_scan_worker_threads` tells whether the executors are fully staffed.
+
+## `starrocks_be_pipe_connector_scan_worker_threads`
+
+- Unit: Count
+- Type: Instantaneous
+- Description: Number of worker threads that are actually alive in the scan executors for external tables, summed over all resource groups. A value below `starrocks_be_pipe_connector_scan_expected_worker_threads` means workers were lost and not replaced, so fewer scan tasks are consumed than configured. Exceeding it is normal and transient, as workers leave a shrunken executor only once they wake up.
+
 ## `starrocks_be_pipe_prepare_pool_queue_len`
 
 - Unit: Count
 - Type: Instantaneous
 - Description: Instantaneous value of pipeline prepare thread pool task queue length.
+
+## `starrocks_be_pipe_scan_expected_worker_threads`
+
+- Unit: Count
+- Type: Instantaneous
+- Description: Number of worker threads the scan executors for internal tables are currently supposed to run, summed over all resource groups. It follows configuration and resource group changes right away, so comparing it with `starrocks_be_pipe_scan_worker_threads` tells whether the executors are fully staffed.
+
+## `starrocks_be_pipe_scan_worker_threads`
+
+- Unit: Count
+- Type: Instantaneous
+- Description: Number of worker threads that are actually alive in the scan executors for internal tables, summed over all resource groups. A value below `starrocks_be_pipe_scan_expected_worker_threads` means workers were lost and not replaced, so fewer scan tasks are consumed than configured. Exceeding it is normal and transient, as workers leave a shrunken executor only once they wake up.
 
 ## `starrocks_be_priority_exec_state_report_active_threads`
 
