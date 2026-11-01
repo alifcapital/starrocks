@@ -2561,6 +2561,38 @@ public class IcebergMetadataTest extends TableTestBase {
         Assertions.assertEquals(leftKey.hashCode(), rightKey.hashCode());
     }
 
+    // The scans of one table read the same predicate on their own column refs. Their Iceberg keys are equal and hash
+    // equally, so they find one planning; the block id keeps the file queues of different blocks apart.
+    @Test
+    public void testIcebergPredicateSearchKeyMatchesEquivalentPredicates() {
+        GetRemoteFilesParams leftParams = GetRemoteFilesParams.newBuilder()
+                .setTableVersionRange(TvrTableSnapshot.of(Optional.of(1L)))
+                .setPredicate(new BinaryPredicateOperator(BinaryType.EQ,
+                        new ColumnRefOperator(1, INT, "k2", true), ConstantOperator.createInt(2)))
+                .build();
+        GetRemoteFilesParams rightParams = GetRemoteFilesParams.newBuilder()
+                .setTableVersionRange(TvrTableSnapshot.of(Optional.of(1L)))
+                .setPredicate(new BinaryPredicateOperator(BinaryType.EQ,
+                        new ColumnRefOperator(7, INT, "k2", true), ConstantOperator.createInt(2)))
+                .build();
+
+        PredicateSearchKey leftKey = IcebergPredicateSearchKey.of("db", "table", leftParams);
+        PredicateSearchKey rightKey = IcebergPredicateSearchKey.of("db", "table", rightParams);
+        Assertions.assertEquals(leftKey, rightKey);
+        Assertions.assertEquals(leftKey.hashCode(), rightKey.hashCode());
+        Map<PredicateSearchKey, String> cache = new HashMap<>();
+        cache.put(leftKey, "planned");
+        Assertions.assertEquals("planned", cache.get(rightKey));
+
+        IcebergMORParams dataScan = IcebergMORParams.DATA_FILE_WITH_EQ_DELETE;
+        Assertions.assertEquals(IcebergRemoteFileInfoSourceKey.of("db", "table", leftParams, 1L, dataScan),
+                IcebergRemoteFileInfoSourceKey.of("db", "table", rightParams, 1L, dataScan));
+        Assertions.assertEquals(IcebergRemoteFileInfoSourceKey.of("db", "table", leftParams, 1L, dataScan).hashCode(),
+                IcebergRemoteFileInfoSourceKey.of("db", "table", rightParams, 1L, dataScan).hashCode());
+        Assertions.assertNotEquals(IcebergRemoteFileInfoSourceKey.of("db", "table", leftParams, 1L, dataScan),
+                IcebergRemoteFileInfoSourceKey.of("db", "table", rightParams, 2L, dataScan));
+    }
+
     @Test
     public void testListPartitionNames() {
         mockedNativeTableB.newAppend().appendFile(FILE_B_1).appendFile(FILE_B_2).appendFile(FILE_B_3).commit();

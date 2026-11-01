@@ -15,11 +15,10 @@
 package com.starrocks.connector.iceberg;
 
 import com.starrocks.connector.GetRemoteFilesParams;
-import com.starrocks.connector.PredicateSearchKey;
 
 import java.util.Objects;
 
-public class IcebergRemoteFileInfoSourceKey extends PredicateSearchKey {
+public class IcebergRemoteFileInfoSourceKey extends IcebergPredicateSearchKey {
     private final long morId;
     private final IcebergMORParams icebergMORParams;
 

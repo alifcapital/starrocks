@@ -22,7 +22,7 @@ import com.starrocks.catalog.IcebergTable;
 import com.starrocks.common.tvr.TvrTableSnapshot;
 import com.starrocks.common.tvr.TvrVersionRange;
 import com.starrocks.connector.GetRemoteFilesParams;
-import com.starrocks.connector.PredicateSearchKey;
+import com.starrocks.connector.iceberg.IcebergPredicateSearchKey;
 import com.starrocks.connector.iceberg.TableTestBase;
 import com.starrocks.sql.analyzer.AnalyzeTestUtil;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
@@ -141,7 +141,7 @@ public class IcebergStatisticProviderTest extends TableTestBase {
         TvrVersionRange version = TvrTableSnapshot.of(Optional.of(mockedNativeTableB.currentSnapshot().snapshotId()));
         GetRemoteFilesParams params = GetRemoteFilesParams.newBuilder().setTableVersionRange(version).build();
 
-        PredicateSearchKey key = PredicateSearchKey.of(icebergTable.getCatalogDBName(),
+        IcebergPredicateSearchKey key = IcebergPredicateSearchKey.of(icebergTable.getCatalogDBName(),
                 icebergTable.getCatalogTableName(), params);
         statisticProvider.putIcebergFileStats(key, fileStats);
 
@@ -172,7 +172,7 @@ public class IcebergStatisticProviderTest extends TableTestBase {
         TvrVersionRange version = TvrTableSnapshot.of(Optional.of(mockedNativeTableB.currentSnapshot().snapshotId()));
         GetRemoteFilesParams params = GetRemoteFilesParams.newBuilder().setTableVersionRange(version).build();
 
-        PredicateSearchKey key = PredicateSearchKey.of(icebergTable.getCatalogDBName(),
+        IcebergPredicateSearchKey key = IcebergPredicateSearchKey.of(icebergTable.getCatalogDBName(),
                 icebergTable.getCatalogTableName(), params);
         statisticProvider.putIcebergFileStats(key, fileStats);
 
@@ -209,7 +209,7 @@ public class IcebergStatisticProviderTest extends TableTestBase {
         TvrVersionRange version = TvrTableSnapshot.of(Optional.of(mockedNativeTableB.currentSnapshot().snapshotId()));
         GetRemoteFilesParams params = GetRemoteFilesParams.newBuilder().setTableVersionRange(version).build();
 
-        PredicateSearchKey key = PredicateSearchKey.of(icebergTable.getCatalogDBName(),
+        IcebergPredicateSearchKey key = IcebergPredicateSearchKey.of(icebergTable.getCatalogDBName(),
                 icebergTable.getCatalogTableName(), params);
         statisticProvider.putIcebergFileStats(key, fileStats);
 
@@ -247,7 +247,7 @@ public class IcebergStatisticProviderTest extends TableTestBase {
         TvrVersionRange version = TvrTableSnapshot.of(Optional.of(mockedNativeTableB.currentSnapshot().snapshotId()));
         GetRemoteFilesParams params = GetRemoteFilesParams.newBuilder().setTableVersionRange(version).build();
 
-        PredicateSearchKey key = PredicateSearchKey.of(icebergTable.getCatalogDBName(),
+        IcebergPredicateSearchKey key = IcebergPredicateSearchKey.of(icebergTable.getCatalogDBName(),
                 icebergTable.getCatalogTableName(), params);
         statisticProvider.putIcebergFileStats(key, fileStats);
 
@@ -327,7 +327,7 @@ public class IcebergStatisticProviderTest extends TableTestBase {
                 .setTableVersionRange(version)
                 .build();
 
-        PredicateSearchKey key = PredicateSearchKey.of(icebergTable.getCatalogDBName(),
+        IcebergPredicateSearchKey key = IcebergPredicateSearchKey.of(icebergTable.getCatalogDBName(),
                 icebergTable.getCatalogTableName(), params);
         statisticProvider.putIcebergFileStats(key, fileStats);
 
@@ -388,7 +388,7 @@ public class IcebergStatisticProviderTest extends TableTestBase {
                 .setTableVersionRange(version)
                 .build();
 
-        PredicateSearchKey key = PredicateSearchKey.of(icebergTable.getCatalogDBName(),
+        IcebergPredicateSearchKey key = IcebergPredicateSearchKey.of(icebergTable.getCatalogDBName(),
                 icebergTable.getCatalogTableName(), params);
         statisticProvider.putIcebergFileStats(key, fileStats);
 
@@ -418,7 +418,7 @@ public class IcebergStatisticProviderTest extends TableTestBase {
                 .setTableVersionRange(version)
                 .build();
 
-        PredicateSearchKey key = PredicateSearchKey.of(icebergTable.getCatalogDBName(),
+        IcebergPredicateSearchKey key = IcebergPredicateSearchKey.of(icebergTable.getCatalogDBName(),
                 icebergTable.getCatalogTableName(), params);
         statisticProvider.putIcebergFileStats(key, fileStats);
 
@@ -488,7 +488,7 @@ public class IcebergStatisticProviderTest extends TableTestBase {
                 .setTableVersionRange(version)
                 .build();
 
-        PredicateSearchKey key = PredicateSearchKey.of(icebergTable.getCatalogDBName(),
+        IcebergPredicateSearchKey key = IcebergPredicateSearchKey.of(icebergTable.getCatalogDBName(),
                 icebergTable.getCatalogTableName(), params);
         statisticProvider.putIcebergFileStats(key, fileStats);
 
@@ -607,7 +607,7 @@ public class IcebergStatisticProviderTest extends TableTestBase {
                 .setTableVersionRange(version)
                 .build();
 
-        PredicateSearchKey key = PredicateSearchKey.of(icebergTable.getCatalogDBName(),
+        IcebergPredicateSearchKey key = IcebergPredicateSearchKey.of(icebergTable.getCatalogDBName(),
                 icebergTable.getCatalogTableName(), params);
         statisticProvider.putIcebergFileStats(key, fileStats);
 
@@ -643,7 +643,7 @@ public class IcebergStatisticProviderTest extends TableTestBase {
         TvrVersionRange version = TvrTableSnapshot.of(Optional.of(mockedNativeTableB.currentSnapshot().snapshotId()));
         GetRemoteFilesParams params = GetRemoteFilesParams.newBuilder().setTableVersionRange(version).build();
         statisticProvider.putIcebergFileStats(
-                PredicateSearchKey.of(icebergTable.getCatalogDBName(), icebergTable.getCatalogTableName(), params),
+                IcebergPredicateSearchKey.of(icebergTable.getCatalogDBName(), icebergTable.getCatalogTableName(), params),
                 fileStats);
         Map<ColumnRefOperator, Column> colMap = new HashMap<>();
         // "k1" matches fieldId=1 in SCHEMA_B — getColFieldId resolves correctly

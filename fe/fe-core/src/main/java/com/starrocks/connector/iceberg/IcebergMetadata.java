@@ -60,7 +60,6 @@ import com.starrocks.connector.PartitionCastPredicatePruner;
 import com.starrocks.connector.PartitionInfo;
 import com.starrocks.connector.PartitionUtil;
 import com.starrocks.connector.PlanMode;
-import com.starrocks.connector.PredicateSearchKey;
 import com.starrocks.connector.Procedure;
 import com.starrocks.connector.RemoteFileInfo;
 import com.starrocks.connector.RemoteFileInfoDefaultSource;
@@ -246,9 +245,9 @@ public class IcebergMetadata implements ConnectorMetadata {
 
     private final Map<TableIdentifier, org.apache.iceberg.Table> tables = new ConcurrentHashMap<>();
     private final Map<String, Database> databases = new ConcurrentHashMap<>();
-    private final Map<PredicateSearchKey, List<FileScanTask>> splitTasks = new ConcurrentHashMap<>();
-    private final Set<PredicateSearchKey> scannedTables = new HashSet<>();
-    private final Set<PredicateSearchKey> preparedTables = ConcurrentHashMap.newKeySet();
+    private final Map<IcebergPredicateSearchKey, List<FileScanTask>> splitTasks = new ConcurrentHashMap<>();
+    private final Set<IcebergPredicateSearchKey> scannedTables = new HashSet<>();
+    private final Set<IcebergPredicateSearchKey> preparedTables = ConcurrentHashMap.newKeySet();
 
     private final Map<IcebergRemoteFileInfoSourceKey, RemoteFileInfoSource> remoteFileInfoSources = new ConcurrentHashMap<>();
 
@@ -1161,7 +1160,7 @@ public class IcebergMetadata implements ConnectorMetadata {
         String dbName = table.getCatalogDBName();
         String tableName = table.getCatalogTableName();
 
-        PredicateSearchKey key = PredicateSearchKey.of(dbName, tableName, params);
+        IcebergPredicateSearchKey key = IcebergPredicateSearchKey.of(dbName, tableName, params);
 
         // Bounded-cost statistics scan (design 2.4): the split cache key ignores the scan caps, so we must
         // neither read it (a cached full split list would defeat early stop) nor write it (a truncated list
@@ -1216,7 +1215,7 @@ public class IcebergMetadata implements ConnectorMetadata {
                 .setTableVersionRange(versionRange)
                 .build();
 
-        PredicateSearchKey key = PredicateSearchKey.of(dbName, tableName, params);
+        IcebergPredicateSearchKey key = IcebergPredicateSearchKey.of(dbName, tableName, params);
         if (!preparedTables.add(key)) {
             return true;
         }
@@ -1357,11 +1356,11 @@ public class IcebergMetadata implements ConnectorMetadata {
                 List.of(IcebergMetaSplit.fromPartitionStatsSplit(split)), false);
     }
 
-    private void triggerIcebergPlanFilesIfNeeded(PredicateSearchKey key, Table table) {
+    private void triggerIcebergPlanFilesIfNeeded(IcebergPredicateSearchKey key, Table table) {
         triggerIcebergPlanFilesIfNeeded(key, table, null, ConnectContext.get());
     }
 
-    private void triggerIcebergPlanFilesIfNeeded(PredicateSearchKey key, Table table,
+    private void triggerIcebergPlanFilesIfNeeded(IcebergPredicateSearchKey key, Table table,
                                                  Tracers tracers, ConnectContext connectContext) {
         if (!scannedTables.contains(key)) {
             tracers = tracers == null ? Tracers.get() : tracers;
@@ -1424,7 +1423,7 @@ public class IcebergMetadata implements ConnectorMetadata {
                 .setTableVersionRange(version)
                 .build();
 
-        PredicateSearchKey key = PredicateSearchKey.of(dbName, tableName, params);
+        IcebergPredicateSearchKey key = IcebergPredicateSearchKey.of(dbName, tableName, params);
         triggerIcebergPlanFilesIfNeeded(key, icebergTable);
 
         List<PartitionKey> partitionKeys = new ArrayList<>();
@@ -1493,7 +1492,7 @@ public class IcebergMetadata implements ConnectorMetadata {
         return partitionKeys;
     }
 
-    private void collectTableStatisticsAndCacheIcebergSplit(PredicateSearchKey key, Table table, Tracers tracers,
+    private void collectTableStatisticsAndCacheIcebergSplit(IcebergPredicateSearchKey key, Table table, Tracers tracers,
                                                             ConnectContext connectContext) {
         TvrVersionRange tvrVersionRange = key.getVersion();
         // empty table
@@ -1510,7 +1509,7 @@ public class IcebergMetadata implements ConnectorMetadata {
     // iterator is wrapped with a bounded-cost budget (design 2.4): it stops early once a scan cap is reached,
     // and the caller must NOT cache the (possibly truncated) result. When false this is the ordinary full
     // planning used by the split cache.
-    private List<FileScanTask> planIcebergScanTasks(PredicateSearchKey key, Table table,
+    private List<FileScanTask> planIcebergScanTasks(IcebergPredicateSearchKey key, Table table,
                                                     ConnectContext connectContext, boolean applyScanBudget) {
         IcebergTable icebergTable = (IcebergTable) table;
         TvrVersionRange tvrVersionRange = key.getVersion();
@@ -1675,7 +1674,7 @@ public class IcebergMetadata implements ConnectorMetadata {
 
         String dbName = table.getCatalogDBName();
         String tableName = table.getCatalogTableName();
-        PredicateSearchKey predicateSearchKey = splitTasksKey(dbName, tableName, params);
+        IcebergPredicateSearchKey predicateSearchKey = splitTasksKey(dbName, tableName, params);
         RemoteFileInfoSource baseSource;
         // Bounded-cost statistics scan (design 2.4): never read a cached split list (it may be a full,
         // non-budgeted list) - always build a fresh, budget-limited source below.
@@ -2458,7 +2457,7 @@ public class IcebergMetadata implements ConnectorMetadata {
                 .setTableVersionRange(version)
                 .setEnableColumnStats(false)
                 .build();
-        PredicateSearchKey key = PredicateSearchKey.of(
+        IcebergPredicateSearchKey key = IcebergPredicateSearchKey.of(
                 icebergTable.getCatalogDBName(), icebergTable.getCatalogTableName(), params);
         triggerIcebergPlanFilesIfNeeded(key, icebergTable);
         // buildFileScanTaskIterator detects TvrTableDelta internally → IncrementalAppendScan.
@@ -2490,7 +2489,7 @@ public class IcebergMetadata implements ConnectorMetadata {
                 .setTableVersionRange(version)
                 .setEnableColumnStats(true)
                 .build();
-        PredicateSearchKey key = PredicateSearchKey.of(
+        IcebergPredicateSearchKey key = IcebergPredicateSearchKey.of(
                 icebergTable.getCatalogDBName(), icebergTable.getCatalogTableName(), params);
         triggerIcebergPlanFilesIfNeeded(key, icebergTable);
         return statisticProvider.getTableStatistics(icebergTable, columns, session, params);
@@ -2639,12 +2638,12 @@ public class IcebergMetadata implements ConnectorMetadata {
     // A list of files planned with column statistics also serves a request without them, so a request without
     // statistics takes its own entry if there is one, and otherwise the entry with statistics if there is one.
     // A request with statistics never takes a list without them: the scan would lose the file bounds.
-    private PredicateSearchKey splitTasksKey(String dbName, String tableName, GetRemoteFilesParams params) {
-        PredicateSearchKey key = PredicateSearchKey.of(dbName, tableName, params);
+    private IcebergPredicateSearchKey splitTasksKey(String dbName, String tableName, GetRemoteFilesParams params) {
+        IcebergPredicateSearchKey key = IcebergPredicateSearchKey.of(dbName, tableName, params);
         if (params.isEnableColumnStats() || splitTasks.containsKey(key)) {
             return key;
         }
-        PredicateSearchKey withStats = PredicateSearchKey.of(dbName, tableName, GetRemoteFilesParams.newBuilder()
+        IcebergPredicateSearchKey withStats = IcebergPredicateSearchKey.of(dbName, tableName, GetRemoteFilesParams.newBuilder()
                 .setPredicate(params.getPredicate())
                 .setTableVersionRange(params.getTableVersionRange())
                 .setEnableColumnStats(true)
@@ -2653,7 +2652,7 @@ public class IcebergMetadata implements ConnectorMetadata {
     }
 
     private IcebergSplitScanTask buildIcebergSplitScanTask(
-            FileScanTask fileScanTask, Expression icebergPredicate, PredicateSearchKey filter) {
+            FileScanTask fileScanTask, Expression icebergPredicate, IcebergPredicateSearchKey filter) {
         long offset = fileScanTask.start();
         long length = fileScanTask.length();
         // The scan of this query reads file bounds (TopN reorder, MIN/MAX from metadata) from this list, so the

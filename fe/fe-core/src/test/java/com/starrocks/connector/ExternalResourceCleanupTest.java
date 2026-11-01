@@ -34,6 +34,7 @@ import com.starrocks.connector.iceberg.IcebergConnectorScanRangeSource;
 import com.starrocks.connector.iceberg.IcebergGetRemoteFilesParams;
 import com.starrocks.connector.iceberg.IcebergMORParams;
 import com.starrocks.connector.iceberg.IcebergMetadata;
+import com.starrocks.connector.iceberg.IcebergPredicateSearchKey;
 import com.starrocks.connector.iceberg.IcebergRemoteFileInfo;
 import com.starrocks.connector.iceberg.IcebergTableMORParams;
 import com.starrocks.connector.iceberg.cost.IcebergMetricsReporter;
@@ -482,14 +483,14 @@ public class ExternalResourceCleanupTest {
         builder.setAllParams(IcebergTableMORParams.EMPTY);
         builder.setParams(IcebergMORParams.EMPTY);
         IcebergGetRemoteFilesParams params = (IcebergGetRemoteFilesParams) builder.build();
-        PredicateSearchKey key = PredicateSearchKey.of("db", "tbl", params);
+        IcebergPredicateSearchKey key = IcebergPredicateSearchKey.of("db", "tbl", params);
 
         FileScanTask task = Mockito.mock(FileScanTask.class);
         Field splitField = IcebergMetadata.class.getDeclaredField("splitTasks");
         splitField.setAccessible(true);
         @SuppressWarnings("unchecked")
-        Map<PredicateSearchKey, List<FileScanTask>> splitTasks =
-                (Map<PredicateSearchKey, List<FileScanTask>>) splitField.get(metadata);
+        Map<IcebergPredicateSearchKey, List<FileScanTask>> splitTasks =
+                (Map<IcebergPredicateSearchKey, List<FileScanTask>>) splitField.get(metadata);
         splitTasks.put(key, List.of(task));
 
         com.starrocks.connector.RemoteFileInfoSource source = metadata.getRemoteFilesAsync(table, params);
@@ -789,7 +790,8 @@ public class ExternalResourceCleanupTest {
         Mockito.when(tableScan.getMetricsReporter()).thenReturn(new IcebergMetricsReporter());
 
         Method collectMethod = IcebergMetadata.class.getDeclaredMethod(
-                "collectTableStatisticsAndCacheIcebergSplit", PredicateSearchKey.class, com.starrocks.catalog.Table.class,
+                "collectTableStatisticsAndCacheIcebergSplit", IcebergPredicateSearchKey.class,
+                com.starrocks.catalog.Table.class,
                 com.starrocks.common.profile.Tracers.class, com.starrocks.qe.ConnectContext.class);
         collectMethod.setAccessible(true);
 
@@ -799,7 +801,7 @@ public class ExternalResourceCleanupTest {
         builder.setAllParams(IcebergTableMORParams.EMPTY);
         builder.setParams(IcebergMORParams.EMPTY);
         IcebergGetRemoteFilesParams params = (IcebergGetRemoteFilesParams) builder.build();
-        PredicateSearchKey key = PredicateSearchKey.of("db", "tbl", params);
+        IcebergPredicateSearchKey key = IcebergPredicateSearchKey.of("db", "tbl", params);
 
         try (MockedStatic<TableScanUtil> tableScanUtilMock = Mockito.mockStatic(TableScanUtil.class)) {
             CloseableIterable<FileScanTask> iterable = new CloseableIterable<>() {

@@ -229,6 +229,19 @@ public class CaseWhenOperator extends CallOperator {
                 whenEnd == that.whenEnd;
     }
 
+    // The arguments alone do not tell `CASE x WHEN y THEN z END` from `CASE WHEN x THEN y ELSE z END`.
+    @Override
+    public boolean equivalent(Object obj) {
+        if (!super.equivalent(obj)) {
+            return false;
+        }
+        CaseWhenOperator that = (CaseWhenOperator) obj;
+        return hasCase == that.hasCase &&
+                hasElse == that.hasElse &&
+                whenStart == that.whenStart &&
+                whenEnd == that.whenEnd;
+    }
+
     @Override
     public int hashCodeSelf() {
         return Objects.hash(super.hashCodeSelf(), hasCase, hasElse, whenStart, whenEnd);

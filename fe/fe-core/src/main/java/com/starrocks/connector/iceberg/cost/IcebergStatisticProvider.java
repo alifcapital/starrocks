@@ -20,8 +20,8 @@ import com.starrocks.catalog.Column;
 import com.starrocks.catalog.IcebergTable;
 import com.starrocks.common.tvr.TvrVersionRange;
 import com.starrocks.connector.GetRemoteFilesParams;
-import com.starrocks.connector.PredicateSearchKey;
 import com.starrocks.connector.exception.StarRocksConnectorException;
+import com.starrocks.connector.iceberg.IcebergPredicateSearchKey;
 import com.starrocks.connector.statistics.ConnectorNdvEstimator;
 import com.starrocks.sql.optimizer.OptimizerContext;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
@@ -72,14 +72,14 @@ public class IcebergStatisticProvider {
 
     // table uuid -> <partition column id -> partition column values>
     private final Map<String, HashMultimap<Integer, Object>> uuidToPartitionFieldIdToValues = new HashMap<>();
-    private final Map<PredicateSearchKey, IcebergFileStats> icebergFileStatistics = new HashMap<>();
-    private final Map<PredicateSearchKey, Set<String>> scannedFiles = new HashMap<>();
+    private final Map<IcebergPredicateSearchKey, IcebergFileStats> icebergFileStatistics = new HashMap<>();
+    private final Map<IcebergPredicateSearchKey, Set<String>> scannedFiles = new HashMap<>();
 
     public IcebergStatisticProvider() {
     }
 
     @VisibleForTesting
-    void putIcebergFileStats(PredicateSearchKey key, IcebergFileStats fileStats) {
+    void putIcebergFileStats(IcebergPredicateSearchKey key, IcebergFileStats fileStats) {
         icebergFileStatistics.put(key, fileStats);
     }
 
@@ -146,7 +146,7 @@ public class IcebergStatisticProvider {
                 }
             }
 
-            PredicateSearchKey key = PredicateSearchKey.of(icebergTable.getCatalogDBName(),
+            IcebergPredicateSearchKey key = IcebergPredicateSearchKey.of(icebergTable.getCatalogDBName(),
                     icebergTable.getCatalogTableName(), params);
             IcebergFileStats icebergFileStats;
             if (!icebergFileStatistics.containsKey(key)) {
@@ -174,7 +174,7 @@ public class IcebergStatisticProvider {
     public void updateIcebergFileStats(IcebergTable icebergTable, FileScanTask fileScanTask,
                                        Map<Integer, Type.PrimitiveType> idToTypeMapping,
                                        List<Types.NestedField> nonPartitionPrimitiveColumns,
-                                       PredicateSearchKey key) {
+                                       IcebergPredicateSearchKey key) {
         String uuid = icebergTable.getUUID();
 
         Table nativeTable = icebergTable.getNativeTable();

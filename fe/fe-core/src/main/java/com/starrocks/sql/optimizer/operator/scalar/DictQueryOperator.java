@@ -21,6 +21,7 @@ import com.starrocks.thrift.TDictQueryExpr;
 import com.starrocks.type.Type;
 
 import java.util.List;
+import java.util.Objects;
 
 public class DictQueryOperator extends CallOperator {
 
@@ -37,6 +38,25 @@ public class DictQueryOperator extends CallOperator {
     @Override
     public <R, C> R accept(ScalarOperatorVisitor<R, C> visitor, C context) {
         return  visitor.visitDictQueryOperator(this, context);
+    }
+
+    // The dictionary name argument may leave out the database, which the analyzer takes from the session, so equal
+    // arguments can name different dictionaries. The partition versions only record the dictionary data at analysis
+    // time and are left out: two analyses of one dictionary must stay equivalent.
+    @Override
+    public boolean equivalent(Object obj) {
+        if (!super.equivalent(obj)) {
+            return false;
+        }
+        TDictQueryExpr that = ((DictQueryOperator) obj).dictQueryExpr;
+        if (dictQueryExpr == null || that == null) {
+            return dictQueryExpr == that;
+        }
+        return Objects.equals(dictQueryExpr.getDb_name(), that.getDb_name()) &&
+                Objects.equals(dictQueryExpr.getTbl_name(), that.getTbl_name()) &&
+                Objects.equals(dictQueryExpr.getKey_fields(), that.getKey_fields()) &&
+                Objects.equals(dictQueryExpr.getValue_field(), that.getValue_field()) &&
+                dictQueryExpr.isStrict_mode() == that.isStrict_mode();
     }
 
     public TDictQueryExpr getDictQueryExpr() {

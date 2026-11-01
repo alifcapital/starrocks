@@ -207,6 +207,8 @@ public class CallOperator extends ArgsScalarOperator {
         }
 
         return isDistinct == other.isDistinct &&
+                removedDistinct == other.removedDistinct &&
+                ignoreNulls == other.ignoreNulls &&
                 Objects.equals(fnName, other.fnName) &&
                 Objects.equals(type, other.type) &&
                 Objects.equals(fn, other.fn) &&
