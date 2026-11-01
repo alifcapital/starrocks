@@ -496,33 +496,27 @@ public class GroupProviderStatementTest {
         GroupProvider before = authenticationMgr.getGroupProvider(TEST_PROVIDER_NAME);
         Assertions.assertNotNull(before);
 
-        // Make the EditLog write fail at the alter step. The pseudo journal is shared by the whole test
-        // class, so the spy has to be removed again in the finally block below.
-        EditLog originalEditLog = GlobalStateMgr.getCurrentState().getEditLog();
-        EditLog spyEditLog = spy(originalEditLog);
+        // Make the EditLog write fail at the alter step. setUp gives every test its own EditLog spy, and
+        // Mockito cannot spy on a spy, so we stub that spy.
+        EditLog editLog = GlobalStateMgr.getCurrentState().getEditLog();
         doThrow(new RuntimeException("EditLog write failed"))
-                .when(spyEditLog).logAlterGroupProvider(any(GroupProviderLog.class), any());
-        GlobalStateMgr.getCurrentState().setEditLog(spyEditLog);
+                .when(editLog).logAlterGroupProvider(any(GroupProviderLog.class), any());
 
-        try {
-            Map<String, String> alterProps = new HashMap<>();
-            alterProps.put("ldap_bind_root_pwd", "newpwd");
-            RuntimeException exception = Assertions.assertThrows(RuntimeException.class,
-                    () -> authenticationMgr.alterGroupProvider(TEST_PROVIDER_NAME, alterProps));
-            Assertions.assertEquals("EditLog write failed", exception.getMessage());
+        Map<String, String> alterProps = new HashMap<>();
+        alterProps.put("ldap_bind_root_pwd", "newpwd");
+        RuntimeException exception = Assertions.assertThrows(RuntimeException.class,
+                () -> authenticationMgr.alterGroupProvider(TEST_PROVIDER_NAME, alterProps));
+        Assertions.assertEquals("EditLog write failed", exception.getMessage());
 
-            // The map still holds the original provider; the new one was torn down in the finally block
-            Assertions.assertSame(before, authenticationMgr.getGroupProvider(TEST_PROVIDER_NAME),
-                    "A failed EditLog write must not swap in the new provider");
-            // Exactly the new provider is destroyed: its runtime was already started by init(), and leaving it
-            // running would keep refreshing a configuration that never took effect.
-            Assertions.assertEquals(1, destroyed.size(),
-                    "Exactly one provider (the new one) must be destroyed, got " + destroyed.size());
-            Assertions.assertNotSame(before, destroyed.get(0),
-                    "The provider still serving lookups must not be the one that was destroyed");
-        } finally {
-            GlobalStateMgr.getCurrentState().setEditLog(originalEditLog);
-        }
+        // The map still holds the original provider; the new one was torn down in the finally block
+        Assertions.assertSame(before, authenticationMgr.getGroupProvider(TEST_PROVIDER_NAME),
+                "A failed EditLog write must not swap in the new provider");
+        // Exactly the new provider is destroyed: its runtime was already started by init(), and leaving it
+        // running would keep refreshing a configuration that never took effect.
+        Assertions.assertEquals(1, destroyed.size(),
+                "Exactly one provider (the new one) must be destroyed, got " + destroyed.size());
+        Assertions.assertNotSame(before, destroyed.get(0),
+                "The provider still serving lookups must not be the one that was destroyed");
     }
 
     /**
