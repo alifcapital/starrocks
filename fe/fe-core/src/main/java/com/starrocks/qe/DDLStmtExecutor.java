@@ -1063,6 +1063,8 @@ public class DDLStmtExecutor {
                     // from current session, may execute analyze stmt
                     statsConnectCtx.getSessionVariable().setStatisticCollectParallelism(
                             context.getSessionVariable().getStatisticCollectParallelism());
+                    statsConnectCtx.getSessionVariable().setStatisticCollectColumnsPerScan(
+                            context.getSessionVariable().getStatisticCollectColumnsPerScan());
                     Thread thread = new Thread(() -> {
                         try (var scope = statsConnectCtx.bindScope()) {
                             StatisticExecutor statisticExecutor = new StatisticExecutor();

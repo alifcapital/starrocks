@@ -113,13 +113,14 @@ public class ColumnSampleManager {
     }
 
     public List<List<ColumnStats>> splitPrimitiveTypeStats() {
-        int dop = 2;
+        int columnsPerScan = 2;
         if (ConnectContext.get() != null) {
-            dop = Math.max(dop, ConnectContext.get().getSessionVariable().getStatisticCollectParallelism());
+            columnsPerScan = Math.max(columnsPerScan,
+                    ConnectContext.get().getSessionVariable().getStatisticCollectColumnsPerScan());
         }
         long threshold = Config.statistics_large_string_column_merge_threshold;
         if (threshold <= 0) {
-            return Lists.partition(primitiveTypeStats, dop);
+            return Lists.partition(primitiveTypeStats, columnsPerScan);
         }
         List<List<ColumnStats>> batches = Lists.newArrayList();
         List<ColumnStats> normalColumns = Lists.newArrayList();
@@ -132,7 +133,7 @@ public class ColumnSampleManager {
                 normalColumns.add(stats);
             }
         }
-        batches.addAll(Lists.partition(normalColumns, dop));
+        batches.addAll(Lists.partition(normalColumns, columnsPerScan));
         return batches;
     }
 }

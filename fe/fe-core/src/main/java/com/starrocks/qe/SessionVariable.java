@@ -710,6 +710,8 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     public static final String STATISTIC_COLLECT_PARALLEL = "statistic_collect_parallel";
 
+    public static final String STATISTIC_COLLECT_COLUMNS_PER_SCAN = "statistic_collect_columns_per_scan";
+
     public static final String STATISTIC_META_COLLECT_PARALLEL = "statistic_meta_collect_parallel";
 
     // Bounded-cost external-table statistics-scan budgets. Set by the external ANALYZE job (from Config or
@@ -2210,8 +2212,14 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
     @VariableMgr.VarAttr(name = HASH_JOIN_INTERPOLATE_PASSTHROUGH, flag = VariableMgr.INVISIBLE)
     private boolean hashJoinInterpolatePassthrough = false;
 
+    // How many collection queries of one analyze task run at the same time.
     @VarAttr(name = STATISTIC_COLLECT_PARALLEL, flag = VariableMgr.INVISIBLE)
     private int statisticCollectParallelism = 1;
+
+    // How many columns one collection query covers. A wider query reads a partition fewer times, but it
+    // keeps more data in memory while the per-column aggregates consume it.
+    @VarAttr(name = STATISTIC_COLLECT_COLUMNS_PER_SCAN, flag = VariableMgr.INVISIBLE)
+    private int statisticCollectColumnsPerScan = 1;
 
     // Bounded-cost external-table statistics-scan budgets (see design 2.4). <= 0 means the dimension is
     // unlimited; all three <= 0 disables early stop, so a plain query never inherits a budget by accident.
@@ -4015,6 +4023,14 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     public void setStatisticCollectParallelism(int parallelism) {
         this.statisticCollectParallelism = parallelism;
+    }
+
+    public int getStatisticCollectColumnsPerScan() {
+        return statisticCollectColumnsPerScan;
+    }
+
+    public void setStatisticCollectColumnsPerScan(int columnsPerScan) {
+        this.statisticCollectColumnsPerScan = columnsPerScan;
     }
 
     public long getExternalStatsScanBytesCap() {

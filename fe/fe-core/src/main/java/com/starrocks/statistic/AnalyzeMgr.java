@@ -126,6 +126,10 @@ public class AnalyzeMgr implements Writable {
 
     // ConnectContext of all currently running analyze tasks
     private final Map<Long, ConnectContext> connectionMap = Maps.newConcurrentMap();
+    // An analyze task can run several collection queries at the same time, each on its own ConnectContext (see
+    // CollectQueryRunner). A KILL ANALYZE has to stop all of them, so their contexts are kept here next to the
+    // task's own one.
+    private final Map<Long, Set<ConnectContext>> queryConnectionMap = Maps.newConcurrentMap();
     // Cancellation markers for analyze tasks. Used to make KILL ANALYZE deterministic even if it misses the SQL window.
     private final Set<Long> cancelledAnalyzeIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
     // only first load of table will trigger analyze, so we don't need limit thread pool queue size
@@ -1323,8 +1327,33 @@ public class AnalyzeMgr implements Writable {
         if (killExecutor) {
             if (context != null) {
                 context.kill(false, "kill analyze unregisterConnection");
+                killQueryConnections(analyzeID, "kill analyze unregisterConnection");
             } else {
                 throw new SemanticException("There is no running task with analyzeId " + analyzeID);
+            }
+        }
+    }
+
+    public void registerQueryConnection(long analyzeID, ConnectContext ctx) {
+        queryConnectionMap.compute(analyzeID, (id, contexts) -> {
+            Set<ConnectContext> result = contexts == null ? java.util.concurrent.ConcurrentHashMap.newKeySet() : contexts;
+            result.add(ctx);
+            return result;
+        });
+    }
+
+    public void unregisterQueryConnection(long analyzeID, ConnectContext ctx) {
+        queryConnectionMap.computeIfPresent(analyzeID, (id, contexts) -> {
+            contexts.remove(ctx);
+            return contexts.isEmpty() ? null : contexts;
+        });
+    }
+
+    private void killQueryConnections(long analyzeID, String cancelledMessage) {
+        Set<ConnectContext> contexts = queryConnectionMap.get(analyzeID);
+        if (contexts != null) {
+            for (ConnectContext context : contexts) {
+                context.kill(false, cancelledMessage);
             }
         }
     }
@@ -1343,6 +1372,7 @@ public class AnalyzeMgr implements Writable {
         }
         cancelledAnalyzeIds.add(analyzeID);
         context.kill(false, USER_CANCEL_MESSAGE);
+        killQueryConnections(analyzeID, USER_CANCEL_MESSAGE);
     }
 
     public boolean isAnalyzeCancelled(long analyzeID) {

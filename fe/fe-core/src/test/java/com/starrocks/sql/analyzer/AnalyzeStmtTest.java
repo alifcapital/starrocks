@@ -1165,6 +1165,7 @@ public class AnalyzeStmtTest {
             ConnectContext session = UtFrameUtils.createDefaultCtx();
             session.setCurrentWarehouse("etl");
             session.getSessionVariable().setStatisticCollectParallelism(7);
+            session.getSessionVariable().setStatisticCollectColumnsPerScan(5);
             // Manual collection must not depend on the automatic collector's warehouse.
             Config.lake_background_warehouse = "missing_background";
             AnalyzeStmt stmt = (AnalyzeStmt) UtFrameUtils.parseStmtWithNewParser(
@@ -1176,12 +1177,14 @@ public class AnalyzeStmtTest {
                 Assertions.assertNull(collected.get());
                 session.setCurrentWarehouse("interactive");
                 session.getSessionVariable().setStatisticCollectParallelism(2);
+                session.getSessionVariable().setStatisticCollectColumnsPerScan(3);
                 Assertions.assertNotNull(pending.get());
                 pending.get().run();
             }
             Assertions.assertNotNull(collected.get());
             Assertions.assertEquals("etl", collected.get().getCurrentWarehouseName());
             Assertions.assertEquals(7, collected.get().getSessionVariable().getStatisticCollectParallelism());
+            Assertions.assertEquals(5, collected.get().getSessionVariable().getStatisticCollectColumnsPerScan());
             Assertions.assertFalse(collected.get().getSessionVariable().isEnableMaterializedViewRewrite());
         } finally {
             Config.lake_background_warehouse = background;

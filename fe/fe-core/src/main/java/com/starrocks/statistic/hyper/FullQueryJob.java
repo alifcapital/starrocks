@@ -37,7 +37,7 @@ public class FullQueryJob extends HyperQueryJob {
 
     @Override
     protected List<String> buildQuerySQL() {
-        int parts = Math.max(1, context.getSessionVariable().getStatisticCollectParallelism());
+        int parts = Math.max(1, context.getSessionVariable().getStatisticCollectColumnsPerScan());
 
         // Isolate wide string columns to bound per-query Exchange memory; batch the rest.
         long threshold = Config.statistics_large_string_column_merge_threshold;

@@ -31,6 +31,7 @@ import com.starrocks.sql.ast.expression.ExprUtils;
 import com.starrocks.sql.ast.expression.FunctionCallExpr;
 import com.starrocks.sql.ast.expression.IntLiteral;
 import com.starrocks.sql.ast.expression.StringLiteral;
+import com.starrocks.statistic.CollectQueryRunner;
 import com.starrocks.statistic.StatisticExecutor;
 import com.starrocks.statistic.StatsConstants;
 import com.starrocks.statistic.base.BaseColumnStats;
@@ -53,7 +54,9 @@ import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import static com.starrocks.sql.optimizer.statistics.ColumnStatistic.DEFAULT_COLLECTION_SIZE;
 
@@ -67,8 +70,6 @@ public abstract class HyperQueryJob {
     protected final List<ColumnStats> columnStats;
     protected final List<Long> partitionIdList;
 
-    // pipeline dop
-    protected int pipelineDop;
     // result buffer
     protected List<String> sqlBuffer = Lists.newArrayList();
     protected List<List<Expr>> rowsBuffer = Lists.newArrayList();
@@ -85,7 +86,6 @@ public abstract class HyperQueryJob {
         this.table = table;
         this.columnStats = columnStats;
         this.partitionIdList = partitionIdList;
-        this.pipelineDop = context.getSessionVariable().getStatisticCollectParallelism();
     }
 
     protected void checkCancelled() {
@@ -97,11 +97,7 @@ public abstract class HyperQueryJob {
     public void queryStatistics() {
         String tableName = StringEscapeUtils.escapeSql(db.getOriginName() + "." + table.getName());
         List<String> sqlList = buildQuerySQL();
-        for (String sql : sqlList) {
-            checkCancelled();
-            // execute sql
-            List<TStatisticData> dataList = executeStatisticsQuery(sql, context);
-
+        for (List<TStatisticData> dataList : executeStatisticsQueries(sqlList)) {
             for (TStatisticData data : dataList) {
                 checkCancelled();
                 Partition partition = table.getPartition(data.getPartitionId());
@@ -147,22 +143,48 @@ public abstract class HyperQueryJob {
         return s;
     }
 
-    public int getFailures() {
+    public synchronized int getFailures() {
         return failures;
     }
 
-    public int getTotals() {
+    public synchronized int getTotals() {
         return totals;
     }
 
-    public Throwable getLastFailure() {
+    public synchronized Throwable getLastFailure() {
         return lastFailure;
+    }
+
+    // Runs `sqls` with up to statistic_collect_parallel of them at the same time, each on its own ConnectContext
+    // (see CollectQueryRunner), and returns their results in the order of `sqls`. Callers then build the rows
+    // in that order, as if the queries had run one by one.
+    protected List<List<TStatisticData>> executeStatisticsQueries(List<String> sqls) {
+        int parallelism = Math.max(1, context.getSessionVariable().getStatisticCollectParallelism());
+        AtomicReferenceArray<List<TStatisticData>> results = new AtomicReferenceArray<>(sqls.size());
+        List<Integer> indexes = IntStream.range(0, sqls.size()).boxed().collect(Collectors.toList());
+        try {
+            CollectQueryRunner.run(context, analyzeId, parallelism, indexes, (index, queryContext) -> {
+                checkCancelled();
+                results.set(index, executeStatisticsQuery(sqls.get(index), queryContext));
+            });
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        List<List<TStatisticData>> resultList = Lists.newArrayList();
+        for (int i = 0; i < sqls.size(); i++) {
+            resultList.add(results.get(i));
+        }
+        return resultList;
     }
 
     protected List<TStatisticData> executeStatisticsQuery(String sql, ConnectContext context) {
         try {
             checkCancelled();
-            totals++;
+            synchronized (this) {
+                totals++;
+            }
             LOG.debug("statistics collect sql : " + sql);
             StatisticExecutor executor = new StatisticExecutor();
             // set default session variables for stats context
@@ -170,13 +192,17 @@ public abstract class HyperQueryJob {
             return executor.executeStatisticDQL(context, sql);
         } catch (Exception e) {
             if (e.getMessage().contains("USER_CANCEL")) {
-                lastFailure = e;
+                synchronized (this) {
+                    lastFailure = e;
+                }
                 throw e;
             }
-            failures++;
             String message = "execute statistics query failed, sql: " + sql +  ", error: " + e.getMessage();
             LOG.error(message, e);
-            lastFailure = new RuntimeException(message, e);
+            synchronized (this) {
+                failures++;
+                lastFailure = new RuntimeException(message, e);
+            }
             return Collections.emptyList();
         } finally {
             context.setStartTime();
@@ -261,7 +287,6 @@ public abstract class HyperQueryJob {
             context.setSessionId(((OlapTable) table).getSessionId());
         }
         sessionVariable.setEnableAnalyzePhasePruneColumns(true);
-        sessionVariable.setPipelineDop(pipelineDop);
     }
 
     @Override

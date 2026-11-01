@@ -454,11 +454,11 @@ public class HyperJobTest extends DistributedEnvPlanTestBase {
         SampleQueryJob job = getSampleQueryJob(List.of("c_short", "c_wide_a", "c_wide_b"));
 
         long original = Config.statistics_large_string_column_merge_threshold;
-        int origParallel = connectContext.getSessionVariable().getStatisticCollectParallelism();
+        int origColumnsPerScan = connectContext.getSessionVariable().getStatisticCollectColumnsPerScan();
         try {
             Config.statistics_large_string_column_merge_threshold = 500;
-            // Bump parallelism to 3 so the narrow column wouldn't be split by partition() alone.
-            connectContext.getSessionVariable().setStatisticCollectParallelism(3);
+            // Three columns per scan, so the narrow column wouldn't be split by partition() alone.
+            connectContext.getSessionVariable().setStatisticCollectColumnsPerScan(3);
 
             List<String> sqls = job.buildQuerySQL();
             // 2 SQLs for the wide columns (one each) + 1 SQL for the narrow column = 3 total.
@@ -488,7 +488,7 @@ public class HyperJobTest extends DistributedEnvPlanTestBase {
             Assertions.assertFalse(narrowSql.contains("'c_wide_b'"));
         } finally {
             Config.statistics_large_string_column_merge_threshold = original;
-            connectContext.getSessionVariable().setStatisticCollectParallelism(origParallel);
+            connectContext.getSessionVariable().setStatisticCollectColumnsPerScan(origColumnsPerScan);
         }
     }
 
@@ -504,10 +504,10 @@ public class HyperJobTest extends DistributedEnvPlanTestBase {
         SampleQueryJob job = getSampleQueryJob(List.of("c_short", "c_wide"));
 
         long originalThreshold = Config.statistics_large_string_column_merge_threshold;
-        int originalParallel = connectContext.getSessionVariable().getStatisticCollectParallelism();
+        int originalColumnsPerScan = connectContext.getSessionVariable().getStatisticCollectColumnsPerScan();
         try {
             Config.statistics_large_string_column_merge_threshold = 0;
-            connectContext.getSessionVariable().setStatisticCollectParallelism(2);
+            connectContext.getSessionVariable().setStatisticCollectColumnsPerScan(2);
             List<String> sqls = job.buildQuerySQL();
             // Both columns share the same SQL (no wide-column isolation).
             Assertions.assertEquals(1, sqls.size());
@@ -515,7 +515,7 @@ public class HyperJobTest extends DistributedEnvPlanTestBase {
             Assertions.assertTrue(sqls.get(0).contains("'c_wide'"));
         } finally {
             Config.statistics_large_string_column_merge_threshold = originalThreshold;
-            connectContext.getSessionVariable().setStatisticCollectParallelism(originalParallel);
+            connectContext.getSessionVariable().setStatisticCollectColumnsPerScan(originalColumnsPerScan);
         }
     }
 
@@ -531,10 +531,10 @@ public class HyperJobTest extends DistributedEnvPlanTestBase {
         SampleQueryJob job = getSampleQueryJob(List.of("c_short", "c_boundary"));
 
         long originalThreshold = Config.statistics_large_string_column_merge_threshold;
-        int originalParallel = connectContext.getSessionVariable().getStatisticCollectParallelism();
+        int originalColumnsPerScan = connectContext.getSessionVariable().getStatisticCollectColumnsPerScan();
         try {
             Config.statistics_large_string_column_merge_threshold = 512;
-            connectContext.getSessionVariable().setStatisticCollectParallelism(2);
+            connectContext.getSessionVariable().setStatisticCollectColumnsPerScan(2);
             List<String> sqls = job.buildQuerySQL();
             Assertions.assertEquals(1, sqls.size(),
                     "boundary length == threshold must batch with narrow, not isolate");
@@ -542,7 +542,7 @@ public class HyperJobTest extends DistributedEnvPlanTestBase {
             Assertions.assertTrue(sqls.get(0).contains("'c_boundary'"));
         } finally {
             Config.statistics_large_string_column_merge_threshold = originalThreshold;
-            connectContext.getSessionVariable().setStatisticCollectParallelism(originalParallel);
+            connectContext.getSessionVariable().setStatisticCollectColumnsPerScan(originalColumnsPerScan);
         }
     }
 
@@ -591,10 +591,10 @@ public class HyperJobTest extends DistributedEnvPlanTestBase {
         SampleQueryJob job = new SampleQueryJob(connectContext, 1L, db, wideTable, stats, List.of(widePid), wideSampler);
 
         long originalThreshold = Config.statistics_large_string_column_merge_threshold;
-        int originalParallel = connectContext.getSessionVariable().getStatisticCollectParallelism();
+        int originalColumnsPerScan = connectContext.getSessionVariable().getStatisticCollectColumnsPerScan();
         try {
             Config.statistics_large_string_column_merge_threshold = 500;
-            connectContext.getSessionVariable().setStatisticCollectParallelism(2);
+            connectContext.getSessionVariable().setStatisticCollectColumnsPerScan(2);
             List<String> sqls = job.buildQuerySQL();
             Assertions.assertEquals(1, sqls.size(),
                     "ARRAY column is not isolated; both columns batch into 1 SQL");
@@ -602,7 +602,7 @@ public class HyperJobTest extends DistributedEnvPlanTestBase {
             Assertions.assertTrue(sqls.get(0).contains("'c_arr_wide'"));
         } finally {
             Config.statistics_large_string_column_merge_threshold = originalThreshold;
-            connectContext.getSessionVariable().setStatisticCollectParallelism(originalParallel);
+            connectContext.getSessionVariable().setStatisticCollectColumnsPerScan(originalColumnsPerScan);
         }
     }
 
@@ -625,10 +625,10 @@ public class HyperJobTest extends DistributedEnvPlanTestBase {
         SampleQueryJob job = new SampleQueryJob(connectContext, 1L, db, wideTable, stats, List.of(widePid), wideSampler);
 
         long originalThreshold = Config.statistics_large_string_column_merge_threshold;
-        int originalParallel = connectContext.getSessionVariable().getStatisticCollectParallelism();
+        int originalColumnsPerScan = connectContext.getSessionVariable().getStatisticCollectColumnsPerScan();
         try {
             Config.statistics_large_string_column_merge_threshold = 500;
-            connectContext.getSessionVariable().setStatisticCollectParallelism(2);
+            connectContext.getSessionVariable().setStatisticCollectColumnsPerScan(2);
             List<String> sqls = job.buildQuerySQL();
             Assertions.assertEquals(1, sqls.size(),
                     "BIGINT must not trigger wide-column isolation");
@@ -636,7 +636,7 @@ public class HyperJobTest extends DistributedEnvPlanTestBase {
             Assertions.assertTrue(sqls.get(0).contains("'c_bigint'"));
         } finally {
             Config.statistics_large_string_column_merge_threshold = originalThreshold;
-            connectContext.getSessionVariable().setStatisticCollectParallelism(originalParallel);
+            connectContext.getSessionVariable().setStatisticCollectColumnsPerScan(originalColumnsPerScan);
         }
     }
 
@@ -645,10 +645,10 @@ public class HyperJobTest extends DistributedEnvPlanTestBase {
         FullQueryJob job = getFullQueryJob(List.of("c_short", "c_wide"));
 
         long originalThreshold = Config.statistics_large_string_column_merge_threshold;
-        int originalParallel = connectContext.getSessionVariable().getStatisticCollectParallelism();
+        int originalColumnsPerScan = connectContext.getSessionVariable().getStatisticCollectColumnsPerScan();
         try {
             Config.statistics_large_string_column_merge_threshold = 500;
-            connectContext.getSessionVariable().setStatisticCollectParallelism(2);
+            connectContext.getSessionVariable().setStatisticCollectColumnsPerScan(2);
             List<String> sqls = job.buildQuerySQL();
             // 1 standalone SQL for the wide column + 1 SQL for the normal column.
             Assertions.assertEquals(2, sqls.size());
@@ -662,7 +662,7 @@ public class HyperJobTest extends DistributedEnvPlanTestBase {
             Assertions.assertTrue(sqls.get(1).contains("'c_short'"));
         } finally {
             Config.statistics_large_string_column_merge_threshold = originalThreshold;
-            connectContext.getSessionVariable().setStatisticCollectParallelism(originalParallel);
+            connectContext.getSessionVariable().setStatisticCollectColumnsPerScan(originalColumnsPerScan);
         }
     }
 
@@ -671,10 +671,10 @@ public class HyperJobTest extends DistributedEnvPlanTestBase {
         FullQueryJob job = getFullQueryJob(List.of("c_short", "c_wide"));
 
         long originalThreshold = Config.statistics_large_string_column_merge_threshold;
-        int originalParallel = connectContext.getSessionVariable().getStatisticCollectParallelism();
+        int originalColumnsPerScan = connectContext.getSessionVariable().getStatisticCollectColumnsPerScan();
         try {
             Config.statistics_large_string_column_merge_threshold = 0;
-            connectContext.getSessionVariable().setStatisticCollectParallelism(2);
+            connectContext.getSessionVariable().setStatisticCollectColumnsPerScan(2);
             List<String> sqls = job.buildQuerySQL();
             // Both columns share one UNION ALL'd SQL (no isolation).
             Assertions.assertEquals(1, sqls.size());
@@ -683,7 +683,7 @@ public class HyperJobTest extends DistributedEnvPlanTestBase {
             Assertions.assertTrue(sqls.get(0).contains("UNION ALL"));
         } finally {
             Config.statistics_large_string_column_merge_threshold = originalThreshold;
-            connectContext.getSessionVariable().setStatisticCollectParallelism(originalParallel);
+            connectContext.getSessionVariable().setStatisticCollectColumnsPerScan(originalColumnsPerScan);
         }
     }
 

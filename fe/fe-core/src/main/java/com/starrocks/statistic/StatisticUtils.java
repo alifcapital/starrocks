@@ -187,6 +187,28 @@ public class StatisticUtils {
         return context;
     }
 
+    // Builds the context for one collection query that runs at the same time as other queries of the same
+    // analyze task. We want the query to plan and run as it would on the task's own context, so it gets a copy
+    // of the task's session variables (scan caps, CTE reuse, spill, timeouts, warehouse) and identity. It has
+    // its own query id, executor and state, so concurrent queries do not overwrite each other's.
+    public static ConnectContext buildCollectQueryContext(ConnectContext taskContext) {
+        ConnectContext context = ConnectContext.buildInner();
+        context.setSessionVariable(taskContext.getSessionVariable().clone());
+        context.setGlobalStateMgr(taskContext.getGlobalStateMgr());
+        context.setCurrentUserIdentity(taskContext.getCurrentUserIdentity());
+        context.setCurrentRoleIds(taskContext.getCurrentRoleIds());
+        context.setQualifiedUser(taskContext.getQualifiedUser());
+        context.setDatabase(taskContext.getDatabase());
+        context.setSessionId(taskContext.getSessionId());
+        context.setStatisticsJob(taskContext.isStatisticsJob());
+        context.setStatisticsConnection(taskContext.isStatisticsConnection());
+        context.setOnlyReadIcebergCache(taskContext.isOnlyReadIcebergCache());
+        context.setQueryId(UUIDUtil.genUUID());
+        context.setExecutionId(UUIDUtil.toTUniqueId(context.getQueryId()));
+        context.setStartTime();
+        return context;
+    }
+
     public static void triggerCollectionOnInsertOverwrite(InsertOverwriteJobStats stats,
                                                           Database db,
                                                           Table table,

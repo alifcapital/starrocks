@@ -61,10 +61,7 @@ public class MetaQueryJob extends HyperQueryJob {
 
     private void queryMetaMetric(List<ColumnStats> queryColumns) {
         List<String> metaSQL = buildBatchMetaQuerySQL(queryColumns);
-        for (String sql : metaSQL) {
-            checkCancelled();
-            // execute sql
-            List<TStatisticData> dataList = executeStatisticsQuery(sql, context);
+        for (List<TStatisticData> dataList : executeStatisticsQueries(metaSQL)) {
             for (TStatisticData data : dataList) {
                 checkCancelled();
                 Partition partition = table.getPartition(data.getPartitionId());
@@ -106,10 +103,7 @@ public class MetaQueryJob extends HyperQueryJob {
         String tableName = StringEscapeUtils.escapeSql(db.getOriginName() + "." + table.getName());
 
         List<String> metaSQL = buildBatchNDVQuerySQL(queryColumns);
-        for (String sql : metaSQL) {
-            checkCancelled();
-            // execute sql
-            List<TStatisticData> dataList = executeStatisticsQuery(sql, context);
+        for (List<TStatisticData> dataList : executeStatisticsQueries(metaSQL)) {
             for (TStatisticData data : dataList) {
                 checkCancelled();
                 Partition partition = table.getPartition(data.getPartitionId());
@@ -135,9 +129,8 @@ public class MetaQueryJob extends HyperQueryJob {
     }
 
     private List<String> buildBatchNDVQuerySQL(List<ColumnStats> queryColumns) {
-        int parts = Math.max(1, context.getSessionVariable().getStatisticCollectParallelism());
+        int parts = Math.max(1, context.getSessionVariable().getStatisticCollectColumnsPerScan());
         List<List<ColumnStats>> partColumns = Lists.partition(queryColumns, parts);
-        pipelineDop = partColumns.size() < parts ? parts / partColumns.size() : 1;
 
         List<String> metaSQL = Lists.newArrayList();
         for (Long partitionId : partitionIdList) {

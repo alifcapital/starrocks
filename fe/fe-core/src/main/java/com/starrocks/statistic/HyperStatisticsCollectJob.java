@@ -87,7 +87,6 @@ public class HyperStatisticsCollectJob extends StatisticsCollectJob {
             context.setSessionId(((OlapTable) table).getSessionId());
         }
         context.getSessionVariable().setEnableAnalyzePhasePruneColumns(true);
-        context.getSessionVariable().setPipelineDop(context.getSessionVariable().getStatisticCollectParallelism());
 
         // A sampled HLL describes only observed values. Primitive SAMPLE columns need a
         // table-wide frequency estimator; scalar estimates cannot be merged as partition HLLs.

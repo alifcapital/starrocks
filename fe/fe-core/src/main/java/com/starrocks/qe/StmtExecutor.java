@@ -2303,6 +2303,8 @@ public class StmtExecutor {
         }
         statsConnectCtx.getSessionVariable().setStatisticCollectParallelism(
                 context.getSessionVariable().getStatisticCollectParallelism());
+        statsConnectCtx.getSessionVariable().setStatisticCollectColumnsPerScan(
+                context.getSessionVariable().getStatisticCollectColumnsPerScan());
         statsConnectCtx.setStatisticsConnection(true);
 
         StatsConstants.AnalyzeType analyzeType;

@@ -26,6 +26,7 @@ import com.starrocks.common.util.DebugUtil;
 import com.starrocks.common.util.UUIDUtil;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.QueryState;
+import com.starrocks.qe.SessionVariable;
 import com.starrocks.qe.StmtExecutor;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.ast.ColumnDef;
@@ -55,6 +56,8 @@ import java.io.StringWriter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import static com.starrocks.statistic.StatsConstants.FULL_STATISTICS_TABLE_NAME;
@@ -101,6 +104,10 @@ public class FullStatisticsCollectJob extends StatisticsCollectJob {
 
     private final List<String> sqlBuffer = Lists.newArrayList();
     private final List<List<Expr>> rowsBuffer = Lists.newArrayList();
+    // Collection queries of this job can run at the same time (statistic_collect_parallel). This lock guards
+    // what they share: the row buffers, the failure counters and the progress. The buffer is also written out
+    // under it, so the job never runs two INSERTs at once.
+    private final Object collectLock = new Object();
 
     public FullStatisticsCollectJob(Database db, Table table, List<Long> partitionIdList, List<String> columns,
                                     StatsConstants.AnalyzeType type, StatsConstants.ScheduleType scheduleType,
@@ -118,63 +125,59 @@ public class FullStatisticsCollectJob extends StatisticsCollectJob {
 
     @Override
     public void collect(ConnectContext context, AnalyzeStatus analyzeStatus) throws Exception {
-        int parallelism = Math.max(1, context.getSessionVariable().getStatisticCollectParallelism());
-        List<List<String>> collectSQLList = buildCollectSQLList(parallelism);
+        SessionVariable sessionVariable = context.getSessionVariable();
+        int parallelism = Math.max(1, sessionVariable.getStatisticCollectParallelism());
+        int columnsPerScan = Math.max(1, sessionVariable.getStatisticCollectColumnsPerScan());
+        List<List<String>> collectSQLList = buildCollectSQLList(columnsPerScan);
         long totalCollectSQL = collectSQLList.size();
         if (table.isTemporaryTable()) {
             context.setSessionId(((OlapTable) table).getSessionId());
         }
-        context.getSessionVariable().setEnableAnalyzePhasePruneColumns(true);
+        sessionVariable.setEnableAnalyzePhasePruneColumns(true);
 
-        // First, the collection task is divided into several small tasks according to the column name and partition,
-        // and then the multiple small tasks are aggregated into several tasks
-        // that will actually be run according to the configured parallelism, and are connected by union all
-        // Because each union will run independently, if the number of unions is greater than the degree of parallelism,
-        // dop will be set to 1 to meet the requirements of the degree of parallelism.
-        // If the number of unions is less than the degree of parallelism,
-        // dop should be adjusted appropriately to use enough cpu cores
-        long finishedSQLNum = 0;
-        long failedNum = 0;
-        Exception lastFailure = null;
-        for (List<String> sqlUnion : collectSQLList) {
-            if (sqlUnion.size() < parallelism) {
-                context.getSessionVariable().setPipelineDop(parallelism / sqlUnion.size());
-            } else {
-                context.getSessionVariable().setPipelineDop(1);
-            }
-
+        // The collection task is divided into small tasks by partition and column, and every
+        // statistic_collect_columns_per_scan of them are joined with UNION ALL into one query. Up to
+        // statistic_collect_parallel such queries run at the same time, each on its own ConnectContext (see
+        // CollectQueryRunner); every query uses the pipeline dop of the session.
+        AtomicLong finishedSQLNum = new AtomicLong();
+        AtomicLong failedNum = new AtomicLong();
+        AtomicReference<Exception> lastFailure = new AtomicReference<>();
+        CollectQueryRunner.run(context, analyzeStatus.getId(), parallelism, collectSQLList, (sqlUnion, queryContext) -> {
             String sql = Joiner.on(" UNION ALL ").join(sqlUnion);
 
             try {
-                collectStatisticSync(sql, context, analyzeStatus);
+                collectStatisticSync(sql, queryContext, analyzeStatus);
             } catch (Exception e) {
-                failedNum++;
                 LOG.warn("collect statistics task failed in job: {}, {}", this, sql, e);
-
-                double failureRatio = 1.0 * failedNum / collectSQLList.size();
-                if (collectSQLList.size() < 100) {
-                    // too few tasks, just fail this job
-                    throw e;
-                } else if (failureRatio > Config.statistic_full_statistics_failure_tolerance_ratio) {
-                    // many tasks, tolerate partial failure
-                    String message = String.format("collect statistic job failed due to " +
-                                    "too many failed tasks: %d/%d, the last failure is %s",
-                            failedNum, collectSQLList.size(), e);
-                    LOG.warn(message, e);
-                    throw new RuntimeException(message, e);
-                } else {
-                    lastFailure = e;
-                    continue;
+                synchronized (collectLock) {
+                    long failed = failedNum.incrementAndGet();
+                    double failureRatio = 1.0 * failed / collectSQLList.size();
+                    if (collectSQLList.size() < 100) {
+                        // too few tasks, just fail this job
+                        throw e;
+                    } else if (failureRatio > Config.statistic_full_statistics_failure_tolerance_ratio) {
+                        // many tasks, tolerate partial failure
+                        String message = String.format("collect statistic job failed due to " +
+                                        "too many failed tasks: %d/%d, the last failure is %s",
+                                failed, collectSQLList.size(), e);
+                        LOG.warn(message, e);
+                        throw new RuntimeException(message, e);
+                    } else {
+                        lastFailure.set(e);
+                        return;
+                    }
                 }
             }
-            finishedSQLNum++;
-            analyzeStatus.setProgress(finishedSQLNum * 100 / totalCollectSQL);
-            GlobalStateMgr.getCurrentState().getAnalyzeMgr().addAnalyzeStatus(analyzeStatus);
-        }
+            synchronized (collectLock) {
+                long finished = finishedSQLNum.incrementAndGet();
+                analyzeStatus.setProgress(finished * 100 / totalCollectSQL);
+                GlobalStateMgr.getCurrentState().getAnalyzeMgr().addAnalyzeStatus(analyzeStatus);
+            }
+        });
 
-        if (lastFailure != null) {
+        if (lastFailure.get() != null) {
             String message = String.format("collect statistic job partially failed but tolerated %d/%d, " +
-                    "last error is %s", failedNum, collectSQLList.size(), lastFailure);
+                    "last error is %s", failedNum.get(), collectSQLList.size(), lastFailure.get());
             analyzeStatus.setReason(message);
             LOG.warn(message);
         }
@@ -200,6 +203,8 @@ public class FullStatisticsCollectJob extends StatisticsCollectJob {
         List<TStatisticData> dataList = executor.executeStatisticDQL(context, sql);
 
         String tableName = StringEscapeUtils.escapeSql(db.getOriginName() + "." + table.getName());
+        List<List<Expr>> rows = Lists.newArrayList();
+        List<String> sqls = Lists.newArrayList();
         for (TStatisticData data : dataList) {
             List<String> params = Lists.newArrayList();
             List<Expr> row = Lists.newArrayList();
@@ -240,12 +245,17 @@ public class FullStatisticsCollectJob extends StatisticsCollectJob {
             row.add(nowFn()); // update time, 8 byte
             row.add(new IntLiteral(data.getCollectionSize() <= 0 ? -1 : data.getCollectionSize())); // collection size, 8 byte
 
-            rowsBuffer.add(row);
-            sqlBuffer.add("(" + String.join(", ", params) + ")");
+            rows.add(row);
+            sqls.add("(" + String.join(", ", params) + ")");
         }
-        flushInsertStatisticsData(context, false);
+        synchronized (collectLock) {
+            rowsBuffer.addAll(rows);
+            sqlBuffer.addAll(sqls);
+            flushInsertStatisticsData(context, false);
+        }
     }
 
+    // Callers hold collectLock, or call it after every collection query of the job has returned.
     private void flushInsertStatisticsData(ConnectContext context, boolean force) throws Exception {
         // hll serialize to hex, about 32kb
         long bufferSize = 33L * 1024 * rowsBuffer.size();
@@ -309,7 +319,7 @@ public class FullStatisticsCollectJob extends StatisticsCollectJob {
      * The number of rows is accumulated in turn until the maximum number of rows is accumulated.
      * Use UNION ALL connection between multiple tasks and collect them in one query
      */
-    protected List<List<String>> buildCollectSQLList(int parallelism) {
+    protected List<List<String>> buildCollectSQLList(int columnsPerScan) {
         List<String> totalQuerySQL = new ArrayList<>();
         for (Long partitionId : partitionIdList) {
             Partition partition = table.getPartition(partitionId);
@@ -323,7 +333,7 @@ public class FullStatisticsCollectJob extends StatisticsCollectJob {
             }
         }
 
-        return Lists.partition(totalQuerySQL, parallelism);
+        return Lists.partition(totalQuerySQL, Math.max(1, columnsPerScan));
     }
 
     private String buildBatchCollectFullStatisticSQL(Table table, Partition partition, String columnName,

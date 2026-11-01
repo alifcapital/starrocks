@@ -74,19 +74,19 @@ public class ExternalStatsPartialCollectTest extends PlanTestNoneDBBase {
         hiveTable = connectContext.getGlobalStateMgr().getMetadataMgr().getTable(connectContext, CATALOG, DB, TABLE);
     }
 
-    private int savedCollectParallelism;
+    private int savedColumnsPerScan;
 
-    // Columns are grouped into scans of max(1, statistic_collect_parallelism). The tests below count one query
-    // per partition for two columns, so we run at parallelism 2 to put both columns into one scan.
+    // Columns are grouped into scans of max(1, statistic_collect_columns_per_scan). The tests below count one
+    // query per partition for two columns, so we put both columns into one scan.
     @BeforeEach
     public void useTwoColumnsPerScan() {
-        savedCollectParallelism = connectContext.getSessionVariable().getStatisticCollectParallelism();
-        connectContext.getSessionVariable().setStatisticCollectParallelism(2);
+        savedColumnsPerScan = connectContext.getSessionVariable().getStatisticCollectColumnsPerScan();
+        connectContext.getSessionVariable().setStatisticCollectColumnsPerScan(2);
     }
 
     @AfterEach
     public void cleanupMeta() {
-        connectContext.getSessionVariable().setStatisticCollectParallelism(savedCollectParallelism);
+        connectContext.getSessionVariable().setStatisticCollectColumnsPerScan(savedColumnsPerScan);
         GlobalStateMgr.getCurrentState().getAnalyzeMgr().removeExternalBasicStatsMeta(CATALOG, DB, TABLE);
     }
 
@@ -200,7 +200,7 @@ public class ExternalStatsPartialCollectTest extends PlanTestNoneDBBase {
 
     @Test
     public void testColumnGroupsOfOnePartitionFailIndependently() throws Exception {
-        // 4 columns at parallelism 2 split into 2 groups of 2, so each partition is scanned twice. Failing
+        // 4 columns at two columns per scan split into 2 groups of 2, so each partition is scanned twice. Failing
         // the second group of the first partition must not evict that partition from the first group's
         // columns: their rows for it were written and are correct.
         List<String> columnNames = Lists.newArrayList("c1", "c2", "c3", "par_col");
@@ -217,11 +217,11 @@ public class ExternalStatsPartialCollectTest extends PlanTestNoneDBBase {
     }
 
     @Test
-    public void testOneColumnPerScanAtParallelismOne() throws Exception {
-        // We fear a slow multicast consumer buffering what a fast one read, so at the minimum parallelism each
+    public void testOneColumnPerScan() throws Exception {
+        // We fear a slow multicast consumer buffering what a fast one read, so at one column per scan each
         // column has its own scan. A partition of 4 columns is then scanned four times, and failing the second
         // scan of the first partition costs only that column its coverage of that partition.
-        connectContext.getSessionVariable().setStatisticCollectParallelism(1);
+        connectContext.getSessionVariable().setStatisticCollectColumnsPerScan(1);
         List<String> columnNames = Lists.newArrayList("c1", "c2", "c3", "par_col");
         List<Type> types = Lists.newArrayList(com.starrocks.type.IntegerType.INT, com.starrocks.type.StringType.STRING,
                 com.starrocks.type.StringType.STRING, com.starrocks.type.StringType.STRING);
