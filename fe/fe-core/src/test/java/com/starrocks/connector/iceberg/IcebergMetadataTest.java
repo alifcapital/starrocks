@@ -2862,7 +2862,7 @@ public class IcebergMetadataTest extends TableTestBase {
     }
 
     @Test
-    public void testInvalidateTableForReadDoesNoRemoteLoad() {
+    public void testInvalidateTableForReadRefreshesTheCachedTable() {
         AtomicInteger remoteLoads = new AtomicInteger();
         AtomicReference<org.apache.iceberg.Table> remoteTable = new AtomicReference<>(mockedNativeTableA);
         new MockUp<IcebergHiveCatalog>() {
@@ -2882,16 +2882,47 @@ public class IcebergMetadataTest extends TableTestBase {
         Assertions.assertSame(mockedNativeTableA, cachingIcebergCatalog.getTable(connectContext, "db", "table"));
         Assertions.assertEquals(1, remoteLoads.get());
 
-        // The remote table moves on; invalidating it for a read must not load it, only drop the cached object.
+        // The remote table moves on; the refresh for a read loads it and puts it in the cache in place of the old one.
         remoteTable.set(mockedNativeTableB);
         IcebergTable icebergTable = new IcebergTable(1, "srTableName", CATALOG_NAME, "resource_name", "db",
                 "table", "", new ArrayList<>(), mockedNativeTableA, Maps.newHashMap());
         metadata.invalidateTableForRead("db", icebergTable);
-        Assertions.assertEquals(1, remoteLoads.get());
+        Assertions.assertEquals(2, remoteLoads.get());
 
-        // The next read loads the table as it is now.
+        // The next read takes the refreshed table from the cache.
         Assertions.assertSame(mockedNativeTableB, cachingIcebergCatalog.getTable(connectContext, "db", "table"));
         Assertions.assertEquals(2, remoteLoads.get());
+    }
+
+    // A failed refresh for a read drops the table from the cache, so the statement loads it again as it is now.
+    @Test
+    public void testFailedInvalidateTableForReadLoadsTheTableAgain() {
+        AtomicInteger remoteLoads = new AtomicInteger();
+        new MockUp<IcebergHiveCatalog>() {
+            @Mock
+            org.apache.iceberg.Table getTable(ConnectContext context, String dbName, String tableName)
+                    throws StarRocksConnectorException {
+                int load = remoteLoads.incrementAndGet();
+                if (load == 2) {
+                    throw new StarRocksConnectorException("catalog failed once");
+                }
+                return load == 1 ? mockedNativeTableA : mockedNativeTableB;
+            }
+        };
+        IcebergHiveCatalog icebergHiveCatalog = new IcebergHiveCatalog(CATALOG_NAME, new Configuration(), DEFAULT_CONFIG);
+        CachingIcebergCatalog cachingIcebergCatalog = new CachingIcebergCatalog(CATALOG_NAME, icebergHiveCatalog,
+                DEFAULT_CATALOG_PROPERTIES, Executors.newSingleThreadExecutor());
+        IcebergMetadata metadata = new IcebergMetadata(CATALOG_NAME, HDFS_ENVIRONMENT, cachingIcebergCatalog,
+                Executors.newSingleThreadExecutor(), null);
+        Assertions.assertSame(mockedNativeTableA, cachingIcebergCatalog.getTable(connectContext, "db", "table"));
+
+        IcebergTable icebergTable = new IcebergTable(1, "srTableName", CATALOG_NAME, "resource_name", "db",
+                "table", "", new ArrayList<>(), mockedNativeTableA, Maps.newHashMap());
+        metadata.invalidateTableForRead("db", icebergTable);
+        Assertions.assertEquals(2, remoteLoads.get());
+
+        Assertions.assertSame(mockedNativeTableB, cachingIcebergCatalog.getTable(connectContext, "db", "table"));
+        Assertions.assertEquals(3, remoteLoads.get());
     }
 
     @Test

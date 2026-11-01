@@ -267,6 +267,12 @@ public interface IcebergCatalog extends MemoryTrackable {
     default void refreshTable(String dbName, String tableName, ConnectContext ctx, ExecutorService refreshExecutor) {
     }
 
+    // Refresh for a statement that must read the table as it is now, see CachingIcebergCatalog.
+    default void refreshTableForRead(String dbName, String tableName, ConnectContext ctx,
+                                     ExecutorService refreshExecutor) {
+        refreshTable(dbName, tableName, ctx, refreshExecutor);
+    }
+
     default void invalidateTableCache(String dbName, String tableName) {
     }
 

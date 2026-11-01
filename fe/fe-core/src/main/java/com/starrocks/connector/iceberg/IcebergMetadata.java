@@ -2717,10 +2717,12 @@ public class IcebergMetadata implements ConnectorMetadata {
     }
 
     /**
-     * Drop only the cached table object, with no remote I/O and without the catalog's per-table refresh lock: the
-     * planner's next getTable then loads the table as it is now. A refresh would load it remotely under that lock,
-     * so concurrent INSERTs reading the same source queue behind each other's remote load. The partition and
-     * manifest caches are keyed by snapshot and file path, so they stay valid for whatever snapshot is loaded.
+     * The table cache puts a new snapshot of an active table in place only after it warmed the snapshot's manifests.
+     * We want an INSERT ... SELECT to read its source as it is now and keep that, so we refresh the table instead of
+     * dropping it: a dropped table would come back on the next getTable with a cold snapshot. The catalog lets
+     * INSERTs that wait for one refresh take its result, see CachingIcebergCatalog#refreshTableForRead. A refresh
+     * that fails drops the table from the cache, as refreshTable does: the statement then loads the table again
+     * from the catalog and fails only if that load fails.
      */
     @Override
     public void invalidateTableForRead(String srDbName, Table table) {
@@ -2732,7 +2734,12 @@ public class IcebergMetadata implements ConnectorMetadata {
         String dbName = icebergTable.getCatalogDBName();
         String tableName = icebergTable.getCatalogTableName();
         tables.remove(TableIdentifier.of(dbName, tableName));
-        icebergCatalog.invalidateTableCache(dbName, tableName);
+        try {
+            icebergCatalog.refreshTableForRead(dbName, tableName, new ConnectContext(), jobPlanningExecutor);
+        } catch (Exception e) {
+            LOG.error("Failed to refresh table {}.{}.{} for read. invalidate cache", catalogName, dbName, tableName, e);
+            icebergCatalog.invalidateCache(dbName, tableName);
+        }
     }
 
     private void refreshTableWithResource(Table table) {

@@ -96,6 +96,8 @@ public class CachingIcebergCatalog implements IcebergCatalog {
     private final Map<IcebergTableName, Set<String>> metaFileCacheMap = new ConcurrentHashMap<>(); // table -> metadata file paths
     private final Map<IcebergTableName, Long> tableLatestAccessTime = new ConcurrentHashMap<>();
     private final Map<IcebergTableName, Long> tableLatestRefreshTime = new ConcurrentHashMap<>();
+    // How many refreshes loaded the table metadata from the catalog, see refreshTableForRead.
+    private final Map<IcebergTableName, Long> tableMetadataLoads = new ConcurrentHashMap<>();
     // Per-table lock strings: avoids catalog-wide serialization during concurrent refresh of different tables.
     private final ConcurrentHashMap<String, String> tableRefreshLockMap = new ConcurrentHashMap<>();
     private final Map<IcebergTableName, Long> tableLatestSnapshotTime = new ConcurrentHashMap<>();
@@ -520,6 +522,28 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         }
     }
 
+    // An INSERT ... SELECT must read its source as it is now. We expect many INSERTs from one source at a time,
+    // and each refresh loads the table under the table lock, so they would wait for each other's loads. An INSERT
+    // therefore notes the load count before it takes the lock: if a refresh loaded the table metadata while the
+    // INSERT waited, the INSERT takes the table from the cache, otherwise it loads the table itself.
+    @Override
+    public void refreshTableForRead(String dbName, String tableName, ConnectContext ctx,
+                                    ExecutorService executorService) {
+        IcebergTableName key = new IcebergTableName(dbName, tableName);
+        long loadsBefore = tableMetadataLoads.getOrDefault(key, 0L);
+        synchronized (tableRefreshLock(dbName, tableName)) {
+            if (tableMetadataLoads.getOrDefault(key, 0L) != loadsBefore) {
+                return;
+            }
+            try {
+                refreshTableUnderLock(dbName, tableName, ctx, executorService, true);
+            } catch (RuntimeException e) {
+                discoverySchemas.invalidate(key);
+                throw e;
+            }
+        }
+    }
+
     // A table is active while clients query it (see isActive()); a refresh is not client activity. The loader
     // and the background pass refresh the cached tables, and only an active table has queries to serve, so
     // only an active table is warmed. A new snapshot of it is warmed in two halves before its queries come:
@@ -594,6 +618,7 @@ public class CachingIcebergCatalog implements IcebergCatalog {
                 invalidateOldPartitionSnapshots(dbName, tableName, retainedTable.currentSnapshot());
                 tableLatestRefreshTime.put(icebergTableName, System.currentTimeMillis());
             }
+            tableMetadataLoads.merge(icebergTableName, 1L, Long::sum);
         }
     }
 
@@ -829,6 +854,9 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         tableLatestAccessTime.remove(key);
         tableLatestRefreshTime.remove(key);
         tableLatestSnapshotTime.remove(key);
+        // An INSERT that noted the count before sees it changed and takes the table from the cache. The cache has
+        // no table now, so the INSERT loads it on that miss.
+        tableMetadataLoads.remove(key);
 
         Set<String> paths = metaFileCacheMap.remove(key);
         if (paths != null && !paths.isEmpty()) {
@@ -1054,6 +1082,7 @@ public class CachingIcebergCatalog implements IcebergCatalog {
                 Estimator.estimate(metaFileCacheMap, 10) +
                 Estimator.estimate(tableLatestAccessTime, 10) +
                 Estimator.estimate(tableLatestRefreshTime, 10) +
+                Estimator.estimate(tableMetadataLoads, 10) +
                 Estimator.estimate(tableRefreshLockMap, 10);
     }
 

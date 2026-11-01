@@ -1021,6 +1021,104 @@ public class CachingIcebergCatalogTest {
         }
     }
 
+    // An INSERT that waits on the table lock while a refresh loads the table takes that load and loads nothing.
+    @Test
+    public void testRefreshForReadTakesTheLoadItWaitedFor() throws Exception {
+        IcebergCatalog delegate = Mockito.mock(IcebergCatalog.class);
+        BaseTable cachedTable = mockRefreshCandidate(1L, "old.json");
+        BaseTable reloadedTable = mockRefreshCandidate(2L, "new.json");
+        CountDownLatch loading = new CountDownLatch(1);
+        CountDownLatch finish = new CountDownLatch(1);
+        Mockito.when(delegate.getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl"))).thenAnswer(inv -> {
+            loading.countDown();
+            Assertions.assertTrue(finish.await(5, TimeUnit.SECONDS));
+            return reloadedTable;
+        });
+        ExecutorService workers = Executors.newSingleThreadExecutor();
+        try {
+            CachingIcebergCatalog catalog = new CachingIcebergCatalog(
+                    CATALOG_NAME, delegate, DEFAULT_CATALOG_PROPERTIES, workers);
+            Cache<IcebergTableName, Table> tables = Deencapsulation.getField(catalog, "tables");
+            IcebergTableName key = new IcebergTableName("db", "tbl");
+            tables.put(key, cachedTable);
+
+            java.util.concurrent.Future<?> refresh = workers.submit(
+                    () -> catalog.refreshTable("db", "tbl", new ConnectContext(), null));
+            Assertions.assertTrue(loading.await(5, TimeUnit.SECONDS));
+            Thread insert = new Thread(
+                    () -> catalog.refreshTableForRead("db", "tbl", new ConnectContext(), null));
+            insert.start();
+            long deadline = System.currentTimeMillis() + 5000;
+            while (insert.getState() != Thread.State.BLOCKED && System.currentTimeMillis() < deadline) {
+                Thread.sleep(5);
+            }
+            Assertions.assertEquals(Thread.State.BLOCKED, insert.getState(),
+                    "the INSERT must wait on the table lock while the refresh loads the table");
+
+            finish.countDown();
+            refresh.get(5, TimeUnit.SECONDS);
+            insert.join(5000);
+            Assertions.assertFalse(insert.isAlive());
+            Mockito.verify(delegate, Mockito.times(1)).getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl"));
+            Assertions.assertSame(reloadedTable, tables.getIfPresent(key));
+        } finally {
+            finish.countDown();
+            workers.shutdownNow();
+        }
+    }
+
+    // With no load while it waited, an INSERT loads the table itself.
+    @Test
+    public void testRefreshForReadLoadsTheTableItself() {
+        IcebergCatalog delegate = Mockito.mock(IcebergCatalog.class);
+        BaseTable cachedTable = mockRefreshCandidate(1L, "old.json");
+        BaseTable reloadedTable = mockRefreshCandidate(2L, "new.json");
+        Mockito.when(delegate.getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl"))).thenReturn(reloadedTable);
+        CachingIcebergCatalog catalog = new CachingIcebergCatalog(
+                CATALOG_NAME, delegate, DEFAULT_CATALOG_PROPERTIES, Executors.newSingleThreadExecutor());
+        Cache<IcebergTableName, Table> tables = Deencapsulation.getField(catalog, "tables");
+        IcebergTableName key = new IcebergTableName("db", "tbl");
+        tables.put(key, cachedTable);
+
+        catalog.refreshTable("db", "tbl", new ConnectContext(), null);
+        catalog.refreshTableForRead("db", "tbl", new ConnectContext(), null);
+        Mockito.verify(delegate, Mockito.times(2)).getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl"));
+        Assertions.assertSame(reloadedTable, tables.getIfPresent(key));
+    }
+
+    // Only a refresh that loaded the table metadata from the catalog counts as a load for an INSERT.
+    @Test
+    public void testOnlyMetadataLoadsCountForRefreshForRead() throws Exception {
+        IcebergCatalog delegate = Mockito.mock(IcebergCatalog.class);
+        BaseTable cachedTable = mockRefreshCandidate(1L, "old.json");
+        BaseTable reloadedTable = mockRefreshCandidate(2L, "new.json");
+        Mockito.when(delegate.getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl")))
+                .thenThrow(new StarRocksConnectorException("catalog is down"))
+                .thenReturn(reloadedTable);
+        CachingIcebergCatalog catalog = new CachingIcebergCatalog(
+                CATALOG_NAME, delegate, DEFAULT_CATALOG_PROPERTIES, Executors.newSingleThreadExecutor());
+        Cache<IcebergTableName, Table> tables = Deencapsulation.getField(catalog, "tables");
+        Map<IcebergTableName, Long> loads = Deencapsulation.getField(catalog, "tableMetadataLoads");
+        IcebergTableName key = new IcebergTableName("db", "tbl");
+        tables.put(key, cachedTable);
+
+        java.lang.reflect.Method refreshWithoutMetadataCheck = CachingIcebergCatalog.class.getDeclaredMethod(
+                "refreshTable", String.class, String.class, ConnectContext.class, ExecutorService.class, boolean.class);
+        refreshWithoutMetadataCheck.setAccessible(true);
+        refreshWithoutMetadataCheck.invoke(catalog, "db", "tbl", new ConnectContext(), null, false);
+        Assertions.assertNull(loads.get(key));
+
+        Assertions.assertThrows(StarRocksConnectorException.class,
+                () -> catalog.refreshTable("db", "tbl", new ConnectContext(), null));
+        Assertions.assertNull(loads.get(key));
+
+        catalog.refreshTable("db", "tbl", new ConnectContext(), null);
+        Assertions.assertEquals(1L, loads.get(key));
+
+        catalog.invalidateCache("db", "tbl");
+        Assertions.assertNull(loads.get(key));
+    }
+
     @Test
     public void testRestTableCacheTtlIsCapped(@Mocked IcebergRESTCatalog restCatalog,
                                               @Mocked IcebergCatalog hiveCatalog) {
