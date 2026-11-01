@@ -1215,7 +1215,7 @@ public class AlterMaterializedViewTest extends MVTestBase  {
             };
             List<AlterMaterializedViewStatusLog> journaled = captureMvStatusJournal();
 
-            MVRefreshSchemaChecker.checkExternalBaseSchemaCompat(mv);
+            MVRefreshSchemaChecker.checkBaseSchemaCompat(mv);
             tableGone.set(false);
 
             Assertions.assertFalse(mv.isActive());
