@@ -22,16 +22,20 @@ import com.starrocks.connector.iceberg.IcebergApiConverter;
 import com.starrocks.connector.iceberg.IcebergDeleteSchema;
 import com.starrocks.connector.iceberg.IcebergMORParams;
 import com.starrocks.connector.iceberg.IcebergMORParams.EqDeleteScope;
+import com.starrocks.connector.iceberg.IcebergTableMORParams;
 import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptimizerFactory;
 import com.starrocks.sql.optimizer.base.ColumnRefFactory;
+import com.starrocks.sql.optimizer.operator.Operator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalIcebergEqualityDeleteScanOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalIcebergScanOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalJoinOperator;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
+import com.starrocks.sql.optimizer.rule.transformation.materialization.OptExpressionDuplicator;
 import com.starrocks.type.DateType;
 import com.starrocks.type.IntegerType;
 import com.starrocks.type.StringType;
@@ -45,6 +49,7 @@ import org.mockito.Mockito;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -278,6 +283,117 @@ public class IcebergEqualityDeleteRewriteRuleTest {
                 rewritePartitionedById(true).inputAt(1).inputAt(0).inputAt(1).getOp().cast();
         Assertions.assertEquals(Set.of(), dmlDeleteScan.getRuntimeFilterPruningColumns());
         Assertions.assertTrue(dmlDeleteScan.getOutputColumns().stream().noneMatch(ref -> ref.getName().equals("p")));
+    }
+
+    private static IcebergTable partitionedByPTable() {
+        Schema schema = new Schema(
+                Types.NestedField.optional(1, "id", Types.IntegerType.get()),
+                Types.NestedField.optional(2, "p", Types.StringType.get()));
+        PartitionSpec byP = PartitionSpec.builderFor(schema).withSpecId(0).identity("p").build();
+        Table nativeTable = Mockito.mock(Table.class);
+        Mockito.when(nativeTable.schema()).thenReturn(schema);
+        Mockito.when(nativeTable.spec()).thenReturn(byP);
+        Mockito.when(nativeTable.specs()).thenReturn(Map.of(0, byP));
+        Mockito.when(nativeTable.properties()).thenReturn(Map.of());
+        return new IcebergTable(1, "tb", "catalog", "resource", "db", "tb", "",
+                IcebergApiConverter.toFullSchemas(schema, nativeTable), nativeTable, Map.of());
+    }
+
+    // A scan of the table with `p = 'a'`, rewritten into an equality-delete block.
+    private static OptExpression rewriteWithPredicate(IcebergTable table, ColumnRefFactory factory) {
+        Map<ColumnRefOperator, Column> colRefToColumn = new LinkedHashMap<>();
+        Map<Column, ColumnRefOperator> columnToColRef = new HashMap<>();
+        ColumnRefOperator p = null;
+        for (Column column : table.getFullSchema()) {
+            ColumnRefOperator ref = factory.create(column.getName(), column.getType(), true);
+            colRefToColumn.put(ref, column);
+            columnToColRef.put(column, ref);
+            if (column.getName().equals("p")) {
+                p = ref;
+            }
+        }
+        ScalarOperator predicate = BinaryPredicateOperator.eq(p, ConstantOperator.createVarchar("a"));
+        LogicalIcebergScanOperator scan = new LogicalIcebergScanOperator(table, colRefToColumn, columnToColRef, -1,
+                predicate, TvrTableSnapshot.of(Optional.of(1L)));
+        scan.setDeleteSchemas(Set.of(IcebergDeleteSchema.of(List.of(1), 0)));
+        return new IcebergEqualityDeleteRewriteRule().transform(OptExpression.create(scan),
+                OptimizerFactory.mockContext(factory)).get(0);
+    }
+
+    private static List<Operator> icebergScans(OptExpression expression) {
+        List<Operator> scans = new ArrayList<>();
+        if (expression.getOp() instanceof LogicalIcebergScanOperator
+                || expression.getOp() instanceof LogicalIcebergEqualityDeleteScanOperator) {
+            scans.add(expression.getOp());
+        }
+        for (OptExpression input : expression.getInputs()) {
+            scans.addAll(icebergScans(input));
+        }
+        return scans;
+    }
+
+    private static Set<Long> blockIds(OptExpression expression) {
+        Set<Long> ids = new HashSet<>();
+        for (Operator scan : icebergScans(expression)) {
+            IcebergTableMORParams params = scan instanceof LogicalIcebergScanOperator icebergScan
+                    ? icebergScan.getTableFullMORParams()
+                    : ((LogicalIcebergEqualityDeleteScanOperator) scan).getTableFullMORParams();
+            ids.add(params.getMORId());
+        }
+        return ids;
+    }
+
+    // Two rewrites over one table object (the consumers of an inlined CTE) must not share a block id: the id keys
+    // the queues of planned files, and sharing it would split the files between the two blocks.
+    @Test
+    public void testEachRewriteHasItsOwnBlockId() {
+        IcebergTable table = partitionedByPTable();
+        ColumnRefFactory factory = new ColumnRefFactory();
+        Set<Long> first = blockIds(rewriteWithPredicate(table, factory));
+        Set<Long> second = blockIds(rewriteWithPredicate(table, factory));
+        Assertions.assertEquals(1, first.size());
+        Assertions.assertEquals(1, second.size());
+        Assertions.assertNotEquals(first, second);
+    }
+
+    // The delete scans plan Iceberg with the predicate of the data scan with deletes, so both find one planning.
+    @Test
+    public void testDeleteScanPlansWithDataScanPredicate() {
+        OptExpression antiJoin = rewriteWithPredicate(partitionedByPTable(), new ColumnRefFactory())
+                .inputAt(1).inputAt(0);
+        LogicalIcebergScanOperator withDeleteScan = antiJoin.inputAt(0).getOp().cast();
+        LogicalIcebergEqualityDeleteScanOperator eqDeleteScan = antiJoin.inputAt(1).getOp().cast();
+        Assertions.assertNotNull(withDeleteScan.getPredicate());
+        Assertions.assertSame(withDeleteScan.getPredicate(), eqDeleteScan.getOriginPredicate());
+    }
+
+    // A copy of a rewritten scan loses the rewrite flag but keeps its MOR role and block id, so the rule does not
+    // rewrite it again inside the block.
+    @Test
+    public void testCopyOfRewrittenScanIsNotRewrittenAgain() {
+        ColumnRefFactory factory = new ColumnRefFactory();
+        OptExpression block = rewriteWithPredicate(partitionedByPTable(), factory);
+        LogicalIcebergScanOperator withDeleteScan = block.inputAt(1).inputAt(0).inputAt(0).getOp().cast();
+        LogicalIcebergScanOperator copy = new LogicalIcebergScanOperator.Builder().withOperator(withDeleteScan).build();
+        Assertions.assertFalse(copy.isFromEqDeleteRewriteRule());
+        Assertions.assertFalse(new IcebergEqualityDeleteRewriteRule().check(OptExpression.create(copy),
+                OptimizerFactory.mockContext(factory)));
+    }
+
+    // A copy of a block may end up in one plan with its source, so it gets a new block id, the same for all its scans.
+    @Test
+    public void testDuplicatedBlockGetsNewBlockId() {
+        ColumnRefFactory factory = new ColumnRefFactory();
+        OptExpression block = rewriteWithPredicate(partitionedByPTable(), factory);
+        Set<Long> source = blockIds(block);
+        OptExpressionDuplicator duplicator = new OptExpressionDuplicator(factory, OptimizerFactory.mockContext(factory));
+        Set<Long> firstCopy = blockIds(duplicator.duplicate(block));
+        Set<Long> secondCopy = blockIds(duplicator.duplicate(block));
+        Assertions.assertEquals(1, firstCopy.size());
+        Assertions.assertEquals(1, secondCopy.size());
+        Assertions.assertNotEquals(source, firstCopy);
+        Assertions.assertNotEquals(source, secondCopy);
+        Assertions.assertNotEquals(firstCopy, secondCopy);
     }
 
     // Walk the AND tree and index each leaf comparison by the name of its right-hand (delete-table) column.

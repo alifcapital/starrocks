@@ -113,6 +113,7 @@ import com.starrocks.sql.optimizer.rule.tree.DataCachePopulateRewriteRule;
 import com.starrocks.sql.optimizer.rule.tree.EliminateOveruseColumnAccessPathRule;
 import com.starrocks.sql.optimizer.rule.tree.ExchangeSortToMergeRule;
 import com.starrocks.sql.optimizer.rule.tree.ExtractAggregateColumn;
+import com.starrocks.sql.optimizer.rule.tree.IcebergEqualityDeletePlanningPredicateRule;
 import com.starrocks.sql.optimizer.rule.tree.InlineCteProjectPruneRule;
 import com.starrocks.sql.optimizer.rule.tree.JoinLocalShuffleRule;
 import com.starrocks.sql.optimizer.rule.tree.JsonPathExtractRule;
@@ -331,6 +332,9 @@ public class QueryOptimizer extends Optimizer {
             LateMaterializationRewriter lateMaterializationRewriter = new LateMaterializationRewriter();
             finalPlan = lateMaterializationRewriter.rewrite(finalPlan, context);
         }
+
+        // Needs the final scan predicates, so it runs after every rule that can change them.
+        finalPlan = new IcebergEqualityDeletePlanningPredicateRule().rewrite(finalPlan, rootTaskContext);
 
         try (Timer ignored = Tracers.watchScope("PlanValidate")) {
             rootTaskContext.getPlanValidator().enableAllCheckers();

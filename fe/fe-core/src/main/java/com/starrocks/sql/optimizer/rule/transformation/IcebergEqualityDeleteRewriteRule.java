@@ -70,7 +70,10 @@ public class IcebergEqualityDeleteRewriteRule extends TransformationRule {
         }
 
         LogicalIcebergScanOperator scanOperator = op.cast();
-        if (scanOperator.isFromEqDeleteRewriteRule()) {
+        // A copy of an already rewritten block can reach this rule without the flag, so a scan that already
+        // has a MOR role or a block id is also left as it is.
+        if (scanOperator.isFromEqDeleteRewriteRule() || scanOperator.getMORParam() != IcebergMORParams.EMPTY
+                || !scanOperator.getTableFullMORParams().isEmpty()) {
             return false;
         }
 
@@ -144,7 +147,10 @@ public class IcebergEqualityDeleteRewriteRule extends TransformationRule {
                         Stream.of(IcebergMORParams.DATA_FILE_WITHOUT_EQ_DELETE, IcebergMORParams.DATA_FILE_WITH_EQ_DELETE),
                         eqDeleteLegs.stream())
                 .collect(Collectors.toList());
-        IcebergTableMORParams icebergTableFullMorParams = new IcebergTableMORParams(icebergTable.getId(), tableFullMorParams);
+        // The scans of one block share planned files through queues keyed by this id. Two blocks over the same
+        // table object (the consumers of an inlined CTE) must not share them, so every rewrite gets its own id.
+        IcebergTableMORParams icebergTableFullMorParams = new IcebergTableMORParams(
+                ConnectorTableId.CONNECTOR_ID_GENERATOR.getNextId().asLong(), tableFullMorParams);
 
         scanOperator.setMORParam(IcebergMORParams.DATA_FILE_WITHOUT_EQ_DELETE);
         scanOperator.setTableFullMORParams(icebergTableFullMorParams);
@@ -170,8 +176,8 @@ public class IcebergEqualityDeleteRewriteRule extends TransformationRule {
             IcebergMORParams leg = eqDeleteLegs.get(i);
             LogicalIcebergEqualityDeleteScanOperator eqScanOp =
                     IcebergEqualityDeleteScanBuilder.buildEqualityDeleteScanOperator(leg, icebergTable, columnRefFactory,
-                            scanOperator.getPredicate(), icebergTableFullMorParams, scanOperator.getTvrVersionRange(),
-                            pruningColumnsByLeg.get(leg));
+                            icebergDataFileWithDeleteScanOp.getPredicate(), icebergTableFullMorParams,
+                            scanOperator.getTvrVersionRange(), pruningColumnsByLeg.get(leg));
 
             ScalarOperator onPredicate = IcebergEqualityDeleteScanBuilder.buildOnPredicate(
                     icebergDataFileWithDeleteScanOp.getColumnNameToColRefMap(), eqScanOp.getOutputColumns());

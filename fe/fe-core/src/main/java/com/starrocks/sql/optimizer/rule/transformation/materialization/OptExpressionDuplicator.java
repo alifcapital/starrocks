@@ -30,6 +30,8 @@ import com.starrocks.common.Pair;
 import com.starrocks.common.tvr.TvrTableSnapshot;
 import com.starrocks.common.tvr.TvrVersionRange;
 import com.starrocks.common.util.UnionFind;
+import com.starrocks.connector.ConnectorTableId;
+import com.starrocks.connector.iceberg.IcebergTableMORParams;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.optimizer.MaterializationContext;
@@ -53,6 +55,8 @@ import com.starrocks.sql.optimizer.operator.logical.LogicalCTEAnchorOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalCTEConsumeOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalCTEProduceOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalFilterOperator;
+import com.starrocks.sql.optimizer.operator.logical.LogicalIcebergEqualityDeleteScanOperator;
+import com.starrocks.sql.optimizer.operator.logical.LogicalIcebergScanOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalJoinOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalLimitOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalOlapScanOperator;
@@ -160,6 +164,8 @@ public class OptExpressionDuplicator {
     class OptExpressionDuplicatorVisitor extends OptExpressionVisitor<OptExpression, Void> {
         private final OptimizerContext optimizerContext;
         private final Map<Integer, Integer> cteIdMapping = Maps.newHashMap();
+        // Iceberg equality-delete block id of the source -> block id of this copy
+        private final Map<Long, Long> morIdMapping = Maps.newHashMap();
         private final Map<ColumnRefOperator, ColumnRefOperator> columnMapping;
         private final ReplaceColumnRefRewriter rewriter;
         private final boolean isResetSelectedPartitions;
@@ -307,7 +313,28 @@ public class OptExpressionDuplicator {
             if (!(scanOperator instanceof LogicalOlapScanOperator)) {
                 processExternalTableScanOperator(newScanOperator);
             }
+            renewIcebergMORId(newScanOperator);
             return OptExpression.create(newScanOperator);
+        }
+
+        // The scans of an Iceberg equality-delete block share planned files through queues keyed by the block id.
+        // A copy of the block can end up in the same plan as the source, so the copy gets its own id: one new id
+        // per source id, so the scans of the copied block still share their queues with each other.
+        private void renewIcebergMORId(LogicalScanOperator scanOperator) {
+            if (scanOperator instanceof LogicalIcebergScanOperator icebergScan) {
+                icebergScan.setTableFullMORParams(renewMORId(icebergScan.getTableFullMORParams()));
+            } else if (scanOperator instanceof LogicalIcebergEqualityDeleteScanOperator eqDeleteScan) {
+                eqDeleteScan.setTableFullMORParams(renewMORId(eqDeleteScan.getTableFullMORParams()));
+            }
+        }
+
+        private IcebergTableMORParams renewMORId(IcebergTableMORParams params) {
+            if (params.isEmpty()) {
+                return params;
+            }
+            long newId = morIdMapping.computeIfAbsent(params.getMORId(),
+                    ignored -> ConnectorTableId.CONNECTOR_ID_GENERATOR.getNextId().asLong());
+            return new IcebergTableMORParams(newId, params.getMorParamsList());
         }
 
         private Table refreshLightWeightExternalTable(Table table) {
