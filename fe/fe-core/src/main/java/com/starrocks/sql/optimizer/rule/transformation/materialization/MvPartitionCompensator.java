@@ -35,12 +35,15 @@ import com.starrocks.sql.common.PCellSortedSet;
 import com.starrocks.sql.common.PCellUtils;
 import com.starrocks.sql.optimizer.MaterializationContext;
 import com.starrocks.sql.optimizer.OptExpression;
+import com.starrocks.sql.optimizer.OptimizerContext;
 import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.base.ColumnRefFactory;
 import com.starrocks.sql.optimizer.operator.OperatorBuilderFactory;
 import com.starrocks.sql.optimizer.operator.OperatorType;
+import com.starrocks.sql.optimizer.operator.Projection;
 import com.starrocks.sql.optimizer.operator.ScanOperatorPredicates;
 import com.starrocks.sql.optimizer.operator.logical.LogicalAggregationOperator;
+import com.starrocks.sql.optimizer.operator.logical.LogicalIcebergScanOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalOlapScanOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalScanOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalUnionOperator;
@@ -49,6 +52,7 @@ import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.rule.Rule;
+import com.starrocks.sql.optimizer.rule.transformation.IcebergEqualityDeleteRewriteRule;
 import com.starrocks.sql.optimizer.rule.transformation.materialization.compensation.MVCompensation;
 import com.starrocks.sql.optimizer.rule.transformation.materialization.compensation.MVCompensationBuilder;
 import com.starrocks.sql.optimizer.rule.transformation.materialization.compensation.OptCompensator;
@@ -196,11 +200,21 @@ public class MvPartitionCompensator {
             logMVRewrite(mvContext, "Get mv compensate query plan failed");
             return null;
         }
+        // The MV plan is cached with the snapshots of the external tables at the time it was built. The compensation
+        // reads the base tables as the query does, so the copy takes their current snapshots.
         OptExpressionDuplicator duplicator = new OptExpressionDuplicator(mvContext);
-        OptExpression newMvQueryPlan = duplicator.duplicate(compensateMvQueryPlan, mvContext.getMvColumnRefFactory());
+        OptExpression newMvQueryPlan = duplicator.duplicate(compensateMvQueryPlan, mvContext.getMvColumnRefFactory(),
+                false, true);
         if (newMvQueryPlan == null) {
             logMVRewrite(mvContext, "Duplicate compensate query plan failed");
             return null;
+        }
+        // The copy reads Iceberg tables through plain scans. The query applies equality deletes once, so a copy that
+        // enters the query after that applies them here.
+        OptimizerContext optimizerContext = mvContext.getOptimizerContext();
+        if (optimizerContext.isIcebergEqualityDeletesRewritten()) {
+            newMvQueryPlan = rewriteIcebergEqualityDeletes(newMvQueryPlan, optimizerContext,
+                    new IcebergEqualityDeleteRewriteRule());
         }
         deriveLogicalProperty(newMvQueryPlan);
         List<ColumnRefOperator> orgMvQueryOutputColumnRefs = mvContext.getMvOutputColumnRefs();
@@ -219,6 +233,24 @@ public class MvPartitionCompensator {
         // expectOutputColumns which are mv scan operator's output columns.
         return adjustOptExpressionOutputColumnType(mvContext.getQueryRefFactory(),
                 newMvQueryPlan, mvQueryOutputColumnRefs, originalOutputColumns);
+    }
+
+    // The plan of an MV keeps projections merged into its operators. The equality delete rule replaces a scan by a
+    // block that outputs the columns of the scan, so the projection of the scan moves to the top of the block. Every
+    // other operator stays as it is.
+    private static OptExpression rewriteIcebergEqualityDeletes(OptExpression plan, OptimizerContext optimizerContext,
+                                                              IcebergEqualityDeleteRewriteRule rule) {
+        for (int i = 0; i < plan.arity(); i++) {
+            plan.setChild(i, rewriteIcebergEqualityDeletes(plan.inputAt(i), optimizerContext, rule));
+        }
+        if (!(plan.getOp() instanceof LogicalIcebergScanOperator) || !rule.check(plan, optimizerContext)) {
+            return plan;
+        }
+        Projection projection = plan.getOp().getProjection();
+        plan.getOp().setProjection(null);
+        OptExpression block = rule.transform(plan, optimizerContext).get(0);
+        block.getOp().setProjection(projection);
+        return block;
     }
 
     private static void markAggregatePruneColumns(OptExpression root) {

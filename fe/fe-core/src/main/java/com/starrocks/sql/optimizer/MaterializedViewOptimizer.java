@@ -67,6 +67,9 @@ public class MaterializedViewOptimizer {
         optimizerOptions.disableRule(RuleType.TF_PULL_UP_PREDICATE_SCAN);
         optimizerOptions.disableRule(RuleType.TF_JSON_PATH_REWRITE);
         optimizerOptions.disableRule(RuleType.TF_REWRITE_SIMPLE_AGG);
+        // The plan is cached and used by queries on later snapshots. We want each query to apply the Iceberg equality
+        // deletes of its own snapshot, so the plan keeps the plain scan and the query rewrites it.
+        optimizerOptions.disableRule(RuleType.TF_ICEBERG_EQUALITY_REWRITE_RULE);
         // For sync mv, no rewrite query by original sync mv rule to avoid useless rewrite.
         if (mv.getRefreshScheme().isSync()) {
             optimizerOptions.disableRule(RuleType.TF_MATERIALIZED_VIEW);

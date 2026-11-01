@@ -681,6 +681,7 @@ public class QueryOptimizer extends Optimizer {
             skewJoinOptimize(tree, rootTaskContext);
         }
         scheduler.rewriteOnce(tree, rootTaskContext, new IcebergEqualityDeleteRewriteRule());
+        context.setIcebergEqualityDeletesRewritten(true);
 
         tree = pruneSubfield(tree, rootTaskContext, requiredColumns);
 

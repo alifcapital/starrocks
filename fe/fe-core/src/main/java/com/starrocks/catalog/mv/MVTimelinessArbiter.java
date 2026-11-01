@@ -20,6 +20,8 @@ import com.google.common.base.Strings;
 import com.google.common.collect.Maps;
 import com.starrocks.catalog.BaseTableInfo;
 import com.starrocks.catalog.Column;
+import com.starrocks.catalog.IcebergTable;
+import com.starrocks.catalog.LightWeightIcebergTable;
 import com.starrocks.catalog.MaterializedView;
 import com.starrocks.catalog.MvBaseTableUpdateInfo;
 import com.starrocks.catalog.MvUpdateInfo;
@@ -186,6 +188,23 @@ public abstract class MVTimelinessArbiter {
      * @return mv's update info in checked mode
      */
     protected abstract MvUpdateInfo getMVTimelinessUpdateInfoInChecked() throws AnalysisException;
+
+    /**
+     * An equality delete written under an unpartitioned spec of an Iceberg table applies to the data files of every
+     * partition, so we cannot tell which partitions of the mv it changes. A ref Iceberg table can hold such a delete
+     * only when it has several partition specs, and the refresh rejects such a table (see MVRefreshProcessor), so we
+     * take no partition of the mv as fresh.
+     */
+    protected boolean hasRefIcebergTableWithSeveralSpecs(Map<Table, List<Column>> refBaseTablePartitionCols) {
+        for (Table table : refBaseTablePartitionCols.keySet()) {
+            if (table instanceof IcebergTable && !(table instanceof LightWeightIcebergTable)
+                    && ((IcebergTable) table).getNativeTable().specs().size() > 1) {
+                logMVPrepare(mv, "Ref base table {} has several partition specs", table.getName());
+                return true;
+            }
+        }
+        return false;
+    }
 
     /**
      * Determine the refresh type of the materialized view.

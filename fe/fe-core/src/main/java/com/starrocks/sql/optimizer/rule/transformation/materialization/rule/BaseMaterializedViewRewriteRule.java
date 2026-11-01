@@ -19,6 +19,7 @@ import com.starrocks.catalog.MaterializedView;
 import com.starrocks.catalog.Table;
 import com.starrocks.common.Config;
 import com.starrocks.common.profile.Tracers;
+import com.starrocks.connector.iceberg.IcebergMORParams;
 import com.starrocks.metric.IMaterializedViewMetricsEntity;
 import com.starrocks.metric.MaterializedViewMetricsRegistry;
 import com.starrocks.sql.optimizer.MaterializationContext;
@@ -29,6 +30,7 @@ import com.starrocks.sql.optimizer.QueryMaterializationContext;
 import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.base.ColumnRefFactory;
 import com.starrocks.sql.optimizer.operator.Operator;
+import com.starrocks.sql.optimizer.operator.logical.LogicalIcebergScanOperator;
 import com.starrocks.sql.optimizer.operator.logical.LogicalOlapScanOperator;
 import com.starrocks.sql.optimizer.operator.pattern.Pattern;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
@@ -99,7 +101,18 @@ public abstract class BaseMaterializedViewRewriteRule extends TransformationRule
         if (Utils.isOptHasAppliedRule(input, OP_MV_UNION_REWRITE)) {
             return false;
         }
+        // A scan of an Iceberg equality delete block reads a part of the files of its table. An MV that reads the
+        // whole table would take its place, and the rest of the block would add those rows a second time, so we
+        // leave a plan with such a scan as it is.
+        if (hasEqualityDeleteBlockScan(input)) {
+            return false;
+        }
         return !context.getCandidateMvs().isEmpty() && checkOlapScanWithoutTabletOrPartitionHints(input);
+    }
+
+    private static boolean hasEqualityDeleteBlockScan(OptExpression input) {
+        return MvUtils.getScanOperator(input).stream().anyMatch(scan -> scan instanceof LogicalIcebergScanOperator &&
+                ((LogicalIcebergScanOperator) scan).getMORParam() != IcebergMORParams.EMPTY);
     }
 
     @Override

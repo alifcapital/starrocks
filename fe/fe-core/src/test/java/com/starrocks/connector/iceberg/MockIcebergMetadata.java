@@ -52,6 +52,7 @@ import com.starrocks.type.StructType;
 import com.starrocks.type.UnknownType;
 import com.starrocks.type.VarcharType;
 import org.apache.commons.collections4.map.CaseInsensitiveMap;
+import org.apache.iceberg.AppendFiles;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DataFiles;
 import org.apache.iceberg.DeleteFile;
@@ -81,6 +82,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Function;
@@ -512,6 +514,83 @@ public class MockIcebergMetadata implements ConnectorMetadata {
         }
     }
 
+    // Registers a table of the equality-delete DB for MV tests: identity("p") with the partitions p=a and p=b and a
+    // data file in each. A partitioned MV over it needs the partition names, so we list them. With
+    // `withEqualityDelete` the table also has an equality delete on "id" in p=a; addEqualityDelete adds more later.
+    public static void mockEqualityDeleteMvTable(String name, boolean withEqualityDelete) throws IOException {
+        Schema schema = new Schema(
+                required(1, "id", Types.IntegerType.get()),
+                required(2, "data", Types.StringType.get()),
+                required(3, "p", Types.StringType.get()));
+        List<Column> fullSchemas = addMetaColumns(ImmutableList.of(
+                new Column("id", IntegerType.INT, true),
+                new Column("data", StringType.STRING, true),
+                new Column("p", StringType.STRING, true)));
+        PartitionSpec spec = PartitionSpec.builderFor(schema).identity("p").build();
+        TestTables.TestTable baseTable = TestTables.create(
+                new File(getStarRocksHome() + "/" + MOCKED_EQ_DELETE_DB_NAME + "/" + name), name, schema, spec, 2);
+        List<String> partitionNames = ImmutableList.of("p=a", "p=b");
+        AppendFiles append = baseTable.newAppend();
+        for (String partitionName : partitionNames) {
+            append.appendFile(DataFiles.builder(spec)
+                    .withPath("/path/to/" + name + "-" + partitionName + ".parquet")
+                    .withFileSizeInBytes(10)
+                    .withPartitionPath(partitionName)
+                    .withRecordCount(2)
+                    .build());
+        }
+        append.commit();
+        if (withEqualityDelete) {
+            commitEqualityDelete(baseTable, "p=a");
+        }
+        registerEqDeleteTable(MOCK_TABLE_MAP.get(MOCKED_EQ_DELETE_DB_NAME), name, fullSchemas, baseTable,
+                partitionNames);
+    }
+
+    public void addEqualityDelete(String dbName, String tableName, String partitionName) {
+        Table nativeTable = MOCK_TABLE_MAP.get(dbName).get(tableName).icebergTable.getNativeTable();
+        writeLock();
+        try {
+            commitEqualityDelete(nativeTable, partitionName);
+        } finally {
+            writeUnlock();
+        }
+    }
+
+    // Drops the partition field p, commits an equality delete on "id" under the unpartitioned spec this leaves, and
+    // adds p back: the table is partitioned by p again and holds a global delete.
+    public void addGlobalEqualityDelete(String dbName, String tableName) {
+        Table nativeTable = MOCK_TABLE_MAP.get(dbName).get(tableName).icebergTable.getNativeTable();
+        writeLock();
+        try {
+            nativeTable.updateSpec().removeField("p").commit();
+            DeleteFile eqDeleteFile = FileMetadata.deleteFileBuilder(nativeTable.spec())
+                    .ofEqualityDeletes(1)
+                    .withPath("/path/to/" + nativeTable.name() + "-global-eqdel-" + UUID.randomUUID() + ".orc")
+                    .withFormat(FileFormat.ORC)
+                    .withFileSizeInBytes(10)
+                    .withRecordCount(1)
+                    .build();
+            nativeTable.newRowDelta().addDeletes(eqDeleteFile).commit();
+            nativeTable.updateSpec().addField("p").commit();
+        } finally {
+            writeUnlock();
+        }
+    }
+
+    // Commits an equality delete on "id" (field id 1) in the given partition as a new snapshot.
+    private static void commitEqualityDelete(Table table, String partitionName) {
+        DeleteFile eqDeleteFile = FileMetadata.deleteFileBuilder(table.spec())
+                .ofEqualityDeletes(1)
+                .withPath("/path/to/" + table.name() + "-eqdel-" + UUID.randomUUID() + ".orc")
+                .withFormat(FileFormat.ORC)
+                .withFileSizeInBytes(10)
+                .withPartitionPath(partitionName)
+                .withRecordCount(1)
+                .build();
+        table.newRowDelta().addDeletes(eqDeleteFile).commit();
+    }
+
     // The table names carry a prefix: TestTables registers native tables by name for the whole JVM.
     public static void mockStringDateTables() throws IOException {
         MOCK_TABLE_MAP.putIfAbsent(MOCKED_STRING_DATE_DB_NAME, new CaseInsensitiveMap<>());
@@ -575,6 +654,14 @@ public class MockIcebergMetadata implements ConnectorMetadata {
                                               String name,
                                               List<Column> fullSchemas,
                                               TestTables.TestTable baseTable) {
+        registerEqDeleteTable(icebergTableInfoMap, name, fullSchemas, baseTable, Lists.newArrayList());
+    }
+
+    private static void registerEqDeleteTable(Map<String, IcebergTableInfo> icebergTableInfoMap,
+                                              String name,
+                                              List<Column> fullSchemas,
+                                              TestTables.TestTable baseTable,
+                                              List<String> partitionNames) {
         MockIcebergTable mockIcebergTable = new MockIcebergTable(name.hashCode(), name,
                 MOCKED_ICEBERG_CATALOG_NAME, null, MOCKED_EQ_DELETE_DB_NAME,
                 name, fullSchemas, baseTable, null, "");
@@ -584,7 +671,7 @@ public class MockIcebergMetadata implements ConnectorMetadata {
                 Function.identity(), col -> ColumnStatistic.unknown()));
 
         icebergTableInfoMap.put(name,
-                new IcebergTableInfo(mockIcebergTable, Lists.newArrayList(), 100, columnStatisticMap));
+                new IcebergTableInfo(mockIcebergTable, partitionNames, 100, columnStatisticMap));
     }
 
     private static List<Column> getPartitionedTableSchema(String tblName) {

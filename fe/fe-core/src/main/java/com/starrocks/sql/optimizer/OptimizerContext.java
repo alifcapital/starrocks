@@ -158,6 +158,9 @@ public class OptimizerContext {
     // them, see ValuesStatisticsReaders. QueryOptimizer sets this before any statistics are derived. An optimizer
     // that does not set it counts, because the count is the right statistics and a missing flag must not hide them.
     private boolean valuesStatisticsRead = true;
+    // The Iceberg equality delete rule runs once over the query. A plan that enters the query after it, such as the
+    // compensation of a stale MV, applies the deletes to its own scans, see MvPartitionCompensator.
+    private boolean icebergEqualityDeletesRewritten = false;
     // The estimates of predicates ask for the format of a column many times, and reading it walks the properties of
     // the table, which do not change during the query. The key names the table without its metadata: reading the
     // metadata of a table can fail, and the estimate must not.
@@ -239,6 +242,14 @@ public class OptimizerContext {
 
     public void setValuesStatisticsRead(boolean valuesStatisticsRead) {
         this.valuesStatisticsRead = valuesStatisticsRead;
+    }
+
+    public boolean isIcebergEqualityDeletesRewritten() {
+        return icebergEqualityDeletesRewritten;
+    }
+
+    public void setIcebergEqualityDeletesRewritten(boolean icebergEqualityDeletesRewritten) {
+        this.icebergEqualityDeletesRewritten = icebergEqualityDeletesRewritten;
     }
 
     public ColumnRefFactory getColumnRefFactory() {

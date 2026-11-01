@@ -63,6 +63,9 @@ public final class MVTimelinessListPartitionArbiter extends MVTimelinessArbiter 
         if (isRefreshBasedOnNonRefTables) {
             return MvUpdateInfo.fullRefresh(mv);
         }
+        if (hasRefIcebergTableWithSeveralSpecs(refBaseTablePartitionColumns)) {
+            return MvUpdateInfo.fullRefresh(mv);
+        }
 
         // update mv's to refresh partitions based on base table's partition changes
         MvUpdateInfo mvTimelinessInfo = MvUpdateInfo.partialRefresh(mv, TableProperty.QueryRewriteConsistencyMode.CHECKED);

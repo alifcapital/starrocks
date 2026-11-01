@@ -70,6 +70,9 @@ public final class MVTimelinessRangePartitionArbiter extends MVTimelinessArbiter
         if (isRefreshBasedOnNonRefTables) {
             return MvUpdateInfo.fullRefresh(mv);
         }
+        if (hasRefIcebergTableWithSeveralSpecs(refBaseTablePartitionColumns)) {
+            return MvUpdateInfo.fullRefresh(mv);
+        }
 
         // record the relation of partitions between materialized view and base partition table
         MvUpdateInfo mvTimelinessInfo = MvUpdateInfo.partialRefresh(mv,
