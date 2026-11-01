@@ -27,6 +27,7 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.auth.credentials.AwsCredentials;
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
+import software.amazon.awssdk.core.SdkSystemSetting;
 import software.amazon.awssdk.core.exception.SdkClientException;
 
 import java.net.URI;
@@ -222,13 +223,23 @@ public class AwsCloudConfigurationTest {
         hiveConf.set("aws.glue.secret_key", "sk");
         hiveConf.set("aws.glue.iam_role_arn", "arn");
         hiveConf.set("aws.glue.sts.endpoint", "endpoint");
-        {
+        // Without a configured region the SDK looks the region up in the EC2 instance metadata, and on an EC2 host it
+        // finds one there. We want a client without a region on every host, so we turn that lookup off.
+        String ec2MetadataDisabled = System.getProperty(SdkSystemSetting.AWS_EC2_METADATA_DISABLED.property());
+        System.setProperty(SdkSystemSetting.AWS_EC2_METADATA_DISABLED.property(), "true");
+        try {
             AwsCloudCredential credential = CloudConfigurationFactory.buildGlueCloudCredential(hiveConf);
             Assertions.assertNotNull(credential);
             // After fixing ensureSchemeInEndpoint, the endpoint URI is now properly formatted,
             // so AWS SDK validates the configuration and throws SdkClientException when region
             // is missing (instead of NullPointerException from malformed URI)
             Assertions.assertThrows(SdkClientException.class, credential::generateAWSCredentialsProvider);
+        } finally {
+            if (ec2MetadataDisabled == null) {
+                System.clearProperty(SdkSystemSetting.AWS_EC2_METADATA_DISABLED.property());
+            } else {
+                System.setProperty(SdkSystemSetting.AWS_EC2_METADATA_DISABLED.property(), ec2MetadataDisabled);
+            }
         }
 
         hiveConf.set("aws.glue.sts.region", "region");
