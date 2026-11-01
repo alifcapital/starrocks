@@ -31,6 +31,7 @@ import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.IsNullPredicateOperator;
 import com.starrocks.sql.optimizer.rule.RuleType;
+import com.starrocks.statistic.columns.PredicateColumnsMgr;
 import com.starrocks.type.IntegerType;
 import com.starrocks.type.Type;
 
@@ -92,6 +93,12 @@ public class RewriteMultiDistinctRule extends TransformationRule {
         if (isComplexConstantCountDistinct(input)) {
             return rewriteComplexConstantDistinct(input);
         }
+        // Both rewrites replace the distinct aggregations: by multi_distinct functions, which are not distinct calls,
+        // or by CTE branches, whose columns the predicate columns cannot trace to the table. We want the arguments of
+        // the distinct aggregations and the grouping keys among the predicate columns, so we record them here.
+        LogicalAggregationOperator agg = (LogicalAggregationOperator) input.getOp();
+        PredicateColumnsMgr.getInstance().recordGroupByColumns(agg.getAggregations(), agg.getGroupingKeys(),
+                context.getColumnRefFactory(), input);
         if (useCteToRewrite(input, context)) {
             MultiDistinctByCTERewriter rewriter = new MultiDistinctByCTERewriter();
             return rewriter.transformImpl(input, context);

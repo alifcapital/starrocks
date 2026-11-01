@@ -120,6 +120,9 @@ class ColumnUsageTest extends PlanTestBase {
             "select v1, count(distinct v2) from t0 group by v1|analyze table t0 predicate columns|v2,v1",
             "select count(distinct v1), count(distinct v2), count(distinct v3) from t0 group by v1" +
                     "|analyze table t0 predicate columns|v3,v2,v1",
+            "select /*+ SET_VAR(prefer_cte_rewrite = true) */ count(distinct v1), count(distinct v2), " +
+                    "count(distinct v3) from t0 group by v1" +
+                    "|analyze table t0 predicate columns|v3,v2,v1",
 
             "select count(distinct v1) from (select * from t0 order by v1 limit 100) r" +
                     "|analyze table t0 predicate columns|v1",
