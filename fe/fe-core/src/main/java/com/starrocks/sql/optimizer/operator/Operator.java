@@ -191,6 +191,15 @@ public abstract class Operator {
         return opAppliedMVs.contains(mvId);
     }
 
+    /**
+     * A rule that builds a new operator in place of {@code other} without {@link Builder#withOperator} keeps the rules
+     * and MVs applied to {@code other}, so that they do not apply to the new operator again.
+     */
+    public void copyAppliedMarks(Operator other) {
+        this.opRuleBits.or(other.opRuleBits);
+        this.opAppliedMVs.addAll(other.opAppliedMVs);
+    }
+
     public Operator getEquivalentOp() {
         return equivalentOp;
     }

@@ -138,6 +138,7 @@ public class PruneHDFSScanColumnRule extends TransformationRule {
                                 scanOperator.getLimit(),
                                 scanOperator.getPredicate());
                 newScanOperator.getScanOptimizeOption().setCanUseAnyColumn(canUseAnyColumn);
+                newScanOperator.copyAppliedMarks(scanOperator);
                 newScanOperator.setScanOperatorPredicates(scanOperator.getScanOperatorPredicates());
                 newScanOperator.setTvrVersionRange(scanOperator.getTvrVersionRange());
 

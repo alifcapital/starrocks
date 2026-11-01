@@ -290,6 +290,10 @@ public class TextMatchBasedRewriteRule extends Rule {
                 OptExpression rewritten = doTextMatchBasedRewrite(context, mvPlanContext, mvPlan,
                         mvScanOutputColumns, mvCompensatePlan, input);
                 if (rewritten != null) {
+                    // The plan already reads the stale partitions of the MV from its base tables. We mark its scans as
+                    // the other MV rules do, so that neither the transparent rewrite nor another MV rewrite applies the
+                    // MV to them again.
+                    MvUtils.getScanOperator(rewritten).forEach(op -> op.setOpAppliedMV(mv.getId()));
                     IMaterializedViewMetricsEntity mvEntity =
                             MaterializedViewMetricsRegistry.getInstance().getMetricsEntity(mv.getMvId());
                     mvEntity.increaseQueryTextBasedMatchedCount(1L);
