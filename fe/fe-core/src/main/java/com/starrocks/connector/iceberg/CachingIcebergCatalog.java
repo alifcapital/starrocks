@@ -1085,8 +1085,13 @@ public class CachingIcebergCatalog implements IcebergCatalog {
 
     @Override
     public long estimateSize() {
+        // We fear that walking the cached tables reads objects that other threads change (it throws
+        // ConcurrentModificationException) and charges objects that many tables share to each table. So we take
+        // the sum of the cache weights, which does not walk a table. The manifest lists that reads load after
+        // the last put of a table count only from the next put of that table.
+        long tablesSize = tables.policy().eviction().orElseThrow().weightedSize().orElse(0);
         return Estimator.estimate(discoverySchemas.asMap(), 10) +
-                Estimator.estimate(tables.asMap(), 10) +
+                tablesSize +
                 Estimator.estimate(databases.asMap(), 10) +
                 estimateDataFileCacheSize() +
                 estimateDeleteFileCacheSize() +

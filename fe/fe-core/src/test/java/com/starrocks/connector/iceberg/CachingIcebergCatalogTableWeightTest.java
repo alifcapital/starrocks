@@ -210,6 +210,20 @@ public class CachingIcebergCatalogTableWeightTest {
         return (BaseTable) new HadoopTables(new Configuration()).load(location);
     }
 
+    // We fear that the memory tracker walks the cached tables and reads what they share. So the size that the
+    // catalog reports for its table cache must be the sum of the cache weights, whatever the tables share.
+    @Test
+    public void testEstimateSizeDoesNotWalkSharedObjects() {
+        Cache<IcebergTableName, Table> tables = Deencapsulation.getField(catalog, "tables");
+        long empty = catalog.estimateSize();
+
+        tables.put(KEY, tableSharing(new byte[8 * 1024 * 1024]));
+
+        long weights = weightedSize(tables);
+        Assertions.assertTrue(weights > 0);
+        Assertions.assertEquals(empty + weights, catalog.estimateSize());
+    }
+
     // We want the budget of the cache to count the manifest lists that reads load into the snapshots of a
     // cached table, so the weight must grow with them, and putting the same table again must make the cache
     // weigh it once more.
