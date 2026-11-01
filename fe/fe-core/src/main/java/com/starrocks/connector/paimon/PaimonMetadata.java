@@ -649,7 +649,12 @@ public class PaimonMetadata implements ConnectorMetadata {
             traceScanMetrics(paimonMetricRegistry, splits, table.getCatalogTableName(), predicates);
 
             PaimonSplitsInfo paimonSplitsInfo = new PaimonSplitsInfo(predicates, splits);
-            paimonSplits.put(filter, paimonSplitsInfo);
+            // The cache key holds no limit, so splits pruned by this scan's limit are kept out of it: another scan
+            // of the table without the limit would read only part of the data. A scan with a limit may still use
+            // full splits from the cache.
+            if (!pruneManifestsByLimit) {
+                paimonSplits.put(filter, paimonSplitsInfo);
+            }
             List<RemoteFileDesc> remoteFileDescs = ImmutableList.of(
                     PaimonRemoteFileDesc.createPaimonRemoteFileDesc(paimonSplitsInfo));
             remoteFileInfo.setFiles(remoteFileDescs);

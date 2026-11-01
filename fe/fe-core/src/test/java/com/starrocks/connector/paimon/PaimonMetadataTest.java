@@ -843,6 +843,13 @@ public class PaimonMetadataTest {
         assertEquals(1, ((PaimonRemoteFileDesc) result.get(0).getFiles().get(0))
                 .getPaimonSplitsInfo().getPaimonSplits().size());
 
+        // the same query, another scan without a limit: it must not get the splits pruned by the limit 1 above
+        params = GetRemoteFilesParams.newBuilder().setFieldNames(fieldNames).setLimit(-1)
+                .setTableVersionRange(TvrTableSnapshot.of(Optional.of(1L))).build();
+        result = metadata.getRemoteFiles(metadata.getTable(connectContext, "test_db", "test_table"), params);
+        assertEquals(6, ((PaimonRemoteFileDesc) result.get(0).getFiles().get(0))
+                .getPaimonSplitsInfo().getPaimonSplits().size());
+
         // no predicate, no limit
         metadata = new PaimonMetadata("paimon", environment, catalog, properties);
         params = GetRemoteFilesParams.newBuilder().setFieldNames(fieldNames).setLimit(-1)
