@@ -111,6 +111,13 @@ public class PaimonTableTest {
 
     @Test
     public void testEquals(@Mocked FileStoreTable paimonNativeTable) {
+        // equals compares the table identifiers, which hold the uuid of the Paimon table, and a mock has none
+        new Expectations() {
+            {
+                paimonNativeTable.uuid();
+                result = "fake_uuid";
+            }
+        };
         String dbName = "testDB";
         String tableName = "testTable";
         PaimonTable table = new PaimonTable("testCatalog", dbName, tableName, null, paimonNativeTable);
