@@ -302,6 +302,10 @@ public class CachingIcebergCatalog implements IcebergCatalog {
                 }
                 Table icebergTable = delegate.getTable(connectContext, dbName, tableName);
                 if (icebergTable != null) {
+                    // The cache weighs and refreshes only BaseTable, so any other table is not cached.
+                    if (!(icebergTable instanceof BaseTable)) {
+                        return icebergTable;
+                    }
                     tables.put(icebergTableName, icebergTable);
                     updateDiscoverySchemaIfPresent(icebergTableName, icebergTable);
                 }
@@ -613,6 +617,9 @@ public class CachingIcebergCatalog implements IcebergCatalog {
                 if (active) {
                     warmCurrentSnapshot(retainedTable, dbName, tableName, executorService);
                 }
+                // Caffeine weighs an entry only when it is written. Putting the same table again makes it weigh the
+                // table once more, so the manifest lists that reads loaded into its snapshots since the last put
+                // count in the cache budget from now on.
                 tables.put(icebergTableName, retainedTable);
                 updateDiscoverySchemaIfPresent(icebergTableName, retainedTable);
                 invalidateOldPartitionSnapshots(dbName, tableName, retainedTable.currentSnapshot());
@@ -1008,11 +1015,16 @@ public class CachingIcebergCatalog implements IcebergCatalog {
     }
 
 
+    // We want the weight of a cached table to be what the table owns, so we weigh its key and its
+    // TableMetadata only. The metadata holds the schemas, specs, properties and every snapshot with the
+    // manifest lists loaded into it. We do not walk the table object itself, because it reaches objects that
+    // many tables share (the catalog client, the file IO and its caches), which would be charged to each table
+    // and would be read while other threads change them.
+    // The snapshots supplier of a lazily loaded REST table is a lambda, and the estimator counts a lambda as
+    // its shallow size without walking the catalog client it captures.
     private int weighTableEntry(IcebergTableName key, Table table) {
-        long size = Estimator.estimate(key);
-        if (table != null) {
-            size += Estimator.estimate(table);
-        }
+        TableMetadata metadata = ((BaseTable) table).operations().current();
+        long size = Estimator.estimate(key) + Estimator.estimate(metadata);
         if (size > Integer.MAX_VALUE) {
             LOG.warn("Table cache entry size for key {} is too large: {} bytes", key, size);
             return Integer.MAX_VALUE;

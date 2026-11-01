@@ -19,7 +19,13 @@ import com.starrocks.common.jmockit.Deencapsulation;
 import com.starrocks.connector.ConnectorContext;
 import com.starrocks.connector.LazyConnector;
 import com.starrocks.connector.exception.StarRocksConnectorException;
+import org.apache.iceberg.BaseTable;
+import org.apache.iceberg.PartitionSpec;
+import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
+import org.apache.iceberg.TableMetadata;
+import org.apache.iceberg.TableOperations;
+import org.apache.iceberg.types.Types;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -36,6 +42,7 @@ import static com.starrocks.connector.iceberg.IcebergCatalogProperties.ICEBERG_D
 import static com.starrocks.connector.iceberg.IcebergCatalogProperties.ICEBERG_PARTITION_CACHE_MEMORY_SIZE_RATIO;
 import static com.starrocks.connector.iceberg.IcebergCatalogProperties.ICEBERG_TABLE_CACHE_MEMORY_SIZE_RATIO;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 public class IcebergCacheMemoryUpdateTest {
     private static final List<String> LIMITS = List.of(ICEBERG_TABLE_CACHE_MEMORY_SIZE_RATIO,
@@ -54,7 +61,12 @@ public class IcebergCacheMemoryUpdateTest {
             Cache<Object, Object> data = Deencapsulation.getField(catalog, "dataFileCache");
             Cache<Object, Object> deletes = Deencapsulation.getField(catalog, "deleteFileCache");
             Object tableKey = new CachingIcebergCatalog.IcebergTableName("db", "table");
-            Table table = mock(Table.class);
+            // The table cache holds BaseTable and weighs it by the metadata of its operations.
+            TableOperations operations = mock(TableOperations.class);
+            when(operations.current()).thenReturn(TableMetadata.newTableMetadata(
+                    new Schema(Types.NestedField.required(1, "id", Types.IntegerType.get())),
+                    PartitionSpec.unpartitioned(), "file:/tmp/table", Map.of()));
+            Table table = new BaseTable(operations, "table");
             tables.put(tableKey, table);
             partitions.put(tableKey, Map.of());
             data.put("manifest", Set.of());
