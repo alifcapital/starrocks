@@ -1,114 +1,127 @@
 [scheduler]
-PLAN FRAGMENT 0(F05)
+PLAN FRAGMENT 0(F06)
   DOP: 16
   INSTANCES
-    INSTANCE(0-F05#0)
+    INSTANCE(0-F06#0)
       BE: 10003
 
-PLAN FRAGMENT 1(F04)
+PLAN FRAGMENT 1(F05)
   DOP: 16
   INSTANCES
-    INSTANCE(1-F04#0)
-      DESTINATIONS: 0-F05#0
+    INSTANCE(1-F05#0)
+      DESTINATIONS: 0-F06#0
       BE: 10001
-    INSTANCE(2-F04#1)
-      DESTINATIONS: 0-F05#0
+    INSTANCE(2-F05#1)
+      DESTINATIONS: 0-F06#0
       BE: 10002
-    INSTANCE(3-F04#2)
-      DESTINATIONS: 0-F05#0
+    INSTANCE(3-F05#2)
+      DESTINATIONS: 0-F06#0
       BE: 10003
 
-PLAN FRAGMENT 2(F00)
+PLAN FRAGMENT 2(F04)
   DOP: 16
   INSTANCES
-    INSTANCE(4-F00#0)
-      DESTINATIONS: 1-F04#0,2-F04#1,3-F04#2
+    INSTANCE(4-F04#0)
+      DESTINATIONS: 1-F05#0,2-F05#1,3-F05#2
+      BE: 10003
+    INSTANCE(5-F04#1)
+      DESTINATIONS: 1-F05#0,2-F05#1,3-F05#2
+      BE: 10002
+    INSTANCE(6-F04#2)
+      DESTINATIONS: 1-F05#0,2-F05#1,3-F05#2
+      BE: 10001
+
+PLAN FRAGMENT 3(F00)
+  DOP: 16
+  INSTANCES
+    INSTANCE(7-F00#0)
+      DESTINATIONS: 4-F04#0,5-F04#1,6-F04#2
       BE: 10001
       SCAN RANGES
         BUCKET SEQUENCES: [16, 1, 4, 7, 10, 13]
         0:OlapScanNode
-          1. partitionID=1401,tabletID=1406
-          2. partitionID=1401,tabletID=1412
-          3. partitionID=1401,tabletID=1418
-          4. partitionID=1401,tabletID=1424
-          5. partitionID=1401,tabletID=1430
-          6. partitionID=1401,tabletID=1436
+          1. partitionID=2488,tabletID=2491
+          2. partitionID=2488,tabletID=2497
+          3. partitionID=2488,tabletID=2503
+          4. partitionID=2488,tabletID=2509
+          5. partitionID=2488,tabletID=2515
+          6. partitionID=2488,tabletID=2521
         1:OlapScanNode
-          1. partitionID=1440,tabletID=1445
-          2. partitionID=1440,tabletID=1451
-          3. partitionID=1440,tabletID=1457
-          4. partitionID=1440,tabletID=1463
-          5. partitionID=1440,tabletID=1469
-          6. partitionID=1440,tabletID=1475
-    INSTANCE(5-F00#1)
-      DESTINATIONS: 1-F04#0,2-F04#1,3-F04#2
+          1. partitionID=2528,tabletID=2531
+          2. partitionID=2528,tabletID=2537
+          3. partitionID=2528,tabletID=2543
+          4. partitionID=2528,tabletID=2549
+          5. partitionID=2528,tabletID=2555
+          6. partitionID=2528,tabletID=2561
+    INSTANCE(8-F00#1)
+      DESTINATIONS: 4-F04#0,5-F04#1,6-F04#2
       BE: 10002
       SCAN RANGES
         BUCKET SEQUENCES: [17, 2, 5, 8, 11, 14]
         0:OlapScanNode
-          1. partitionID=1401,tabletID=1408
-          2. partitionID=1401,tabletID=1414
-          3. partitionID=1401,tabletID=1420
-          4. partitionID=1401,tabletID=1426
-          5. partitionID=1401,tabletID=1432
-          6. partitionID=1401,tabletID=1438
+          1. partitionID=2488,tabletID=2493
+          2. partitionID=2488,tabletID=2499
+          3. partitionID=2488,tabletID=2505
+          4. partitionID=2488,tabletID=2511
+          5. partitionID=2488,tabletID=2517
+          6. partitionID=2488,tabletID=2523
         1:OlapScanNode
-          1. partitionID=1440,tabletID=1447
-          2. partitionID=1440,tabletID=1453
-          3. partitionID=1440,tabletID=1459
-          4. partitionID=1440,tabletID=1465
-          5. partitionID=1440,tabletID=1471
-          6. partitionID=1440,tabletID=1477
-    INSTANCE(6-F00#2)
-      DESTINATIONS: 1-F04#0,2-F04#1,3-F04#2
+          1. partitionID=2528,tabletID=2533
+          2. partitionID=2528,tabletID=2539
+          3. partitionID=2528,tabletID=2545
+          4. partitionID=2528,tabletID=2551
+          5. partitionID=2528,tabletID=2557
+          6. partitionID=2528,tabletID=2563
+    INSTANCE(9-F00#2)
+      DESTINATIONS: 4-F04#0,5-F04#1,6-F04#2
       BE: 10003
       SCAN RANGES
         BUCKET SEQUENCES: [0, 3, 6, 9, 12, 15]
         0:OlapScanNode
-          1. partitionID=1401,tabletID=1404
-          2. partitionID=1401,tabletID=1410
-          3. partitionID=1401,tabletID=1416
-          4. partitionID=1401,tabletID=1422
-          5. partitionID=1401,tabletID=1428
-          6. partitionID=1401,tabletID=1434
+          1. partitionID=2488,tabletID=2489
+          2. partitionID=2488,tabletID=2495
+          3. partitionID=2488,tabletID=2501
+          4. partitionID=2488,tabletID=2507
+          5. partitionID=2488,tabletID=2513
+          6. partitionID=2488,tabletID=2519
         1:OlapScanNode
-          1. partitionID=1440,tabletID=1443
-          2. partitionID=1440,tabletID=1449
-          3. partitionID=1440,tabletID=1455
-          4. partitionID=1440,tabletID=1461
-          5. partitionID=1440,tabletID=1467
-          6. partitionID=1440,tabletID=1473
+          1. partitionID=2528,tabletID=2529
+          2. partitionID=2528,tabletID=2535
+          3. partitionID=2528,tabletID=2541
+          4. partitionID=2528,tabletID=2547
+          5. partitionID=2528,tabletID=2553
+          6. partitionID=2528,tabletID=2559
 
-PLAN FRAGMENT 3(F02)
+PLAN FRAGMENT 4(F02)
   DOP: 16
   INSTANCES
-    INSTANCE(7-F02#0)
-      DESTINATIONS: 4-F00#0,5-F00#1,6-F00#2
+    INSTANCE(10-F02#0)
+      DESTINATIONS: 7-F00#0,8-F00#1,9-F00#2
       BE: 10001
       SCAN RANGES
         4:OlapScanNode
-          1. partitionID=1484,tabletID=1491
-          2. partitionID=1484,tabletID=1497
-          3. partitionID=1484,tabletID=1503
-          4. partitionID=1484,tabletID=1509
-    INSTANCE(8-F02#1)
-      DESTINATIONS: 4-F00#0,5-F00#1,6-F00#2
+          1. partitionID=2574,tabletID=2579
+          2. partitionID=2574,tabletID=2585
+          3. partitionID=2574,tabletID=2591
+          4. partitionID=2574,tabletID=2597
+    INSTANCE(11-F02#1)
+      DESTINATIONS: 7-F00#0,8-F00#1,9-F00#2
       BE: 10002
       SCAN RANGES
         4:OlapScanNode
-          1. partitionID=1484,tabletID=1487
-          2. partitionID=1484,tabletID=1493
-          3. partitionID=1484,tabletID=1499
-          4. partitionID=1484,tabletID=1505
-    INSTANCE(9-F02#2)
-      DESTINATIONS: 4-F00#0,5-F00#1,6-F00#2
+          1. partitionID=2574,tabletID=2575
+          2. partitionID=2574,tabletID=2581
+          3. partitionID=2574,tabletID=2587
+          4. partitionID=2574,tabletID=2593
+    INSTANCE(12-F02#2)
+      DESTINATIONS: 7-F00#0,8-F00#1,9-F00#2
       BE: 10003
       SCAN RANGES
         4:OlapScanNode
-          1. partitionID=1484,tabletID=1489
-          2. partitionID=1484,tabletID=1495
-          3. partitionID=1484,tabletID=1501
-          4. partitionID=1484,tabletID=1507
+          1. partitionID=2574,tabletID=2577
+          2. partitionID=2574,tabletID=2583
+          3. partitionID=2574,tabletID=2589
+          4. partitionID=2574,tabletID=2595
 
 [fragment]
 PLAN FRAGMENT 0
@@ -117,21 +130,36 @@ PLAN FRAGMENT 0
 
   RESULT SINK
 
-  14:MERGING-EXCHANGE
+  16:MERGING-EXCHANGE
 
 PLAN FRAGMENT 1
  OUTPUT EXPRS:
   PARTITION: HASH_PARTITIONED: 9: p_brand, 10: p_type, 11: p_size
 
   STREAM DATA SINK
-    EXCHANGE ID: 14
+    EXCHANGE ID: 16
     UNPARTITIONED
 
-  13:SORT
+  15:SORT
   |  order by: <slot 23> 23: count DESC, <slot 9> 9: p_brand ASC, <slot 10> 10: p_type ASC, <slot 11> 11: p_size ASC
   |  offset: 0
   |  
-  12:AGGREGATE (update finalize)
+  14:AGGREGATE (merge finalize)
+  |  output: count(23: count)
+  |  group by: 9: p_brand, 10: p_type, 11: p_size
+  |  
+  13:EXCHANGE
+
+PLAN FRAGMENT 2
+ OUTPUT EXPRS:
+  PARTITION: HASH_PARTITIONED: 2: ps_suppkey, 9: p_brand, 10: p_type, 11: p_size
+
+  STREAM DATA SINK
+    EXCHANGE ID: 13
+    HASH_PARTITIONED: 9: p_brand, 10: p_type, 11: p_size
+
+  12:AGGREGATE (update serialize)
+  |  STREAMING
   |  output: count(2: ps_suppkey)
   |  group by: 9: p_brand, 10: p_type, 11: p_size
   |  
@@ -140,13 +168,13 @@ PLAN FRAGMENT 1
   |  
   10:EXCHANGE
 
-PLAN FRAGMENT 2
+PLAN FRAGMENT 3
  OUTPUT EXPRS:
   PARTITION: RANDOM
 
   STREAM DATA SINK
     EXCHANGE ID: 10
-    HASH_PARTITIONED: 9: p_brand, 10: p_type, 11: p_size
+    HASH_PARTITIONED: 2: ps_suppkey, 9: p_brand, 10: p_type, 11: p_size
 
   9:AGGREGATE (update serialize)
   |  STREAMING
@@ -182,7 +210,7 @@ PLAN FRAGMENT 2
   |       partitions=1/1
   |       rollup: partsupp
   |       tabletRatio=18/18
-  |       tabletList=1443,1445,1447,1449,1451,1453,1455,1457,1459,1461 ...
+  |       tabletList=2529,2531,2533,2535,2537,2539,2541,2543,2545,2547 ...
   |       cardinality=1
   |       avgRowSize=16.0
   |    
@@ -193,11 +221,11 @@ PLAN FRAGMENT 2
      partitions=1/1
      rollup: part
      tabletRatio=18/18
-     tabletList=1404,1406,1408,1410,1412,1414,1416,1418,1420,1422 ...
+     tabletList=2489,2491,2493,2495,2497,2499,2501,2503,2505,2507 ...
      cardinality=1
      avgRowSize=47.0
 
-PLAN FRAGMENT 3
+PLAN FRAGMENT 4
  OUTPUT EXPRS:
   PARTITION: RANDOM
 
@@ -215,7 +243,7 @@ PLAN FRAGMENT 3
      partitions=1/1
      rollup: supplier
      tabletRatio=12/12
-     tabletList=1487,1489,1491,1493,1495,1497,1499,1501,1503,1505 ...
+     tabletList=2575,2577,2579,2581,2583,2585,2587,2589,2591,2593 ...
      cardinality=1
      avgRowSize=105.0
 [end]

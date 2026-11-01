@@ -124,7 +124,7 @@ PLAN FRAGMENT 1
   0:OlapScanNode
      TABLE: part
      PREAGGREGATION: ON
-     PREDICATES: 21: p_brand IN ('Brand#45', 'Brand#11', 'Brand#21'), 23: p_size <= 15, 24: p_container IN ('SM CASE', 'SM BOX', 'SM PACK', 'SM PKG', 'MED BAG', 'MED BOX', 'MED PKG', 'MED PACK', 'LG CASE', 'LG BOX', 'LG PACK', 'LG PKG'), 23: p_size >= 1
+     PREDICATES: 23: p_size <= 15, 23: p_size >= 1, 21: p_brand IN ('Brand#45', 'Brand#11', 'Brand#21'), 24: p_container IN ('SM CASE', 'SM BOX', 'SM PACK', 'SM PKG', 'MED BAG', 'MED BOX', 'MED PKG', 'MED PACK', 'LG CASE', 'LG BOX', 'LG PACK', 'LG PKG')
      partitions=1/1
      rollup: part
      tabletRatio=18/18
