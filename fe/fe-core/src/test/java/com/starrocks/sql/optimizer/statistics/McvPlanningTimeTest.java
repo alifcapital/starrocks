@@ -139,20 +139,32 @@ public class McvPlanningTimeTest {
         }
     }
 
+    // The fastest of a few estimates after a warm-up: the slower ones measure the pauses of the host.
+    private static long fastestMillis(int bounds, boolean withGroup) {
+        ScalarOperator predicate = predicate(bounds, withGroup);
+        Statistics input = table(1000);
+        PredicateStatisticsCalculator.statisticsCalculate(predicate, input);
+        long fastest = Long.MAX_VALUE;
+        for (int run = 0; run < 3; run++) {
+            long start = System.nanoTime();
+            PredicateStatisticsCalculator.statisticsCalculate(predicate, input);
+            fastest = Math.min(fastest, System.nanoTime() - start);
+        }
+        return Math.max(1, fastest / 1_000_000);
+    }
+
+    // The time of one estimate depends on the host and on what else runs there, so we compare the times of 16 and of 64
+    // bounds on the same host. Four times the bounds take about four times the time when the time grows with the
+    // bounds, and sixteen times when it grows with the product of the bounds and the AND nodes.
     @Test
-    public void testPlanningTimeOfSixtyFourBoundsOnAHeadOfAThousandIsLessThanHalfASecond() {
+    public void testPlanningTimeGrowsWithTheBoundsAndNotWithTheirProduct() {
         StringBuilder measured = new StringBuilder();
-        for (int bounds : new int[] {2, 3, 4, 5, 8, 16, 64}) {
-            for (boolean withGroup : new boolean[] {false, true}) {
-                ScalarOperator predicate = predicate(bounds, withGroup);
-                Statistics input = table(1000);
-                PredicateStatisticsCalculator.statisticsCalculate(predicate, input);
-                long start = System.nanoTime();
-                PredicateStatisticsCalculator.statisticsCalculate(predicate, input);
-                long millis = (System.nanoTime() - start) / 1_000_000;
-                measured.append(String.format(" %d bounds%s %d ms;", bounds, withGroup ? " and the group" : "", millis));
-                Assertions.assertTrue(millis < 500, bounds + " bounds, group " + withGroup + ": " + millis + " ms");
-            }
+        for (boolean withGroup : new boolean[] {false, true}) {
+            long sixteen = fastestMillis(16, withGroup);
+            long sixtyFour = fastestMillis(64, withGroup);
+            measured.append(String.format(" group %s: 16 bounds %d ms, 64 bounds %d ms;", withGroup, sixteen, sixtyFour));
+            Assertions.assertTrue(sixtyFour < 8 * sixteen,
+                    "group " + withGroup + ": 16 bounds " + sixteen + " ms, 64 bounds " + sixtyFour + " ms");
         }
         System.out.println("MEASURED planning of the bounds of a period on a head of 1000:" + measured);
     }

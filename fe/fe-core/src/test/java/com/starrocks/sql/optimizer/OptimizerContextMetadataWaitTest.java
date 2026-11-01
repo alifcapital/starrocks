@@ -78,6 +78,9 @@ public class OptimizerContextMetadataWaitTest {
     public void testTimeoutLeavesOutMetadataWait() throws Exception {
         OptimizerContext context = newContext();
         context.getSessionVariable().setOptimizerExecuteTimeout(100);
+        // The optimizer time starts when the context is built. Building it can take longer than the timeout on a busy
+        // host, and we want only the wait below to exceed the timeout, so we start the time again here.
+        context.getOptimizerTimer().reset().start();
         try (OptimizerContext.MetadataWait ignored = context.waitForMetadata()) {
             TimeUnit.MILLISECONDS.sleep(200);
         }
