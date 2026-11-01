@@ -650,7 +650,8 @@ public class SelectStmtWithDecimalTypesNewPlannerTest {
         FeConstants.runningUnitTest = true;
         int oldStage = ctx.getSessionVariable().getNewPlannerAggStage();
         ctx.getSessionVariable().setNewPlanerAggStage(2);
-        String sql = "select sum(distinct col_decimal32p9s2), sum(distinct col_decimal64p13s0), " +
+        String sql = "select /*+ SET_VAR(prefer_cte_rewrite = true) */ sum(distinct col_decimal32p9s2), " +
+                "sum(distinct col_decimal64p13s0), " +
                 "sum(distinct col_decimal128p20s3) from db1.decimal_table";
         String plan = UtFrameUtils.getVerboseFragmentPlan(ctx, sql);
         String[] expectSnippets = {
@@ -788,7 +789,8 @@ public class SelectStmtWithDecimalTypesNewPlannerTest {
     public void testAvgDistinctWithRewriteMultiDistinctByCTERuleTakeEffect() throws Exception {
         int oldStage = ctx.getSessionVariable().getNewPlannerAggStage();
         ctx.getSessionVariable().setNewPlanerAggStage(2);
-        String sql = "select avg(distinct col_decimal32p9s2), avg(distinct col_decimal64p13s0), " +
+        String sql = "select /*+ SET_VAR(prefer_cte_rewrite = true) */ avg(distinct col_decimal32p9s2), " +
+                "avg(distinct col_decimal64p13s0), " +
                 "avg(distinct col_decimal128p20s3) from db1.decimal_table";
         String plan = removeSlotIds(UtFrameUtils.getVerboseFragmentPlan(ctx, sql));
         String[] expectSnippets = {
