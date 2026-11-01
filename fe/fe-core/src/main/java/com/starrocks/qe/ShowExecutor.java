@@ -3568,7 +3568,11 @@ public class ShowExecutor {
             throw new MetaNotFoundException("No found database: " + catalogName + "." + dbName);
         }
         row.set(0, catalogName + "." + dbName);
-        Table table = GlobalStateMgr.getCurrentState().getMetadataMgr().getTable(context, catalogName, dbName, tableName);
+        // A cluster can keep statistics for thousands of external tables, and loading a table from its catalog
+        // is a remote call per row. The privilege check needs only the name and the type, so we load the full
+        // table only when the operator turns on full external metadata access.
+        BasicTable table = GlobalStateMgr.getCurrentState().getMetadataMgr().getBasicTable(context, catalogName, dbName,
+                tableName, Config.enable_external_catalog_information_schema_tables_access_full_metadata);
         if (table == null) {
             throw new MetaNotFoundException("No found table: " + catalogName + "." + dbName + "." + tableName);
         }
@@ -3581,9 +3585,15 @@ public class ShowExecutor {
             return null;
         }
 
-        long totalCollectColumnsSize = StatisticUtils.getCollectibleColumns(table).size();
-        if (null != columns && !columns.isEmpty() && (columns.size() != totalCollectColumnsSize)) {
-            row.set(2, String.join(",", columns));
+        if (null != columns && !columns.isEmpty()) {
+            // We show "ALL" only when we can compare the column list with the table schema. Without the full
+            // table there is no schema, so we show the stored column list.
+            long totalCollectColumnsSize = (table instanceof Table)
+                    ? StatisticUtils.getCollectibleColumns((Table) table).size()
+                    : -1L;
+            if (columns.size() != totalCollectColumnsSize) {
+                row.set(2, String.join(",", columns));
+            }
         }
 
         row.set(3, basicStatsMeta.getType().name());
@@ -3638,7 +3648,9 @@ public class ShowExecutor {
             throw new MetaNotFoundException("No found database: " + catalogName + "." + dbName);
         }
         row.set(0, catalogName + "." + dbName);
-        Table table = GlobalStateMgr.getCurrentState().getMetadataMgr().getTable(context, catalogName, dbName, tableName);
+        // We do not want a remote call to the catalog per row, so we read only the basic table info.
+        BasicTable table = GlobalStateMgr.getCurrentState().getMetadataMgr().getBasicTable(context, catalogName, dbName,
+                tableName, Config.enable_external_catalog_information_schema_tables_access_full_metadata);
         if (table == null) {
             throw new MetaNotFoundException("No found table: " + catalogName + "." + dbName + "." + tableName);
         }
@@ -3690,11 +3702,13 @@ public class ShowExecutor {
 
     public static List<String> showExternalMcvStatsMeta(ConnectContext context, ExternalMcvStatsMeta meta) {
         Database db;
-        Table table;
+        BasicTable table;
         try {
             db = GlobalStateMgr.getCurrentState().getMetadataMgr().getDb(context, meta.getCatalogName(), meta.getDbName());
-            table = GlobalStateMgr.getCurrentState().getMetadataMgr().getTable(context, meta.getCatalogName(),
-                    meta.getDbName(), meta.getTableName());
+            // We do not want a remote call to the catalog per row, so we read only the basic table info.
+            table = GlobalStateMgr.getCurrentState().getMetadataMgr().getBasicTable(context, meta.getCatalogName(),
+                    meta.getDbName(), meta.getTableName(),
+                    Config.enable_external_catalog_information_schema_tables_access_full_metadata);
         } catch (Exception e) {
             // The catalog may be unreachable; the row is skipped like for the other external statistics.
             return null;

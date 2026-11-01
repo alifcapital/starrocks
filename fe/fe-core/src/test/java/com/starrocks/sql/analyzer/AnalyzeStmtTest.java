@@ -35,6 +35,7 @@ import com.starrocks.qe.StmtExecutor;
 import com.starrocks.scheduler.history.TableKeeper;
 import com.starrocks.server.CatalogMgr;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.server.MetadataMgr;
 import com.starrocks.server.WarehouseManager;
 import com.starrocks.sql.ast.AnalyzeHistogramDesc;
 import com.starrocks.sql.ast.AnalyzeMcvDesc;
@@ -64,6 +65,8 @@ import com.starrocks.statistic.AnalyzeStatus;
 import com.starrocks.statistic.BasicStatsMeta;
 import com.starrocks.statistic.ExternalAnalyzeJob;
 import com.starrocks.statistic.ExternalAnalyzeStatus;
+import com.starrocks.statistic.ExternalBasicStatsMeta;
+import com.starrocks.statistic.ExternalHistogramStatsMeta;
 import com.starrocks.statistic.ExternalMcvStatsMeta;
 import com.starrocks.statistic.FullStatisticsCollectJob;
 import com.starrocks.statistic.HistogramStatsMeta;
@@ -84,6 +87,7 @@ import com.starrocks.utframe.StarRocksAssert;
 import com.starrocks.utframe.UtFrameUtils;
 import com.starrocks.warehouse.multi.MultiWarehouse;
 import com.starrocks.warehouse.multi.MultiWarehouseManager;
+import mockit.Invocation;
 import mockit.Mock;
 import mockit.MockUp;
 import org.junit.jupiter.api.Assertions;
@@ -100,6 +104,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static com.starrocks.sql.analyzer.AnalyzeTestUtil.analyzeFail;
@@ -449,6 +454,102 @@ public class AnalyzeStmtTest {
         getConnectContext().getGlobalStateMgr().getAnalyzeMgr().addHistogramStatsMeta(histogramStatsMeta);
         res = ShowExecutor.execute(showHistogramStatsMetaStmt, getConnectContext()).getResultRows().toString();
         Assertions.assertEquals("[[test, t0, v1, HISTOGRAM, 2020-01-01 01:01:00, {}]]", res);
+    }
+
+    // A cluster can keep statistics for thousands of external tables, so we expect SHOW STATS META,
+    // SHOW HISTOGRAM META and SHOW MCV STATS META to show external rows without loading each table from its
+    // catalog. The mock counts the loads of hive0 tables through MetadataMgr.getTable.
+    private static void countExternalTableLoads(AtomicInteger loads) {
+        new MockUp<MetadataMgr>() {
+            @Mock
+            public Table getTable(Invocation invocation, ConnectContext context, String catalogName, String dbName,
+                                  String tblName) {
+                if ("hive0".equals(catalogName)) {
+                    loads.incrementAndGet();
+                }
+                return invocation.proceed();
+            }
+        };
+    }
+
+    private static List<String> hiveOrdersColumns() {
+        Table ordersTable = GlobalStateMgr.getCurrentState().getMetadataMgr()
+                .getTable(getConnectContext(), "hive0", "partitioned_db", "orders");
+        return StatisticUtils.getCollectibleColumns(ordersTable);
+    }
+
+    @Test
+    public void testShowExternalBasicStatsMetaDoesNotLoadTable() throws MetaNotFoundException {
+        List<String> allColumns = hiveOrdersColumns();
+        ExternalBasicStatsMeta meta = new ExternalBasicStatsMeta("hive0", "partitioned_db", "orders", allColumns,
+                StatsConstants.AnalyzeType.FULL, LocalDateTime.of(2020, 1, 1, 1, 1), Maps.newHashMap());
+
+        AtomicInteger loads = new AtomicInteger();
+        countExternalTableLoads(loads);
+        boolean savedFetchFullMetadata = Config.enable_external_catalog_information_schema_tables_access_full_metadata;
+        try {
+            // Without the table schema the stored column list is shown, even when it covers all columns.
+            Config.enable_external_catalog_information_schema_tables_access_full_metadata = false;
+            List<String> row = ShowExecutor.showExternalBasicStatsMeta(getConnectContext(), meta);
+            Assertions.assertNotNull(row);
+            Assertions.assertEquals("hive0.partitioned_db", row.get(0));
+            Assertions.assertEquals("orders", row.get(1));
+            Assertions.assertEquals(String.join(",", allColumns), row.get(2));
+            Assertions.assertEquals("FULL", row.get(3));
+            Assertions.assertEquals("2020-01-01 01:01:00", row.get(4));
+            Assertions.assertEquals(0, loads.get());
+
+            // With full external metadata access the table is loaded and a complete column list shows as "ALL".
+            Config.enable_external_catalog_information_schema_tables_access_full_metadata = true;
+            row = ShowExecutor.showExternalBasicStatsMeta(getConnectContext(), meta);
+            Assertions.assertNotNull(row);
+            Assertions.assertEquals("ALL", row.get(2));
+            Assertions.assertEquals(1, loads.get());
+        } finally {
+            Config.enable_external_catalog_information_schema_tables_access_full_metadata = savedFetchFullMetadata;
+        }
+    }
+
+    @Test
+    public void testShowExternalHistogramStatsMetaDoesNotLoadTable() throws MetaNotFoundException {
+        String column = hiveOrdersColumns().get(0);
+        ExternalHistogramStatsMeta meta = new ExternalHistogramStatsMeta("hive0", "partitioned_db", "orders",
+                column, StatsConstants.AnalyzeType.HISTOGRAM, LocalDateTime.of(2020, 1, 1, 1, 1), Maps.newHashMap());
+
+        AtomicInteger loads = new AtomicInteger();
+        countExternalTableLoads(loads);
+        List<String> row = ShowExecutor.showExternalHistogramStatsMeta(getConnectContext(), meta);
+        Assertions.assertEquals(
+                "[hive0.partitioned_db, orders, " + column + ", HISTOGRAM, 2020-01-01 01:01:00, {}]",
+                String.valueOf(row));
+        Assertions.assertEquals(0, loads.get());
+    }
+
+    @Test
+    public void testShowExternalMcvStatsMetaDoesNotLoadTable() {
+        String column = hiveOrdersColumns().get(0);
+        ExternalMcvStatsMeta meta = new ExternalMcvStatsMeta("hive0", "partitioned_db", "orders", List.of(column),
+                StatsConstants.AnalyzeType.FULL, List.of(MCV), LocalDateTime.of(2020, 1, 1, 1, 1), Map.of());
+
+        AtomicInteger loads = new AtomicInteger();
+        countExternalTableLoads(loads);
+        List<String> row = ShowExecutor.showExternalMcvStatsMeta(getConnectContext(), meta);
+        Assertions.assertEquals(
+                "[hive0.partitioned_db, orders, [" + column + "], FULL, MCV, 2020-01-01 01:01:00, {}]",
+                String.valueOf(row));
+        Assertions.assertEquals(0, loads.get());
+    }
+
+    @Test
+    public void testShowNativeBasicStatsMetaShowsAllColumns() throws MetaNotFoundException {
+        Database db = getConnectContext().getGlobalStateMgr().getLocalMetastore().getDb("db");
+        Table tbl = db.getTable("tbl");
+        BasicStatsMeta meta = new BasicStatsMeta(db.getId(), tbl.getId(), StatisticUtils.getCollectibleColumns(tbl),
+                StatsConstants.AnalyzeType.FULL, LocalDateTime.of(2020, 1, 1, 1, 1), Maps.newHashMap(), 1000);
+        List<String> row = ShowExecutor.showBasicStatsMeta(getConnectContext(), meta);
+        Assertions.assertNotNull(row);
+        Assertions.assertEquals("tbl", row.get(1));
+        Assertions.assertEquals("ALL", row.get(2));
     }
 
     @Test
