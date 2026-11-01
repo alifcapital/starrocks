@@ -330,8 +330,8 @@ public class UtilsTest {
 
         new MockUp<LakeAggregator>() {
             @Mock
-            public ComputeNode chooseAggregatorNode(ComputeResource computeResource,
-                                                    Collection<ComputeNode> candidateNodes) {
+            public ComputeNode chooseMaintenanceAggregatorNode(ComputeResource computeResource,
+                                                               Collection<ComputeNode> candidateNodes) {
                 return node;
             }
         };

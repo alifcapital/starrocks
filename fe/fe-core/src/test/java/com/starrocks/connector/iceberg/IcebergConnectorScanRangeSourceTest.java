@@ -400,7 +400,8 @@ public class IcebergConnectorScanRangeSourceTest extends TableTestBase {
             slot.setColumn(column);
             localTupleDescriptor.addSlot(slot);
         }
-        IcebergMORParams eqDeleteParams = IcebergMORParams.of(IcebergMORParams.ScanTaskType.EQ_DELETE, List.of(1));
+        IcebergMORParams eqDeleteParams = IcebergMORParams.ofEqDelete(List.of(1),
+                IcebergMORParams.EqDeleteScope.PARTITIONED);
         FileScanTask task = Lists.newArrayList(mockedNativeTableC.newScan().planFiles()).get(0);
 
         IcebergConnectorScanRangeSource source = new IcebergConnectorScanRangeSource(icebergTable,
