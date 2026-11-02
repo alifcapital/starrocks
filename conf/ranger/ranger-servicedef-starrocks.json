@@ -60,7 +60,8 @@
         "alter",
         "create view",
         "create function",
-        "create materialized view"
+        "create materialized view",
+        "create pipe"
       ]
     },
     {
@@ -172,6 +173,33 @@
         "refresh",
         "drop",
         "alter"
+      ]
+    },
+    {
+      "itemId": 15,
+      "name": "pipe",
+      "type": "string",
+      "level": 30,
+      "parent": "database",
+      "mandatory": true,
+      "isValidLeaf": true,
+      "lookupSupported": true,
+      "recursiveSupported": false,
+      "excludesSupported": true,
+      "matcher": "org.apache.ranger.plugin.resourcematcher.RangerDefaultResourceMatcher",
+      "matcherOptions": {
+        "wildCard": true,
+        "ignoreCase": true
+      },
+      "validationRegEx": "",
+      "validationMessage": "",
+      "uiHint": "",
+      "label": "StarRocks Pipe",
+      "description": "StarRocks Pipe",
+      "accessTypeRestrictions": [
+        "usage",
+        "alter",
+        "drop"
       ]
     },
     {
@@ -348,6 +376,7 @@
         "file",
         "blacklist",
         "operate",
+        "security",
         "create external catalog",
         "repository",
         "create resource group",
@@ -523,6 +552,16 @@
       "itemId": 28,
       "name": "create warehouse",
       "label": "CREATE WAREHOUSE"
+    },
+    {
+      "itemId": 29,
+      "name": "security",
+      "label": "SECURITY"
+    },
+    {
+      "itemId": 30,
+      "name": "create pipe",
+      "label": "CREATE PIPE"
     }
   ],
   "configs": [

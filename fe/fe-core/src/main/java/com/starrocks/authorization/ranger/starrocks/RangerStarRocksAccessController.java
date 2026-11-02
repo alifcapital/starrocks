@@ -409,8 +409,12 @@ public class RangerStarRocksAccessController extends RangerAccessController {
     @Override
     public void checkPipeAction(ConnectContext context, PipeName name, PrivilegeType privilegeType)
             throws AccessDeniedException {
+        // A pipe policy has the resources catalog, database and pipe. Ranger does not match such a
+        // policy, even with catalog "*", when the request has no catalog, so we set the internal
+        // catalog, which holds all pipes.
         hasPermission(
                 RangerStarRocksResource.builder()
+                        .setCatalog(InternalCatalog.DEFAULT_INTERNAL_CATALOG_NAME)
                         .setDatabase(name.getDbName())
                         .setPipe(name.getPipeName())
                         .build(),
@@ -424,6 +428,7 @@ public class RangerStarRocksAccessController extends RangerAccessController {
             throws AccessDeniedException {
         hasPermission(
                 RangerStarRocksResource.builder()
+                        .setCatalog(InternalCatalog.DEFAULT_INTERNAL_CATALOG_NAME)
                         .setDatabase(pipeName.getDbName())
                         .setPipe(pipeName.getPipeName())
                         .build(),
