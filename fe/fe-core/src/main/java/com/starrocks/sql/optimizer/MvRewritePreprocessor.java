@@ -481,11 +481,37 @@ public class MvRewritePreprocessor {
         return mvWithPlanContexts;
     }
 
+    private static boolean isMaterializedViewInMemory(BaseTableInfo baseTableInfo) {
+        if (!baseTableInfo.isInternalCatalog()) {
+            return false;
+        }
+        Table table = GlobalStateMgr.getCurrentState().getLocalMetastore()
+                .getTable(baseTableInfo.getDbId(), baseTableInfo.getTableId());
+        return table != null && table.isMaterializedView();
+    }
+
     private static boolean canMVRewriteIfMVHasExtraTables(ConnectContext connectContext,
                                                           MaterializedView mv,
                                                           Set<Table> queryTables) {
         // 1. when mv has foreign key constraints, it's ok whether query has extra tables or mv has extra tables.
         if (mv.hasForeignKeyConstraints()) {
+            return true;
+        }
+        // View delta rewrite drops an extra mv table only when a foreign key chain reaches it from a query
+        // table. When no query table has a foreign key, an mv base table that the query does not read makes
+        // the mv unusable. We decide this without loading the base tables, because loading an external table
+        // reads remote metadata. A base mv is not an extra table, and its type is known in memory.
+        if (queryTables.stream().noneMatch(Table::hasForeignKeyConstraints)) {
+            Optional<BaseTableInfo> extraTableInfo = mv.getBaseTableInfos().stream()
+                    .filter(info -> queryTables.stream().noneMatch(info::matchTable))
+                    .filter(info -> !isMaterializedViewInMemory(info))
+                    .findFirst();
+            if (extraTableInfo.isPresent()) {
+                logMVPrepare(connectContext, mv, "Exclude mv {} because it contains extra base table {} " +
+                        "and no query table has foreign key constraints", mv.getName(),
+                        extraTableInfo.get().getReadableString());
+                return false;
+            }
             return true;
         }
         Set<Table> baseTables = mv.getBaseTableInfos().stream().map(x -> MvUtils.getTableChecked(x))
