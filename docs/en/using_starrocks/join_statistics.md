@@ -54,14 +54,14 @@ After verifying that an object improves plans, attach an ordinary ANALYZE job to
 
 ```sql
 CREATE ANALYZE JOIN STATISTICS transactions_users
-PROPERTIES ("collect_interval_sec" = "86400");
+PROPERTIES ("statistic_auto_collect_interval" = "86400");
 SHOW ANALYZE JOB;
 SHOW ANALYZE STATUS;
 ```
 
 The job refreshes the existing object, including all its sources and configured predicate slices. It is bound to the object's ID, not just its name. Dropping and recreating an object with the same name does not transfer the old schedule. One recurring job is allowed per object; drop the old job before changing its interval.
 
-`collect_interval_sec` accepts 1–31,536,000 seconds. If omitted, the job follows `statistic_auto_collect_large_table_interval`. Jobs use the existing auto-statistics collector and permitted collection window. With `enable_statistic_auto_collect_staggered_schedule=true`, each target receives its own persisted calendar slot through `AutoStatisticsSchedule`, including initialization outside the collection window. Restart or leader promotion resumes future slots without replaying a backlog of missed runs. Failed attempts retain the published JOIN generation and retry on a later slot.
+`statistic_auto_collect_interval` accepts 1–31,536,000 seconds, as for other ANALYZE jobs. If omitted, the job follows `statistic_auto_collect_large_table_interval`. New MCV and JOIN jobs reject `collect_interval_sec`; jobs already created with it keep its interval. Jobs use the existing auto-statistics collector and permitted collection window. With `enable_statistic_auto_collect_staggered_schedule=true`, each target receives its own persisted calendar slot through `AutoStatisticsSchedule`, including initialization outside the collection window. Restart or leader promotion resumes future slots without replaying a backlog of missed runs. Failed attempts retain the published JOIN generation and retry on a later slot.
 
 `enable_trigger_analyze_job_immediate=true` requests the first collection immediately, subject to the permitted window and collection enablement. If the window is closed, the first collection remains pending until an allowed window. With the option disabled, the new job waits for its regular slot. To collect now independently of the recurring job, use:
 
@@ -82,7 +82,7 @@ MCV groups can use the same workflow:
 ```sql
 CREATE ANALYZE FULL TABLE iceberg.landing_mobi_tj.transactions
 MCV (status, dest_acc_gate, dest_acc_type)
-PROPERTIES ("collect_interval_sec" = "86400");
+PROPERTIES ("statistic_auto_collect_interval" = "86400");
 ```
 
 This schedules that exact local column group, using the existing full MCV collector; it does not collect BASIC or a different predicate group. Native MCV and automatic selection of predicate groups are not added by this syntax. DROP MCV STATS for a group removes its recurring job; dropping all MCV for a table removes all its MCV jobs. Other statistics jobs are retained. MCV publication and deletion are serialized per table, so DROP may wait for an in-flight MCV collection before deleting its result. A normal BASIC DROP STATS does not remove these jobs.

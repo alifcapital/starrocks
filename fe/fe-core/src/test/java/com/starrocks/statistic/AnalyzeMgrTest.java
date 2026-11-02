@@ -253,6 +253,48 @@ public class AnalyzeMgrTest {
     }
 
     @Test
+    public void testMcvJobStoredWithCollectIntervalSecKeepsItsInterval() throws Exception {
+        UtFrameUtils.PseudoJournalReplayer.resetFollowerJournalQueue();
+        Table table =
+                connectContext.getGlobalStateMgr().getMetadataMgr().getTable(connectContext, "hive0", "partitioned_db", "t1");
+        // MCV jobs created with collect_interval_sec are stored in the image and journal with that property.
+        Map<String, String> stored = Map.of(StatsConstants.PROP_COLLECT_INTERVAL_SEC_KEY, "604800");
+        ExternalAnalyzeJob job = new ExternalAnalyzeJob("hive0", "partitioned_db", "t1", List.of("c1"), List.of(),
+                StatsConstants.AnalyzeType.MCV, StatsConstants.ScheduleType.SCHEDULE, stored,
+                StatsConstants.ScheduleStatus.PENDING, LocalDateTime.MIN);
+        job.setTargetUuid(table.getUUID());
+        AnalyzeMgr analyzeMgr = new AnalyzeMgr();
+        analyzeMgr.addAnalyzeJob(job);
+
+        ExternalAnalyzeJob replayed = (ExternalAnalyzeJob) UtFrameUtils.PseudoJournalReplayer
+                .replayNextJournal(OperationType.OP_ADD_EXTERNAL_ANALYZER_JOB);
+        JournalEntity journalEntity = new JournalEntity(OperationType.OP_ADD_EXTERNAL_ANALYZER_JOB, replayed);
+        GlobalStateMgr.getCurrentState().getEditLog().loadJournal(GlobalStateMgr.getCurrentState(), journalEntity);
+        AnalyzeMgr followerMgr = GlobalStateMgr.getCurrentState().getAnalyzeMgr();
+        try {
+            ExternalAnalyzeJob fromJournal = (ExternalAnalyzeJob) followerMgr.getAnalyzeJob(job.getId());
+            Assertions.assertEquals(StatsConstants.AnalyzeType.MCV, fromJournal.getAnalyzeType());
+            Assertions.assertEquals(table.getUUID(), fromJournal.getTargetUuid());
+            Assertions.assertEquals(stored, fromJournal.getProperties());
+            Assertions.assertEquals(604800, ExtendedStatisticsSchedule.interval(fromJournal));
+        } finally {
+            followerMgr.replayRemoveAnalyzeJob(replayed);
+        }
+
+        UtFrameUtils.PseudoImage image = new UtFrameUtils.PseudoImage();
+        analyzeMgr.save(image.getImageWriter());
+        AnalyzeMgr restoredMgr = new AnalyzeMgr();
+        restoredMgr.load(image.getMetaBlockReader());
+        ExternalAnalyzeJob fromImage = (ExternalAnalyzeJob) restoredMgr.getAnalyzeJob(job.getId());
+        Assertions.assertEquals(StatsConstants.AnalyzeType.MCV, fromImage.getAnalyzeType());
+        Assertions.assertEquals(stored, fromImage.getProperties());
+        Assertions.assertEquals(604800, ExtendedStatisticsSchedule.interval(fromImage));
+        List<String> row = com.starrocks.sql.ast.ShowAnalyzeJobStmt.showAnalyzeJobs(connectContext, fromImage);
+        Assertions.assertEquals("MCV", row.get(5));
+        Assertions.assertEquals("{collect_interval_sec=604800}", row.get(7));
+    }
+
+    @Test
     public void testAnalyzeMgrHistogramStatsPersist() throws Exception {
         UtFrameUtils.PseudoJournalReplayer.resetFollowerJournalQueue();
         Table table =

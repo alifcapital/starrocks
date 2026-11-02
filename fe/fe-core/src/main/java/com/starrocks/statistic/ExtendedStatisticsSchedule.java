@@ -70,22 +70,30 @@ public final class ExtendedStatisticsSchedule {
     }
 
     public static void validateProperties(Map<String, String> properties, boolean mcv) {
-        Set<String> allowed = mcv ? Set.of(StatsConstants.PROP_COLLECT_INTERVAL_SEC_KEY,
+        // We want MCV and JOIN jobs to take the interval under the same name as other ANALYZE jobs, so new jobs
+        // are stored with that name only. Jobs already stored with collect_interval_sec keep their interval, see
+        // interval().
+        if (properties.containsKey(StatsConstants.PROP_COLLECT_INTERVAL_SEC_KEY)) {
+            throw new SemanticException("Property '%s' is not supported for MCV and JOIN analyze jobs, use '%s'",
+                    StatsConstants.PROP_COLLECT_INTERVAL_SEC_KEY, StatsConstants.STATISTIC_AUTO_COLLECT_INTERVAL);
+        }
+        Set<String> allowed = mcv ? Set.of(StatsConstants.STATISTIC_AUTO_COLLECT_INTERVAL,
                 StatsConstants.MCV_SIZE, StatsConstants.MCV_BUCKET_NUM)
-                : Set.of(StatsConstants.PROP_COLLECT_INTERVAL_SEC_KEY);
+                : Set.of(StatsConstants.STATISTIC_AUTO_COLLECT_INTERVAL);
         for (String key : properties.keySet()) {
             if (!allowed.contains(key)) {
                 throw new SemanticException("Unsupported scheduled statistics property: " + key);
             }
         }
-        if (properties.containsKey(StatsConstants.PROP_COLLECT_INTERVAL_SEC_KEY)) {
+        if (properties.containsKey(StatsConstants.STATISTIC_AUTO_COLLECT_INTERVAL)) {
             try {
-                long seconds = Long.parseLong(properties.get(StatsConstants.PROP_COLLECT_INTERVAL_SEC_KEY));
+                long seconds = Long.parseLong(properties.get(StatsConstants.STATISTIC_AUTO_COLLECT_INTERVAL));
                 if (seconds < 1 || seconds > 31536000) {
                     throw new NumberFormatException();
                 }
             } catch (NumberFormatException e) {
-                throw new SemanticException("collect_interval_sec must be between 1 and 31536000");
+                throw new SemanticException("%s must be between 1 and 31536000",
+                        StatsConstants.STATISTIC_AUTO_COLLECT_INTERVAL);
             }
         }
     }
@@ -133,9 +141,16 @@ public final class ExtendedStatisticsSchedule {
                 && new java.util.HashSet<>(left.getColumns()).equals(new java.util.HashSet<>(right.getColumns()));
     }
 
+    // The image and journal hold jobs created with collect_interval_sec, so we read it when the job has no
+    // statistic_auto_collect_interval. We do not rewrite their properties: an older FE reads only
+    // collect_interval_sec and would lose the interval of a rewritten job.
     static long interval(ExternalAnalyzeJob job) {
-        return Long.parseLong(job.getProperties().getOrDefault(StatsConstants.PROP_COLLECT_INTERVAL_SEC_KEY,
-                Long.toString(Config.statistic_auto_collect_large_table_interval)));
+        Map<String, String> properties = job.getProperties();
+        String seconds = properties.get(StatsConstants.STATISTIC_AUTO_COLLECT_INTERVAL);
+        if (seconds == null) {
+            seconds = properties.get(StatsConstants.PROP_COLLECT_INTERVAL_SEC_KEY);
+        }
+        return seconds == null ? Config.statistic_auto_collect_large_table_interval : Long.parseLong(seconds);
     }
 
     public static void run(ExternalAnalyzeJob job, ConnectContext context, StatisticExecutor executor, boolean immediate) {

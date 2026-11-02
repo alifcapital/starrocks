@@ -1368,6 +1368,21 @@ public class AnalyzeStmtTest {
     }
 
     @Test
+    public void testCreateMcvJobIntervalProperty() {
+        CreateAnalyzeJobStmt job = (CreateAnalyzeJobStmt) analyzeSuccess("create analyze full table hive0.tpch.customer "
+                + "mcv (c_name) properties ('statistic_auto_collect_interval' = '604800', 'mcv_size' = '64')");
+        Assertions.assertEquals(Map.of("statistic_auto_collect_interval", "604800", "mcv_size", "64"),
+                job.getProperties());
+        analyzeFail("create analyze full table hive0.tpch.customer mcv (c_name) "
+                        + "properties ('collect_interval_sec' = '604800')",
+                "Property 'collect_interval_sec' is not supported for MCV and JOIN analyze jobs, "
+                        + "use 'statistic_auto_collect_interval'");
+        analyzeFail("create analyze full table hive0.tpch.customer mcv (c_name) "
+                        + "properties ('statistic_auto_collect_interval' = '0')",
+                "statistic_auto_collect_interval must be between 1 and 31536000");
+    }
+
+    @Test
     public void testDropMcvExpressionStats() {
         String prefix = "expr:1:substr(`c_phone`, 1, 3)";
         AnalyzeMgr analyzeMgr = getConnectContext().getGlobalStateMgr().getAnalyzeMgr();

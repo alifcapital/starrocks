@@ -21,6 +21,7 @@ import com.starrocks.persist.WALApplier;
 import com.starrocks.persist.gson.GsonUtils;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.sql.analyzer.AnalyzeStmtAnalyzer;
 import com.starrocks.sql.analyzer.SemanticException;
 import com.starrocks.sql.ast.AnalyzeMcvDesc;
 import com.starrocks.sql.ast.CreateAnalyzeJobStmt;
@@ -67,8 +68,13 @@ class ExtendedStatisticsScheduleTest {
     }
 
     private static ExternalAnalyzeJob job(StatsConstants.AnalyzeType type, long id, List<String> columns) {
+        return job(type, id, columns, Map.of(StatsConstants.STATISTIC_AUTO_COLLECT_INTERVAL, "86400"));
+    }
+
+    private static ExternalAnalyzeJob job(StatsConstants.AnalyzeType type, long id, List<String> columns,
+                                          Map<String, String> properties) {
         var job = new ExternalAnalyzeJob("iceberg", "db", "transactions", columns, List.of(), type,
-                StatsConstants.ScheduleType.SCHEDULE, Map.of("collect_interval_sec", "86400"),
+                StatsConstants.ScheduleType.SCHEDULE, properties,
                 StatsConstants.ScheduleStatus.PENDING, LocalDateTime.MIN);
         job.setId(id);
         job.setTargetUuid("t-uuid");
@@ -81,13 +87,14 @@ class ExtendedStatisticsScheduleTest {
     @Test
     void parserDistinguishesRecurringMcvJoinAndExistingBasicJobs() {
         var mcv = (CreateAnalyzeJobStmt) SqlParser.parseSingleStatement(
-                "CREATE ANALYZE FULL TABLE ice.db.t MCV (status, gate) PROPERTIES ('collect_interval_sec'='86400')", 0);
+                "CREATE ANALYZE FULL TABLE ice.db.t MCV (status, gate) "
+                        + "PROPERTIES ('statistic_auto_collect_interval'='86400')", 0);
         assertInstanceOf(AnalyzeMcvDesc.class, mcv.getAnalyzeTypeDesc());
         assertEquals(StatsConstants.AnalyzeType.MCV, mcv.getAnalyzeType());
         assertEquals(2, mcv.getColumns().size());
         assertFalse(mcv.isSample());
         var join = (CreateAnalyzeJobStmt) SqlParser.parseSingleStatement(
-                "CREATE ANALYZE JOIN STATISTICS tu PROPERTIES ('collect_interval_sec'='3600')", 0);
+                "CREATE ANALYZE JOIN STATISTICS tu PROPERTIES ('statistic_auto_collect_interval'='3600')", 0);
         assertEquals("tu", join.getJoinStatisticsName());
         var basic = (CreateAnalyzeJobStmt) SqlParser.parseSingleStatement("CREATE ANALYZE FULL TABLE ice.db.t (id)", 0);
         assertEquals(StatsConstants.AnalyzeType.FULL, basic.getAnalyzeType());
@@ -97,14 +104,123 @@ class ExtendedStatisticsScheduleTest {
 
     @Test
     void propertiesRejectSilentNoopsAndInvalidIntervals() {
-        ExtendedStatisticsSchedule.validateProperties(Map.of("collect_interval_sec", "86400", "mcv_size", "128"), true);
-        for (String value : List.of("0", "-1", "1.5", "999999999999999999999")) {
-            assertThrows(SemanticException.class, () -> ExtendedStatisticsSchedule.validateProperties(
-                    Map.of("collect_interval_sec", value), true));
+        ExtendedStatisticsSchedule.validateProperties(
+                Map.of("statistic_auto_collect_interval", "86400", "mcv_size", "128"), true);
+        ExtendedStatisticsSchedule.validateProperties(Map.of("statistic_auto_collect_interval", "86400"), false);
+        for (String value : List.of("0", "-1", "1.5", "999999999999999999999", "31536001")) {
+            var error = assertThrows(SemanticException.class, () -> ExtendedStatisticsSchedule.validateProperties(
+                    Map.of("statistic_auto_collect_interval", value), true));
+            assertTrue(error.getMessage().contains("statistic_auto_collect_interval must be between"),
+                    error.getMessage());
+        }
+        for (boolean mcv : List.of(true, false)) {
+            var error = assertThrows(SemanticException.class, () -> ExtendedStatisticsSchedule.validateProperties(
+                    Map.of("collect_interval_sec", "604800"), mcv));
+            assertTrue(error.getMessage().contains("use 'statistic_auto_collect_interval'"), error.getMessage());
         }
         assertThrows(SemanticException.class,
                 () -> ExtendedStatisticsSchedule.validateProperties(Map.of("mcv_size", "100"), false));
         assertThrows(SemanticException.class, () -> ExtendedStatisticsSchedule.validateProperties(Map.of("bogus", "1"), true));
+    }
+
+    @Test
+    void intervalReadsStatisticAutoCollectIntervalAndJobsStoredWithCollectIntervalSec() {
+        assertEquals(3600, ExtendedStatisticsSchedule.interval(job(StatsConstants.AnalyzeType.MCV, 7, List.of("status"),
+                Map.of(StatsConstants.STATISTIC_AUTO_COLLECT_INTERVAL, "3600"))));
+        for (var type : List.of(StatsConstants.AnalyzeType.MCV, StatsConstants.AnalyzeType.JOIN)) {
+            // The image and journal hold jobs created with collect_interval_sec.
+            var stored = job(type, 8, List.of("status"), Map.of(StatsConstants.PROP_COLLECT_INTERVAL_SEC_KEY, "604800"));
+            var restored = assertInstanceOf(ExternalAnalyzeJob.class,
+                    GsonUtils.GSON.fromJson(GsonUtils.GSON.toJson(stored, AnalyzeJob.class), AnalyzeJob.class));
+            assertEquals(type, restored.getAnalyzeType());
+            assertEquals(604800, ExtendedStatisticsSchedule.interval(restored));
+            assertEquals(Map.of("collect_interval_sec", "604800"), restored.getProperties());
+        }
+        assertEquals(3600, ExtendedStatisticsSchedule.interval(job(StatsConstants.AnalyzeType.MCV, 9, List.of("status"),
+                Map.of(StatsConstants.STATISTIC_AUTO_COLLECT_INTERVAL, "3600",
+                        StatsConstants.PROP_COLLECT_INTERVAL_SEC_KEY, "604800"))));
+        assertEquals(Config.statistic_auto_collect_large_table_interval,
+                ExtendedStatisticsSchedule.interval(job(StatsConstants.AnalyzeType.MCV, 10, List.of("status"), Map.of())));
+    }
+
+    @Test
+    void joinJobDdlTakesStatisticAutoCollectIntervalAndRejectsCollectIntervalSec() {
+        // The parser needs the real global state, so parse before installing the fake one.
+        var statement = (CreateAnalyzeJobStmt) SqlParser.parseSingleStatement(
+                "CREATE ANALYZE JOIN STATISTICS tu PROPERTIES ('statistic_auto_collect_interval'='604800')", 0);
+        var old = (CreateAnalyzeJobStmt) SqlParser.parseSingleStatement(
+                "CREATE ANALYZE JOIN STATISTICS tu PROPERTIES ('collect_interval_sec'='604800')", 0);
+        var mgr = installState(mock(JoinStatisticsManager.class));
+        mgr.getJoinStatisticsRegistry().create(10, definition());
+        var table = mock(com.starrocks.catalog.Table.class);
+        when(table.getUUID()).thenReturn("t-uuid");
+        new MockUp<com.starrocks.sql.common.MetaUtils>() {
+            @Mock
+            public com.starrocks.catalog.Table getSessionAwareTable(ConnectContext context,
+                    com.starrocks.catalog.Database db, com.starrocks.catalog.TableName name) {
+                return table;
+            }
+        };
+        var context = mock(ConnectContext.class);
+        AnalyzeStmtAnalyzer.analyze(statement, context);
+        var created = ExtendedStatisticsSchedule.create(statement, context);
+        assertEquals(StatsConstants.AnalyzeType.JOIN, created.getAnalyzeType());
+        assertEquals(604800, ExtendedStatisticsSchedule.interval(created));
+
+        var error = assertThrows(SemanticException.class, () -> AnalyzeStmtAnalyzer.analyze(old, context));
+        assertTrue(error.getMessage().contains("use 'statistic_auto_collect_interval'"), error.getMessage());
+    }
+
+    @Test
+    void scheduledRunWaitsForTheIntervalOfStoredAndNewJobs() {
+        var mgr = installState(mock(JoinStatisticsManager.class));
+        var table = mock(com.starrocks.catalog.Table.class);
+        when(table.getUUID()).thenReturn("t-uuid");
+        when(table.getColumn("status")).thenReturn(new com.starrocks.catalog.Column(
+                "status", com.starrocks.type.VarcharType.VARCHAR));
+        new MockUp<com.starrocks.sql.common.MetaUtils>() {
+            @Mock
+            public com.starrocks.catalog.Table getSessionAwareTable(ConnectContext context,
+                    com.starrocks.catalog.Database db, com.starrocks.catalog.TableName name) {
+                return table;
+            }
+        };
+        var executor = mock(StatisticExecutor.class);
+        var collected = new AtomicInteger();
+        when(executor.collectStatistics(any(), any(), any(), eq(true), eq(true))).thenAnswer(call -> {
+            var status = (AnalyzeStatus) call.getArgument(2);
+            status.setStatus(StatsConstants.ScheduleStatus.FINISH);
+            collected.incrementAndGet();
+            return status;
+        });
+        // Two days must be past the default interval, so only the interval of the job keeps it waiting.
+        assertTrue(Config.statistic_auto_collect_large_table_interval < 2 * 86400);
+        boolean staggered = Config.enable_statistic_auto_collect_staggered_schedule;
+        boolean enabled = Config.enable_statistic_collect;
+        try {
+            Config.enable_statistic_auto_collect_staggered_schedule = false;
+            Config.enable_statistic_collect = true;
+            long id = 7;
+            for (String key : List.of(StatsConstants.PROP_COLLECT_INTERVAL_SEC_KEY,
+                    StatsConstants.STATISTIC_AUTO_COLLECT_INTERVAL)) {
+                var stored = job(StatsConstants.AnalyzeType.MCV, id++, List.of("status"), Map.of(key, "604800"));
+                var value = (ExternalAnalyzeJob) GsonUtils.GSON.fromJson(
+                        GsonUtils.GSON.toJson(stored, AnalyzeJob.class), AnalyzeJob.class);
+                mgr.replayAddAnalyzeJob(value);
+                int before = collected.get();
+                value.setWorkTime(AutoStatisticsSchedule.now().minusDays(2));
+                ExtendedStatisticsSchedule.run(value, mock(ConnectContext.class), executor, false);
+                assertEquals(before, collected.get(), key);
+                assertEquals(StatsConstants.ScheduleStatus.PENDING, value.getStatus(), key);
+                value.setWorkTime(AutoStatisticsSchedule.now().minusDays(8));
+                ExtendedStatisticsSchedule.run(value, mock(ConnectContext.class), executor, false);
+                assertEquals(before + 1, collected.get(), key);
+                assertEquals(StatsConstants.ScheduleStatus.FINISH, value.getStatus(), value.getReason());
+            }
+        } finally {
+            Config.enable_statistic_auto_collect_staggered_schedule = staggered;
+            Config.enable_statistic_collect = enabled;
+        }
     }
 
     @Test
