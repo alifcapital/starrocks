@@ -338,6 +338,46 @@ class ActiveIcebergCacheTest {
     }
 
     @Test
+    void tableReadForMetadataStaysCachedAndFreshWithoutWarmup() {
+        CachingIcebergCatalog catalog = catalog(true);
+        BaseTable oldTable = table("old", manifest("old-manifest"));
+        BaseTable newTable = table("new", 8L, manifest("new-manifest"));
+        Mockito.when(delegate.getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl"))).thenReturn(oldTable);
+        // The planner reads the base table of an MV it considers: metadata only, no scan.
+        ConnectContext query = new ConnectContext();
+        query.setCommand(MysqlCommand.COM_QUERY);
+        assertSame(oldTable, catalog.getTable(query, "db", "tbl"));
+        assertFalse(times(catalog, "tableLatestAccessTime").containsKey(key));
+        try (MockedStatic<IcebergMetadataRefreshFooterPrefetcher> prefetcher =
+                Mockito.mockStatic(IcebergMetadataRefreshFooterPrefetcher.class)) {
+            catalog.refreshCatalog();
+            assertSame(oldTable, tables(catalog).getIfPresent(key));
+            // A newer snapshot replaces the cached table once the metadata check is due.
+            Mockito.when(delegate.getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl"))).thenReturn(newTable);
+            times(catalog, "tableLatestRefreshTime").put(key, System.currentTimeMillis() - 301_000L);
+            catalog.refreshCatalog();
+            assertSame(newTable, tables(catalog).getIfPresent(key));
+            verifyFooterWarmups(prefetcher, 0);
+        }
+        Mockito.verify(delegate, Mockito.never()).getTableScan(Mockito.any(), Mockito.any());
+        // The next query finds the table in the cache.
+        assertSame(newTable, catalog.getTable(query, "db", "tbl"));
+        Mockito.verify(delegate, Mockito.times(3)).getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl"));
+    }
+
+    @Test
+    void tableNotReadWithinTableCacheTtlIsDropped() {
+        CachingIcebergCatalog catalog = catalog(true);
+        BaseTable table = table("unused", manifest("old"));
+        tables(catalog).put(key, table);
+        times(catalog, "tableLatestReadTime").put(key, System.currentTimeMillis() - 3_601_000L);
+        catalog.refreshCatalog();
+        assertFalse(tables(catalog).asMap().containsKey(key));
+        assertFalse(times(catalog, "tableLatestReadTime").containsKey(key));
+        Mockito.verifyNoInteractions(delegate);
+    }
+
+    @Test
     void emptySnapshotAndDisabledMetadataCacheDoNotPlanManifests() {
         CachingIcebergCatalog catalog = catalog(false);
         BaseTable table = table("unchanged");
@@ -364,9 +404,12 @@ class ActiveIcebergCacheTest {
                     .thenReturn(current);
             catalog.getTable(internal, "db", "tbl");
             assertTrue(times(catalog, "tableLatestAccessTime").isEmpty());
+            // Without a client command a lookup does not keep the table in use either.
+            assertTrue(times(catalog, "tableLatestReadTime").isEmpty());
             internal.setCommand(MysqlCommand.COM_QUERY);
             catalog.getTable(internal, "db", "tbl");
             assertTrue(times(catalog, "tableLatestAccessTime").isEmpty());
+            assertTrue(times(catalog, "tableLatestReadTime").containsKey(key));
             catalog.getTableScan(current, new StarRocksIcebergTableScanContext(
                     "test", "db", "tbl", com.starrocks.connector.PlanMode.LOCAL, internal));
             assertTrue(times(catalog, "tableLatestAccessTime").containsKey(key));

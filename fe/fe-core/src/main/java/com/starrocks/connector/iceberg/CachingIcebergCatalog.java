@@ -95,6 +95,8 @@ public class CachingIcebergCatalog implements IcebergCatalog {
     private final com.github.benmanes.caffeine.cache.Cache<String, Set<DeleteFile>> deleteFileCache;
     private final Map<IcebergTableName, Set<String>> metaFileCacheMap = new ConcurrentHashMap<>(); // table -> metadata file paths
     private final Map<IcebergTableName, Long> tableLatestAccessTime = new ConcurrentHashMap<>();
+    // When a client statement last read the table, by a scan or for metadata only (planning, MV validation).
+    private final Map<IcebergTableName, Long> tableLatestReadTime = new ConcurrentHashMap<>();
     private final Map<IcebergTableName, Long> tableLatestRefreshTime = new ConcurrentHashMap<>();
     // How many refreshes loaded the table metadata from the catalog, see refreshTableForRead.
     private final Map<IcebergTableName, Long> tableMetadataLoads = new ConcurrentHashMap<>();
@@ -283,6 +285,7 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         if (!cacheAllowed) {
             return delegate.getTable(connectContext, dbName, tableName);
         }
+        recordRead(connectContext, icebergTableName);
 
         Table cachedTable = tables.getIfPresent(icebergTableName);
         if (cachedTable != null) {
@@ -291,8 +294,8 @@ public class CachingIcebergCatalog implements IcebergCatalog {
 
         try {
             // Metadata-only callers (including MV validation) must share table cache misses too.
-            // They still do not mark the table active or populate file caches: recordScanAccess
-            // and getTableScan honor onlyReadIcebergCache independently.
+            // They keep the table cached (recordRead) but do not mark it active or populate file
+            // caches: recordScanAccess and getTableScan honor onlyReadIcebergCache independently.
             // Serialize a cache-miss load with refresh. A slow old load must not overwrite
             // a newer table published by refresh while that load was in flight.
             synchronized (tableRefreshLock(dbName, tableName)) {
@@ -716,9 +719,27 @@ public class CachingIcebergCatalog implements IcebergCatalog {
 
     // A table is active while a client query has scanned it within the table cache TTL.
     private boolean isActive(IcebergTableName key, long now) {
-        Long latestAccessTime = tableLatestAccessTime.get(key);
-        return latestAccessTime != null &&
-                (now - latestAccessTime) / 1000 <= icebergProperties.getIcebergTableCacheTtlSec();
+        return withinTableCacheTtl(tableLatestAccessTime.get(key), now);
+    }
+
+    // A table is in use while a client statement has read it within the table cache TTL, by a scan or for
+    // metadata only. The planner reads the base tables of every MV it considers for a query; we expect such
+    // tables to be needed again by the next query, so they stay cached and fresh, but they are not warmed.
+    private boolean isInUse(IcebergTableName key, long now) {
+        return isActive(key, now) || withinTableCacheTtl(tableLatestReadTime.get(key), now);
+    }
+
+    private boolean withinTableCacheTtl(Long time, long now) {
+        return time != null && (now - time) / 1000 <= icebergProperties.getIcebergTableCacheTtlSec();
+    }
+
+    // Only a client statement keeps a table in use. Background refresh, partition loading and statistics
+    // run with their own contexts and no client command, so they cannot keep an unused table cached forever.
+    private void recordRead(ConnectContext context, IcebergTableName key) {
+        if (context != null &&
+                (context.getCommand() == MysqlCommand.COM_QUERY || context.getCommand() == MysqlCommand.COM_STMT_EXECUTE)) {
+            tableLatestReadTime.put(key, System.currentTimeMillis());
+        }
     }
 
     // dispatched every background_refresh_metadata_interval_millis
@@ -728,8 +749,9 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         long now = System.currentTimeMillis();
         for (IcebergTableName identifier : identifiers) {
             try {
-                // drop entries that haven't been used within the table cache TTL window
-                if (!isActive(identifier, now)) {
+                // Drop entries that no client statement has read within the table cache TTL window. A table
+                // that is in use but not active stays cached: its metadata is checked below, it is not warmed.
+                if (!isInUse(identifier, now)) {
                     // Discovery has its own access lifetime; retiring a data scan must not evict it.
                     synchronized (tableRefreshLock(identifier.dbName, identifier.tableName)) {
                         invalidateCacheUnderLock(identifier, false);
@@ -859,6 +881,7 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         }
         invalidatePartitionCache(key.dbName, key.tableName);
         tableLatestAccessTime.remove(key);
+        tableLatestReadTime.remove(key);
         tableLatestRefreshTime.remove(key);
         tableLatestSnapshotTime.remove(key);
         // An INSERT that noted the count before sees it changed and takes the table from the cache. The cache has
@@ -884,7 +907,10 @@ public class CachingIcebergCatalog implements IcebergCatalog {
     public void recordScanAccess(ConnectContext context, String dbName, String tableName) {
         if (context != null && !shouldOnlyReadCache(context) &&
                 (context.getCommand() == MysqlCommand.COM_QUERY || context.getCommand() == MysqlCommand.COM_STMT_EXECUTE)) {
-            tableLatestAccessTime.put(new IcebergTableName(dbName, tableName), System.currentTimeMillis());
+            IcebergTableName key = new IcebergTableName(dbName, tableName);
+            long now = System.currentTimeMillis();
+            tableLatestAccessTime.put(key, now);
+            tableLatestReadTime.put(key, now);
         }
     }
 
@@ -1098,6 +1124,7 @@ public class CachingIcebergCatalog implements IcebergCatalog {
                 Estimator.estimate(partitionCache.asMap(), 10) +
                 Estimator.estimate(metaFileCacheMap, 10) +
                 Estimator.estimate(tableLatestAccessTime, 10) +
+                Estimator.estimate(tableLatestReadTime, 10) +
                 Estimator.estimate(tableLatestRefreshTime, 10) +
                 Estimator.estimate(tableMetadataLoads, 10) +
                 Estimator.estimate(tableRefreshLockMap, 10);
