@@ -17,6 +17,7 @@ package com.starrocks.sql.optimizer.rule.transformation.materialization;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
+import com.starrocks.catalog.BaseTableInfo;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.MaterializedView;
@@ -26,6 +27,7 @@ import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.Table;
 import com.starrocks.catalog.mv.MVPlanValidationResult;
 import com.starrocks.common.Pair;
+import com.starrocks.common.jmockit.Deencapsulation;
 import com.starrocks.common.util.concurrent.lock.LockType;
 import com.starrocks.common.util.concurrent.lock.Locker;
 import com.starrocks.server.GlobalStateMgr;
@@ -352,6 +354,34 @@ public class MvRewritePreprocessorTest extends MVTestBase {
         } catch (Exception e) {
             return null;
         }
+    }
+
+    // A base table that is not cached is loaded from the external catalog while the related MVs are checked.
+    // That wait must count as metadata wait, not as optimizer time, or a cold cache fails the query.
+    @Test
+    public void testChooseBestRelatedMVsCountsBaseTableLoadsAsMetadataWait() {
+        List<String> mvs = ImmutableList.of(
+                "create materialized view mv_wait distributed by random as select t1.k1, t1.v1, t1.v2, t0.v1 as v21 " +
+                        "from t1 join t0 on t1.k1=t0.v1;");
+        starRocksAssert.withMaterializedViews(mvs, (obj) -> {
+            new MockUp<MvUtils>() {
+                @Mock
+                public Table getTableChecked(Invocation inv, BaseTableInfo baseTableInfo) throws Exception {
+                    Thread.sleep(100);
+                    return inv.proceed();
+                }
+            };
+            Pair<MvRewritePreprocessor, OptExpression> result = buildMvProcessor("select k1, v1, v2 from t1");
+            MvRewritePreprocessor preprocessor = result.first;
+            OptExpression logicalTree = result.second;
+            OptimizerContext context = Deencapsulation.getField(preprocessor, "context");
+            Set<Table> queryTables = MvUtils.getAllTables(logicalTree).stream().collect(Collectors.toSet());
+            List<MaterializedViewWrapper> relatedMVs = preprocessor.getRelatedMVs(queryTables, false);
+            Assertions.assertTrue(containsMV(relatedMVs, "mv_wait"));
+            preprocessor.chooseBestRelatedMVs(queryTables, relatedMVs, logicalTree);
+            long waited = context.getMetadataWaitMillis();
+            Assertions.assertTrue(waited >= 100, "metadata wait " + waited);
+        });
     }
 
     // test without max related mvs limit

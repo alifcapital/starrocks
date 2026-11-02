@@ -623,10 +623,16 @@ public class MvRewritePreprocessor {
         int maxRelatedMVsLimit = connectContext.getSessionVariable().getCboMaterializedViewRewriteRelatedMVsLimit();
         long timeoutMs = getPrepareTimeoutMsPerMV(connectContext, Math.min(relatedMVs.size(), maxRelatedMVsLimit));
         // to make unit test more stable, force build mv plan in unit test
-        Set<MaterializedViewWrapper> validMVs = relatedMVs.stream()
-                .filter(wrapper -> isMVValidToRewriteQuery(connectContext, wrapper.getMV(),
-                        queryTables, isForceLoadMVPlan(wrapper.getMV()), false, timeoutMs).isValid())
-                .collect(Collectors.toSet());
+        // The check loads the base tables of every related MV, and a table that is not cached is a round trip
+        // to the external catalog and object storage. We want the optimizer budget to measure planning, not that
+        // wait, as it does for the tables of the query itself, so the check runs as a metadata wait.
+        Set<MaterializedViewWrapper> validMVs;
+        try (OptimizerContext.MetadataWait ignored = context == null ? null : context.waitForMetadata()) {
+            validMVs = relatedMVs.stream()
+                    .filter(wrapper -> isMVValidToRewriteQuery(connectContext, wrapper.getMV(),
+                            queryTables, isForceLoadMVPlan(wrapper.getMV()), false, timeoutMs).isValid())
+                    .collect(Collectors.toSet());
+        }
         logMVPrepare(connectContext, "Choose {}/{} valid mvs after checking valid",
                 validMVs.size(), relatedMVs.size());
 
