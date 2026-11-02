@@ -81,5 +81,9 @@ public class RangerResourceTest {
         starRocksResource = RangerStarRocksResource.builder().setStorageVolume("sv1").build();
         Assertions.assertEquals("[storage_volume]", starRocksResource.getKeys().toString());
         Assertions.assertEquals("sv1", starRocksResource.getValue("storage_volume"));
+
+        starRocksResource = RangerStarRocksResource.builder().setWarehouse("wh1").build();
+        Assertions.assertEquals("[warehouse]", starRocksResource.getKeys().toString());
+        Assertions.assertEquals("wh1", starRocksResource.getValue("warehouse"));
     }
 }
