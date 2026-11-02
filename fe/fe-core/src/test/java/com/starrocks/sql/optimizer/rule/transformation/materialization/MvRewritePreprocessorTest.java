@@ -358,11 +358,22 @@ public class MvRewritePreprocessorTest extends MVTestBase {
 
     // A base table that is not cached is loaded from the external catalog while the related MVs are checked.
     // That wait must count as metadata wait, not as optimizer time, or a cold cache fails the query.
+    private static void createUkFkTables() throws Exception {
+        starRocksAssert.withTable("CREATE TABLE IF NOT EXISTS uk_parent (k1 int NOT NULL, v1 int) " +
+                "DUPLICATE KEY(k1) DISTRIBUTED BY HASH(k1) BUCKETS 1 " +
+                "PROPERTIES ('replication_num' = '1', 'unique_constraints' = 'k1')");
+        starRocksAssert.withTable("CREATE TABLE IF NOT EXISTS fk_child (k1 int NOT NULL, v1 int) " +
+                "DUPLICATE KEY(k1) DISTRIBUTED BY HASH(k1) BUCKETS 1 " +
+                "PROPERTIES ('replication_num' = '1', 'foreign_key_constraints' = '(k1) REFERENCES uk_parent(k1)')");
+    }
+
     @Test
-    public void testChooseBestRelatedMVsCountsBaseTableLoadsAsMetadataWait() {
+    public void testChooseBestRelatedMVsCountsBaseTableLoadsAsMetadataWait() throws Exception {
+        // The query table has a foreign key, so the extra table check loads the mv base tables.
+        createUkFkTables();
         List<String> mvs = ImmutableList.of(
-                "create materialized view mv_wait distributed by random as select t1.k1, t1.v1, t1.v2, t0.v1 as v21 " +
-                        "from t1 join t0 on t1.k1=t0.v1;");
+                "create materialized view mv_wait distributed by random as select c.k1, c.v1, p.v1 as pv1 " +
+                        "from fk_child c join uk_parent p on c.k1 = p.k1;");
         starRocksAssert.withMaterializedViews(mvs, (obj) -> {
             new MockUp<MvUtils>() {
                 @Mock
@@ -371,7 +382,7 @@ public class MvRewritePreprocessorTest extends MVTestBase {
                     return inv.proceed();
                 }
             };
-            Pair<MvRewritePreprocessor, OptExpression> result = buildMvProcessor("select k1, v1, v2 from t1");
+            Pair<MvRewritePreprocessor, OptExpression> result = buildMvProcessor("select k1, v1 from fk_child");
             MvRewritePreprocessor preprocessor = result.first;
             OptExpression logicalTree = result.second;
             OptimizerContext context = Deencapsulation.getField(preprocessor, "context");
@@ -381,6 +392,55 @@ public class MvRewritePreprocessorTest extends MVTestBase {
             preprocessor.chooseBestRelatedMVs(queryTables, relatedMVs, logicalTree);
             long waited = context.getMetadataWaitMillis();
             Assertions.assertTrue(waited >= 100, "metadata wait " + waited);
+        });
+    }
+
+    @Test
+    public void testExtraTableWithoutQueryForeignKeyExcludesMVWithoutLoading() throws Exception {
+        // uk_parent has a unique constraint, but t1 has no foreign key to it, so the mv cannot drop uk_parent.
+        createUkFkTables();
+        List<String> mvs = ImmutableList.of(
+                "create materialized view mv_extra_uk distributed by random as select t1.k1, t1.v1, p.v1 as pv1 " +
+                        "from t1 join uk_parent p on t1.k1 = p.k1;");
+        starRocksAssert.withMaterializedViews(mvs, (obj) -> {
+            // The mv plan cache loads the base tables in its own thread, so we only count loads of the query thread.
+            Thread queryThread = Thread.currentThread();
+            List<String> loadedTables = Lists.newCopyOnWriteArrayList();
+            new MockUp<MvUtils>() {
+                @Mock
+                public Table getTableChecked(Invocation inv, BaseTableInfo baseTableInfo) throws Exception {
+                    if (Thread.currentThread() == queryThread) {
+                        loadedTables.add(baseTableInfo.getTableName());
+                    }
+                    return inv.proceed();
+                }
+            };
+            Pair<MvRewritePreprocessor, OptExpression> result = buildMvProcessor("select k1, v1 from t1");
+            MvRewritePreprocessor preprocessor = result.first;
+            OptExpression logicalTree = result.second;
+            Set<Table> queryTables = MvUtils.getAllTables(logicalTree).stream().collect(Collectors.toSet());
+            List<MaterializedViewWrapper> relatedMVs = preprocessor.getRelatedMVs(queryTables, false);
+            Assertions.assertTrue(containsMV(relatedMVs, "mv_extra_uk"));
+            List<MaterializedViewWrapper> validMVs =
+                    preprocessor.chooseBestRelatedMVs(queryTables, relatedMVs, logicalTree);
+            Assertions.assertFalse(containsMV(validMVs, "mv_extra_uk"));
+            Assertions.assertFalse(loadedTables.contains("uk_parent"), "loaded " + loadedTables);
+        });
+    }
+
+    @Test
+    public void testBaseMVIsNotExtraTableWithoutQueryForeignKey() {
+        List<String> mvs = ImmutableList.of(
+                "create materialized view mv_level1 distributed by random as select k1, v1, v2 from t1;",
+                "create materialized view mv_level2 distributed by random as select k1, v1 from mv_level1;");
+        starRocksAssert.withMaterializedViews(mvs, (obj) -> {
+            Pair<MvRewritePreprocessor, OptExpression> result = buildMvProcessor("select k1, v1 from t1");
+            OptExpression logicalTree = result.second;
+            Set<Table> queryTables = MvUtils.getAllTables(logicalTree).stream().collect(Collectors.toSet());
+            MaterializedView mv = getMv(DB_NAME, "mv_level2");
+            MVPlanValidationResult validation = MvRewritePreprocessor.isMVValidToRewriteQuery(
+                    connectContext, mv, queryTables, true, false, 3000);
+            Assertions.assertTrue(validation.isValid(), validation.toString());
         });
     }
 

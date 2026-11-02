@@ -901,6 +901,27 @@ public class MvRewriteHiveTest extends MVTestBase {
     }
 
     @Test
+    public void testHiveViewBaseExcludesMVWithoutExternalViewBaseCheck() throws Exception {
+        // The query table has no foreign key and the mv reads a hive view, so without the check the view counts
+        // as an extra table and the mv is excluded.
+        starRocksAssert.withMaterializedView("CREATE MATERIALIZED VIEW `test_mv1`\n" +
+                "REFRESH DEFERRED MANUAL\n" +
+                "PROPERTIES (\n" +
+                "\"replication_num\" = \"1\"\n" +
+                ")\n" +
+                "AS select * from hive0.tpch.customer_view;");
+        refreshMaterializedView("test", "test_mv1");
+        String query = "select * from hive0.tpch.customer_view limit 1;";
+        connectContext.getSessionVariable().setEnableMaterializedViewExternalViewBaseCheck(false);
+        try {
+            PlanTestBase.assertNotContains(getFragmentPlan(query), "test_mv1");
+        } finally {
+            connectContext.getSessionVariable().setEnableMaterializedViewExternalViewBaseCheck(true);
+        }
+        PlanTestBase.assertContains(getFragmentPlan(query), "test_mv1");
+    }
+
+    @Test
     public void testRewriteWithHiveView2() throws Exception {
         // view contains non spjg operators, only can be rewritten by view-rewrite
         starRocksAssert.withView("CREATE VIEW `customer_view1` AS\n" +

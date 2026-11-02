@@ -918,6 +918,8 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     public static final String ENABLE_MATERIALIZED_VIEW_VIEW_DELTA_REWRITE =
             "enable_materialized_view_view_delta_rewrite";
+    public static final String ENABLE_MATERIALIZED_VIEW_EXTERNAL_VIEW_BASE_CHECK =
+            "enable_materialized_view_external_view_base_check";
     public static final String ENABLE_MATERIALIZED_VIEW_MULTI_STAGES_REWRITE =
             "enable_materialized_view_multi_stages_rewrite";
     public static final String MATERIALIZED_VIEW_MAX_RELATION_MAPPING_SIZE =
@@ -3002,6 +3004,12 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     @VarAttr(name = ENABLE_MATERIALIZED_VIEW_VIEW_DELTA_REWRITE)
     private boolean enableMaterializedViewViewDeltaRewrite = true;
+
+    // When no query table has a foreign key, an external mv base table that the query does not read excludes
+    // the mv. If enabled, we load that base table to learn whether it is a view, and a view does not exclude
+    // the mv. If disabled, we exclude the mv without loading, because loading reads remote metadata.
+    @VarAttr(name = ENABLE_MATERIALIZED_VIEW_EXTERNAL_VIEW_BASE_CHECK)
+    private boolean enableMaterializedViewExternalViewBaseCheck = true;
 
     @VarAttr(name = ENABLE_MATERIALIZED_VIEW_MULTI_STAGES_REWRITE)
     private boolean enableMaterializedViewMultiStagesRewrite = true;
@@ -5626,6 +5634,14 @@ public class SessionVariable implements Serializable, Writable, Cloneable {
 
     public void setEnableMaterializedViewViewDeltaRewrite(boolean enableMaterializedViewViewDeltaRewrite) {
         this.enableMaterializedViewViewDeltaRewrite = enableMaterializedViewViewDeltaRewrite;
+    }
+
+    public boolean isEnableMaterializedViewExternalViewBaseCheck() {
+        return enableMaterializedViewExternalViewBaseCheck;
+    }
+
+    public void setEnableMaterializedViewExternalViewBaseCheck(boolean enableMaterializedViewExternalViewBaseCheck) {
+        this.enableMaterializedViewExternalViewBaseCheck = enableMaterializedViewExternalViewBaseCheck;
     }
 
     public boolean isEnableMaterializedViewMultiStagesRewrite() {

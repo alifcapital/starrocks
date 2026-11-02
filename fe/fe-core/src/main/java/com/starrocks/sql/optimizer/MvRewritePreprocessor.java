@@ -481,11 +481,46 @@ public class MvRewritePreprocessor {
         return mvWithPlanContexts;
     }
 
+    // A view or mv base table is not an extra table. An internal base table is read from memory. An external
+    // base table is loaded only when loadExternal is set; otherwise it counts as an extra table.
+    private static boolean isNotExtraBaseTable(BaseTableInfo baseTableInfo, Set<Table> queryTables,
+                                               boolean loadExternal) {
+        if (baseTableInfo.isInternalCatalog()) {
+            Table table = GlobalStateMgr.getCurrentState().getLocalMetastore()
+                    .getTable(baseTableInfo.getDbId(), baseTableInfo.getTableId());
+            return table != null && (table.isView() || table.isMaterializedView());
+        }
+        if (!loadExternal) {
+            return false;
+        }
+        Table table = MvUtils.getTableChecked(baseTableInfo);
+        return table.isView() || table.isMaterializedView() || queryTables.contains(table);
+    }
+
     private static boolean canMVRewriteIfMVHasExtraTables(ConnectContext connectContext,
                                                           MaterializedView mv,
                                                           Set<Table> queryTables) {
         // 1. when mv has foreign key constraints, it's ok whether query has extra tables or mv has extra tables.
         if (mv.hasForeignKeyConstraints()) {
+            return true;
+        }
+        // View delta rewrite drops an extra mv table only when a foreign key chain reaches it from a query
+        // table. When no query table has a foreign key, an mv base table that the query does not read makes
+        // the mv unusable. We match the base tables by name and stop at the first extra one, because loading an
+        // external table reads remote metadata.
+        if (queryTables.stream().noneMatch(Table::hasForeignKeyConstraints)) {
+            boolean loadExternal = connectContext == null ||
+                    connectContext.getSessionVariable().isEnableMaterializedViewExternalViewBaseCheck();
+            Optional<BaseTableInfo> extraTableInfo = mv.getBaseTableInfos().stream()
+                    .filter(info -> queryTables.stream().noneMatch(info::matchTable))
+                    .filter(info -> !isNotExtraBaseTable(info, queryTables, loadExternal))
+                    .findFirst();
+            if (extraTableInfo.isPresent()) {
+                logMVPrepare(connectContext, mv, "Exclude mv {} because it contains extra base table {} " +
+                        "and no query table has foreign key constraints", mv.getName(),
+                        extraTableInfo.get().getReadableString());
+                return false;
+            }
             return true;
         }
         Set<Table> baseTables = mv.getBaseTableInfos().stream().map(x -> MvUtils.getTableChecked(x))
