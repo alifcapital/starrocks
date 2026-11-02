@@ -959,7 +959,7 @@ public class Table extends MetaObject implements Writable, GsonPostProcessable, 
 
     public boolean hasUniqueConstraints() {
         List<UniqueConstraint> uniqueConstraint = getUniqueConstraints();
-        return uniqueConstraint != null;
+        return uniqueConstraint != null && !uniqueConstraint.isEmpty();
     }
 
     public void setUniqueConstraints(List<UniqueConstraint> uniqueConstraints) {

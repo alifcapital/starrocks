@@ -392,6 +392,26 @@ public class IcebergMetadataTest extends TableTestBase {
         metadata.updateTableProperty(new Database(0, "db"), table);
         Assertions.assertTrue(table.getUniqueConstraints().isEmpty());
         Assertions.assertTrue(table.getForeignKeyConstraints().isEmpty());
+        Assertions.assertFalse(table.hasUniqueConstraints());
+        Assertions.assertFalse(table.hasForeignKeyConstraints());
+    }
+
+    @Test
+    public void testUpdateTablePropertyWithoutConstraintsHasNoConstraints(
+            @Mocked org.apache.iceberg.Table nativeTable) {
+        new Expectations() {
+            {
+                nativeTable.properties();
+                result = ImmutableMap.of();
+                minTimes = 0;
+            }
+        };
+        IcebergMetadata metadata = new IcebergMetadata(CATALOG_NAME, HDFS_ENVIRONMENT, null,
+                Executors.newSingleThreadExecutor(), null);
+        IcebergTable table = constraintTestTable(nativeTable);
+        metadata.updateTableProperty(new Database(0, "db"), table);
+        Assertions.assertFalse(table.hasUniqueConstraints());
+        Assertions.assertFalse(table.hasForeignKeyConstraints());
     }
 
     @Test
@@ -409,6 +429,7 @@ public class IcebergMetadataTest extends TableTestBase {
                 Executors.newSingleThreadExecutor(), null);
         IcebergTable table = constraintTestTable(nativeTable);
         metadata.updateTableProperty(new Database(0, "db"), table);
+        Assertions.assertTrue(table.hasUniqueConstraints());
         Assertions.assertEquals(1, table.getUniqueConstraints().size());
         Assertions.assertEquals("id", table.getUniqueConstraints().get(0).getUniqueColumnNames(table).get(0));
         Assertions.assertTrue(table.getForeignKeyConstraints().isEmpty());
