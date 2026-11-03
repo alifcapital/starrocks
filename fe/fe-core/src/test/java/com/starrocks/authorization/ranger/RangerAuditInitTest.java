@@ -124,6 +124,19 @@ public class RangerAuditInitTest {
     }
 
     @Test
+    public void testStarRocksSolrAuditDestinationInitializes() {
+        // conf/ranger/ranger-starrocks-audit.xml points the solr destination at our class by classname.
+        AuditConfiguredController.create(Map.of(
+                "xasecure.audit.destination.solr", "true",
+                "xasecure.audit.destination.solr.classname", RangerSolrAuditDestination.class.getName(),
+                "xasecure.audit.destination.solr.urls", "http://127.0.0.1:1/solr/ranger_audits",
+                "xasecure.audit.destination.solr.user", "ranger_audit",
+                "xasecure.audit.destination.solr.password", "secret1"));
+        Assertions.assertFalse(RangerAccessController.isAuditInitFailed());
+        Assertions.assertFalse(AuditProviderFactory.getInstance().getAuditProvider() instanceof DummyAuditProvider);
+    }
+
+    @Test
     public void testFileAuditDestinationIsShipped(@TempDir Path dir) {
         // The docs offer the file destination besides Solr. It has only the v3 keys and lives in
         // ranger-audit-core, so it needs neither solrj nor jetty.

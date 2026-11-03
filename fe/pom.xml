@@ -1712,9 +1712,13 @@ under the License.
                  transitive deps (netty/zookeeper/woodstox/jetty) are already excluded upstream in
                  the dest-solr pom, EXCEPT jetty-client which dest-solr declares directly - it
                  resolves to the banned 9.4.58 (see the ban-vulnerable-dependencies enforcer rule
-                 below: jetty-client/security/http are CVE-2026-10050 / CVE-2026-2332). Solr audit
-                 uses the Apache HttpClient path (HttpClientUtil / LBHttpSolrClient), not the Jetty
-                 HTTP/2 client, so excluding all of org.eclipse.jetty is runtime-safe. -->
+                 below: jetty-client/security/http are CVE-2026-10050 / CVE-2026-2332), so all of
+                 org.eclipse.jetty is excluded. Without jetty-client, Ranger's SolrAuditDestination
+                 initializes but cannot connect: it builds every client through solrj's
+                 Krb5HttpClientBuilder, which links jetty-client. To send audit to Solr, set
+                 xasecure.audit.destination.solr.classname to
+                 com.starrocks.authorization.ranger.RangerSolrAuditDestination, which uses only the
+                 Apache HttpClient path of solrj and can log in to Solr. -->
             <dependency>
                 <groupId>org.apache.ranger</groupId>
                 <artifactId>ranger-audit-dest-solr</artifactId>
