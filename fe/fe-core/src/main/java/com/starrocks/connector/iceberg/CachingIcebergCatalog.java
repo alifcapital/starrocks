@@ -80,6 +80,9 @@ public class CachingIcebergCatalog implements IcebergCatalog {
     // REST tables embed short-lived vended credentials (~1h) in their FileIO; cap the table-cache TTL so an
     // idle entry can't outlive its token. Provider-agnostic: bounds cache lifetime, no per-cloud expiry parse.
     private static final long REST_TABLE_CACHE_MAX_TTL_SEC = 3000;
+    // The (package-private) class of an avro record schema, for leaving shared avro schemas out of weights.
+    private static final Set<Class<?>> AVRO_RECORD_SCHEMA = Set.of(org.apache.avro.Schema.createRecord(
+            "r", null, null, false, Collections.emptyList()).getClass());
     private final String catalogName;
     private final IcebergCatalog delegate;
     private final com.github.benmanes.caffeine.cache.Cache<IcebergTableName, Table> tables;
@@ -1049,13 +1052,46 @@ public class CachingIcebergCatalog implements IcebergCatalog {
     // The snapshots supplier of a lazily loaded REST table is a lambda, and the estimator counts a lambda as
     // its shallow size without walking the catalog client it captures.
     private int weighTableEntry(IcebergTableName key, Table table) {
-        TableMetadata metadata = ((BaseTable) table).operations().current();
-        long size = Estimator.estimate(key) + Estimator.estimate(metadata);
+        long size = Estimator.estimate(key) + weighPrivateTableState(table);
         if (size > Integer.MAX_VALUE) {
             LOG.warn("Table cache entry size for key {} is too large: {} bytes", key, size);
             return Integer.MAX_VALUE;
         }
         return (int) size;
+    }
+
+    // Charge an entry only for the metadata it exclusively owns, which is what evicting it actually
+    // frees. Walking the whole table instead reaches the TableOperations, and from there the objects
+    // the catalog shares across all of its tables -- the Hadoop configuration, the metastore client
+    // pool, the FileIO, the metrics reporter. Those exist once per catalog, so charging them to every
+    // entry makes the ledger grow with the entry count while the heap does not: the cache then
+    // declares itself full while holding a fraction of maximumWeight and evicts continuously.
+    private long weighPrivateTableState(Table table) {
+        if (table == null) {
+            return 0;
+        }
+        if (table instanceof BaseTable) {
+            TableOperations ops = ((BaseTable) table).operations();
+            TableMetadata metadata = ops != null ? ops.current() : null;
+            if (metadata != null) {
+                // The current snapshot caches its manifest list once the table is planned. When it is the newest
+                // snapshot it is the last element of metadata.snapshots(), which the sampled walk of that list does
+                // not reach, so charge it first to count its manifests in full. Otherwise (a rollback, or a newer
+                // commit on a branch) it may sit on a sampled position, where charging it first would make the
+                // sample extrapolate its zero; leave it to the walk then. A v1 table has no sequence numbers to
+                // tell. Every manifest of every table points to the same avro schema of the manifest list, which
+                // no entry owns.
+                Snapshot current = metadata.currentSnapshot();
+                if (current != null && metadata.formatVersion() >= 2 &&
+                        current.sequenceNumber() == metadata.lastSequenceNumber()) {
+                    return Estimator.estimateAll(AVRO_RECORD_SCHEMA, current, metadata);
+                }
+                return Estimator.estimateAll(AVRO_RECORD_SCHEMA, metadata);
+            }
+        }
+        // Nothing we can attribute to this entry alone; charge its own footprint rather than a whole
+        // shared object graph. Deliberately never throws: the weigher runs on Caffeine's write path.
+        return Estimator.shallow(table);
     }
 
     // Each entry holds a whole table's partition map, which is unbounded in bytes (a table can have
@@ -1109,19 +1145,18 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         return counter;
     }
 
+    // The weighted caches report their weigher ledger, so sys.fe_memory_usage shows what eviction is bounded by.
+    // We fear that walking the cached tables reads objects that other threads change (it throws
+    // ConcurrentModificationException), so the tables are not walked again here either. The manifest lists that
+    // reads load after the last put of a table count only from the next put of that table.
     @Override
     public long estimateSize() {
-        // We fear that walking the cached tables reads objects that other threads change (it throws
-        // ConcurrentModificationException) and charges objects that many tables share to each table. So we take
-        // the sum of the cache weights, which does not walk a table. The manifest lists that reads load after
-        // the last put of a table count only from the next put of that table.
-        long tablesSize = tables.policy().eviction().orElseThrow().weightedSize().orElse(0);
         return Estimator.estimate(discoverySchemas.asMap(), 10) +
-                tablesSize +
+                weightedSize(tables) +
+                weightedSize(partitionCache) +
+                weightedSize(dataFileCache) +
+                weightedSize(deleteFileCache) +
                 Estimator.estimate(databases.asMap(), 10) +
-                estimateDataFileCacheSize() +
-                estimateDeleteFileCacheSize() +
-                Estimator.estimate(partitionCache.asMap(), 10) +
                 Estimator.estimate(metaFileCacheMap, 10) +
                 Estimator.estimate(tableLatestAccessTime, 10) +
                 Estimator.estimate(tableLatestReadTime, 10) +
@@ -1130,22 +1165,10 @@ public class CachingIcebergCatalog implements IcebergCatalog {
                 Estimator.estimate(tableRefreshLockMap, 10);
     }
 
-    private long estimateDataFileCacheSize() {
-        int cnt = dataFileCache.asMap().size();
-        long size = Estimator.estimate(dataFileCache.asMap().keySet(), cnt);
-        for (Set<DataFile> files : dataFileCache.asMap().values()) {
-            size += estimateContentFilesSize(files);
-        }
-        return size;
-    }
-
-    private long estimateDeleteFileCacheSize() {
-        int cnt = deleteFileCache.asMap().size();
-        long size = Estimator.estimate(deleteFileCache.asMap().keySet(), cnt);
-        for (Set<DeleteFile> files : deleteFileCache.asMap().values()) {
-            size += estimateContentFilesSize(files);
-        }
-        return size;
+    private static long weightedSize(com.github.benmanes.caffeine.cache.Cache<?, ?> cache) {
+        // Weights are applied by Caffeine's maintenance, which may still be queued on the executor.
+        cache.cleanUp();
+        return cache.policy().eviction().map(e -> e.weightedSize().orElse(0L)).orElse(0L);
     }
 
     private long countSnapshotsSafe(Table table) {
