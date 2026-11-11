@@ -33,6 +33,8 @@ import com.starrocks.common.util.ProfilingExecPlan;
 import com.starrocks.common.util.RuntimeProfile;
 import com.starrocks.common.util.UUIDUtil;
 import com.starrocks.connector.exception.GlobalDictNotMatchException;
+import com.starrocks.metric.LongCounterMetric;
+import com.starrocks.metric.Metric.MetricUnit;
 import com.starrocks.metric.MetricRepo;
 import com.starrocks.metric.WarehouseMetricMgr;
 import com.starrocks.mysql.MysqlChannel;
@@ -175,6 +177,59 @@ public class StmtExecutorTest {
                 org.mockito.Mockito.mock(com.starrocks.qe.scheduler.Coordinator.class);
         running.setCoordinator(untouched);
         org.mockito.Mockito.verify(untouched, org.mockito.Mockito.never()).cancel(org.mockito.ArgumentMatchers.anyString());
+    }
+
+    // INSERT INTO BLACKHOLE() (the plan of CACHE SELECT) and INSERT INTO FILES() name a placeholder target that no
+    // catalog resolves, so the executor must not look up its database: the lookup only logs an error.
+    @Test
+    public void testPlaceholderTargetDatabaseIsNotLookedUp() throws Exception {
+        List<String> lookedUp = Lists.newArrayList();
+        new MockUp<MetadataMgr>() {
+            @Mock
+            public Database getDb(ConnectContext context, String catalogName, String dbName) {
+                lookedUp.add(dbName);
+                throw new IllegalStateException("database looked up");
+            }
+        };
+        new MockUp<DefaultCoordinator.Factory>() {
+            @Mock
+            public DefaultCoordinator createInsertScheduler(ConnectContext context, List<PlanFragment> fragments,
+                                                            List<ScanNode> scanNodes, TDescriptorTable descTable,
+                                                            ExecPlan execPlan) {
+                throw new IllegalStateException("coordinator reached");
+            }
+        };
+        if (MetricRepo.COUNTER_LOAD_ADD == null) {
+            MetricRepo.COUNTER_LOAD_ADD = new LongCounterMetric("load_add", MetricUnit.REQUESTS, "total load submit");
+        }
+
+        String[] placeholderTargets = {
+                "INSERT INTO BLACKHOLE() SELECT 1",
+                "INSERT INTO FILES(\"path\"=\"s3://bucket/dir/\", \"format\"=\"parquet\") SELECT 1"};
+        for (String sql : placeholderTargets) {
+            InsertStmt stmt = (InsertStmt) SqlParser.parseSingleStatement(sql, SqlModeHelper.MODE_DEFAULT);
+            Table target = org.mockito.Mockito.mock(Table.class);
+            org.mockito.Mockito.when(target.isBlackHoleTable()).thenReturn(stmt.useBlackHoleTableAsTargetTable());
+            org.mockito.Mockito.when(target.isTableFunctionTable()).thenReturn(stmt.useTableFunctionAsTargetTable());
+            stmt.setTargetTable(target);
+            ConnectContext ctx = UtFrameUtils.createDefaultCtx();
+            ctx.setExecutionId(UUIDUtil.toTUniqueId(UUID.randomUUID()));
+            StmtExecutor executor = new StmtExecutor(ctx, stmt);
+            // The statement runs on to its coordinator, past the place where a target database is looked up.
+            StarRocksException e = Assertions.assertThrows(StarRocksException.class,
+                    () -> executor.handleDMLStmt(buildMinimalExecPlan(1), stmt), sql);
+            Assertions.assertEquals("coordinator reached", e.getMessage(), sql);
+            Assertions.assertEquals(List.of(), lookedUp, sql);
+        }
+
+        // An INSERT into a table looks its database up.
+        InsertStmt stmt = (InsertStmt) SqlParser.parseSingleStatement("INSERT INTO db1.t1 SELECT 1",
+                SqlModeHelper.MODE_DEFAULT);
+        ConnectContext ctx = UtFrameUtils.createDefaultCtx();
+        ctx.setExecutionId(UUIDUtil.toTUniqueId(UUID.randomUUID()));
+        StmtExecutor executor = new StmtExecutor(ctx, stmt);
+        Assertions.assertThrows(IllegalStateException.class, () -> executor.handleDMLStmt(buildMinimalExecPlan(1), stmt));
+        Assertions.assertEquals(List.of("db1"), lookedUp);
     }
 
     @Test

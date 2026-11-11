@@ -221,9 +221,8 @@ public final class InsertPreSplitHook {
      * rest bought nothing.
      */
     private static boolean passesCommonPreFilters(InsertStmt insertStmt, ConnectContext context) {
-        // INSERT INTO BLACKHOLE() (the plan of CACHE SELECT) and INSERT INTO FILES() write no table, so there are no
-        // tablets to split, and their target name is a placeholder that no catalog resolves.
-        if (insertStmt.useBlackHoleTableAsTargetTable() || insertStmt.useTableFunctionAsTargetTable()) {
+        // An INSERT without a target table has no tablets to split.
+        if (insertStmt.hasPlaceholderTarget()) {
             return false;
         }
         // An explicit target column list is validated after target resolution:

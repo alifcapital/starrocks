@@ -329,7 +329,8 @@ public class AuthorizerStmtVisitor implements AstVisitorExtendInterface<Void, Co
     @Override
     public Void visitInsertStatement(InsertStmt statement, ConnectContext context) {
         // For table just created by CTAS statement, we ignore the check of 'INSERT' privilege on it.
-        if (!statement.isForCTAS()) {
+        // A placeholder target is no object that a privilege can be granted on, so only the query is checked.
+        if (!statement.isForCTAS() && !statement.hasPlaceholderTarget()) {
             TableRef tableRef = statement.getTableRef();
             if (tableRef == null) {
                 throw new SemanticException("Table ref is null");

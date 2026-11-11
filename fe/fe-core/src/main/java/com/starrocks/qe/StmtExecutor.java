@@ -3531,7 +3531,9 @@ public class StmtExecutor {
         String catalogName = tableRef.getCatalogName();
         String dbName = tableRef.getDbName();
         String tableName = tableRef.getTableName();
-        Database database = GlobalStateMgr.getCurrentState().getMetadataMgr().getDb(context, catalogName, dbName);
+        // The database serves only a target table; a placeholder target has none.
+        Database database = stmt instanceof InsertStmt insertStmt && insertStmt.hasPlaceholderTarget() ? null
+                : GlobalStateMgr.getCurrentState().getMetadataMgr().getDb(context, catalogName, dbName);
         GlobalTransactionMgr transactionMgr = GlobalStateMgr.getCurrentState().getGlobalTransactionMgr();
         final Table targetTable;
         if (stmt instanceof InsertStmt && ((InsertStmt) stmt).getTargetTable() != null) {

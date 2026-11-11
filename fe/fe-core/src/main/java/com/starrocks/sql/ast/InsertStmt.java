@@ -366,6 +366,13 @@ public class InsertStmt extends DmlStmt {
         return blackHoleTableAsTargetTable;
     }
 
+    // INSERT INTO BLACKHOLE() (the plan of CACHE SELECT) and INSERT INTO FILES() write no table. Their target name
+    // is a placeholder that no catalog resolves and no privilege is granted on, so callers must not look it up
+    // or check a privilege on it.
+    public boolean hasPlaceholderTarget() {
+        return blackHoleTableAsTargetTable || tableFunctionAsTargetTable;
+    }
+
     public Map<String, String> getTableFunctionProperties() {
         return tableFunctionProperties;
     }

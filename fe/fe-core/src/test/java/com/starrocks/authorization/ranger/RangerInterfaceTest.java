@@ -569,6 +569,53 @@ public class RangerInterfaceTest {
         }
     }
 
+    // The target of INSERT INTO BLACKHOLE() and INSERT INTO FILES() is a placeholder that no privilege is granted
+    // on, so Ranger is asked only about the query. An INSERT into a table is still asked about its target.
+    @Test
+    public void testPlaceholderInsertTargetIsNotChecked() throws Exception {
+        final List<String> requests = new ArrayList<>();
+        new MockUp<RangerBasePlugin>() {
+            @Mock
+            RangerAccessResult isAccessAllowed(RangerAccessRequest request) {
+                requests.add(request.getAccessType() + " " + request.getResource().getValue("table"));
+                RangerAccessResult result = new RangerAccessResult(1, "starrocks",
+                        new RangerServiceDef(), new RangerAccessRequestImpl());
+                result.setIsAllowed(!"insert".equals(request.getAccessType()));
+                return result;
+            }
+        };
+
+        AccessControlProvider provider = Authorizer.getInstance();
+        provider.setAccessControl(InternalCatalog.DEFAULT_INTERNAL_CATALOG_NAME, new RangerStarRocksAccessController());
+
+        try {
+            ConnectContext ctx = new ConnectContext();
+            ctx.setCurrentUserIdentity(new UserIdentity("test_user", "%"));
+            ctx.setDatabase("db");
+            ctx.setThreadLocalInfo();
+
+            for (String sql : List.of("insert into blackhole() select v4 from db.t1",
+                    "insert into files(\"path\" = \"hdfs://127.0.0.1:9000/files/\", \"format\" = \"parquet\", "
+                            + "\"compression\" = \"uncompressed\") select v4 from db.t1")) {
+                requests.clear();
+                StatementBase stmt = SqlParser.parse(sql, ctx.getSessionVariable().getSqlMode()).get(0);
+                Analyzer.analyze(stmt, ctx);
+                Assertions.assertDoesNotThrow(() -> Authorizer.check(stmt, ctx), sql);
+                Assertions.assertTrue(requests.stream().noneMatch(r -> r.startsWith("insert ")), sql + ": " + requests);
+                Assertions.assertTrue(requests.contains("select t1"), sql + ": " + requests);
+            }
+
+            requests.clear();
+            StatementBase insert = SqlParser.parse("insert into db.t1 select v4, v5, v6 from db.t1",
+                    ctx.getSessionVariable().getSqlMode()).get(0);
+            Analyzer.analyze(insert, ctx);
+            Assertions.assertThrows(ErrorReportException.class, () -> Authorizer.check(insert, ctx));
+            Assertions.assertTrue(requests.contains("insert t1"), requests.toString());
+        } finally {
+            provider.setAccessControl(InternalCatalog.DEFAULT_INTERNAL_CATALOG_NAME, new NativeAccessController());
+        }
+    }
+
     @Test
     public void testColumnPrivilegeCheckTableColumnWithExternalAccessController() throws Exception {
         // Mock Ranger to allow all requests, and track whether Ranger was actually called
