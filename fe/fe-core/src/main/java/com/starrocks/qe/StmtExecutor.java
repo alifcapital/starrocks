@@ -348,7 +348,11 @@ public class StmtExecutor {
     private final OriginStatement originStmt;
     private StatementBase parsedStmt;
     private RuntimeProfile profile;
-    private Coordinator coord = null;
+    private volatile Coordinator coord = null;
+    // A KILL QUERY can arrive while the statement is parsed, analyzed or planned, before it has a coordinator.
+    // We fear that it would then be lost and the query would run to its end, so cancel() keeps the message here
+    // and the coordinator is cancelled as soon as it exists, see setCoordinator().
+    private volatile String pendingCancelMessage = null;
     private LeaderOpExecutor leaderOpExecutor = null;
     private RedirectStatus redirectStatus = null;
     /**
@@ -415,6 +419,17 @@ public class StmtExecutor {
 
     public Coordinator getCoordinator() {
         return this.coord;
+    }
+
+    // cancel() writes the message and then reads the coordinator, and we write the coordinator and then read the
+    // message, so a cancel that races with the creation of the coordinator reaches it at least once.
+    @VisibleForTesting
+    void setCoordinator(Coordinator coordinator) {
+        coord = coordinator;
+        String message = pendingCancelMessage;
+        if (message != null) {
+            coordinator.cancel(message);
+        }
     }
 
     private RuntimeProfile buildTopLevelProfile() {
@@ -1772,6 +1787,7 @@ public class StmtExecutor {
                     sub.cancel(cancelledMessage);
                 }
             }
+            pendingCancelMessage = cancelledMessage;
             Coordinator coordRef = coord;
             if (coordRef != null) {
                 coordRef.cancel(cancelledMessage);
@@ -2012,9 +2028,9 @@ public class StmtExecutor {
         List<Expr> outputExprs = execPlan.getOutputExprs();
 
         if (executeInFe) {
-            coord = new FeExecuteCoordinator(context, execPlan);
+            setCoordinator(new FeExecuteCoordinator(context, execPlan));
         } else {
-            coord = getCoordinatorFactory().createQueryScheduler(context, fragments, scanNodes, descTable, execPlan);
+            setCoordinator(getCoordinatorFactory().createQueryScheduler(context, fragments, scanNodes, descTable, execPlan));
         }
 
         // Predict the cost of this query
@@ -3574,8 +3590,8 @@ public class StmtExecutor {
         boolean insertError = false;
         String trackingSql = "";
         try {
-            coord = getCoordinatorFactory().createInsertScheduler(
-                    context, execPlan.getFragments(), execPlan.getScanNodes(), execPlan.getDescTbl().toThrift(), execPlan);
+            setCoordinator(getCoordinatorFactory().createInsertScheduler(
+                    context, execPlan.getFragments(), execPlan.getScanNodes(), execPlan.getDescTbl().toThrift(), execPlan));
             List<ScanNode> scanNodes = execPlan.getScanNodes();
 
             boolean needQuery = false;
@@ -4048,8 +4064,8 @@ public class StmtExecutor {
             UUID uuid = context.getQueryId();
             context.setExecutionId(UUIDUtil.toTUniqueId(uuid));
 
-            coord = getCoordinatorFactory().createQueryScheduler(
-                    context, plan.getFragments(), plan.getScanNodes(), plan.getDescTbl().toThrift(), plan);
+            setCoordinator(getCoordinatorFactory().createQueryScheduler(
+                    context, plan.getFragments(), plan.getScanNodes(), plan.getDescTbl().toThrift(), plan));
             // Register with the ConnectContext and SQL so that these coordinator-backed internal queries
             // (e.g. statistics dict/sample/table-stats collection, internal SimpleExecutor and user-variable
             // sub-queries) are visible in "SHOW PROC '/current_queries'" and '/global_current_queries',
@@ -4121,8 +4137,8 @@ public class StmtExecutor {
         try {
             UUID uuid = context.getQueryId();
             context.setExecutionId(UUIDUtil.toTUniqueId(uuid));
-            coord = getCoordinatorFactory().createQueryScheduler(
-                    context, plan.getFragments(), plan.getScanNodes(), plan.getDescTbl().toThrift(), plan);
+            setCoordinator(getCoordinatorFactory().createQueryScheduler(
+                    context, plan.getFragments(), plan.getScanNodes(), plan.getDescTbl().toThrift(), plan));
             // Register with the ConnectContext and SQL so this coordinator-backed metadata collection query
             // is visible in "SHOW PROC '/current_queries'" and '/global_current_queries', instead of being
             // filtered out by the sql/context null check in getQueryStatistics().
