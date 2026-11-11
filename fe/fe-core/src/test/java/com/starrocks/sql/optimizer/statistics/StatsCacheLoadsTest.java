@@ -19,9 +19,9 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -32,9 +32,11 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class StatsCacheLoadsTest {
-    // One thread and no queue: a load is rejected while the thread is busy.
+    // One thread and a queue of one task. The worker of a pool takes the next task a moment after the future of a
+    // load completes, so the test must not depend on when the thread is free: a load is rejected while a task holds
+    // the thread and another task fills the queue, and accepted whenever the queue is empty.
     private final ThreadPoolExecutor pool = new ThreadPoolExecutor(1, 1, 60, TimeUnit.SECONDS,
-            new SynchronousQueue<>(), new ThreadPoolExecutor.AbortPolicy());
+            new ArrayBlockingQueue<>(1), new ThreadPoolExecutor.AbortPolicy());
     private final AtomicInteger loads = new AtomicInteger();
     private final AtomicLong nanos = new AtomicLong();
     private CountDownLatch release = new CountDownLatch(0);
@@ -66,14 +68,15 @@ class StatsCacheLoadsTest {
             }
         });
         assertTrue(started.await(10, TimeUnit.SECONDS));
+        pool.execute(() -> { });
     }
 
     private void freePool() throws InterruptedException {
         release.countDown();
-        for (int i = 0; i < 1000 && pool.getActiveCount() > 0; i++) {
+        for (int i = 0; i < 1000 && !pool.getQueue().isEmpty(); i++) {
             Thread.sleep(10);
         }
-        assertEquals(0, pool.getActiveCount());
+        assertTrue(pool.getQueue().isEmpty());
     }
 
     @Test
