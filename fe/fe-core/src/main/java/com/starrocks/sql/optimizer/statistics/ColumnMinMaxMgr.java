@@ -203,7 +203,7 @@ public class ColumnMinMaxMgr implements IMinMaxStatsMgr, MemoryTrackable {
         @Override
         public @NonNull CompletableFuture<Optional<CacheValue>> asyncLoad(@NonNull ColumnIdentifier key,
                                                                           @NonNull Executor executor) {
-            return CompletableFuture.supplyAsync(() -> {
+            return StatsCacheLoads.supplyAsync(() -> {
                 try {
                     Pair<Database, Table> pair = getDatabaseAndTable(key.getTableId());
                     Database db = pair.first;

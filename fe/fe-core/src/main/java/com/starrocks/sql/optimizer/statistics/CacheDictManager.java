@@ -126,7 +126,7 @@ public class CacheDictManager implements IDictManager, MemoryTrackable {
                 CompletableFuture<Optional<ColumnDict>> asyncLoad(
                         @NonNull ColumnIdentifier columnIdentifier,
                         @NonNull Executor executor) {
-                    return CompletableFuture.supplyAsync(() -> {
+                    return StatsCacheLoads.supplyAsync(() -> {
                         try {
                             long tableId = columnIdentifier.getTableId();
                             ColumnId columnName = columnIdentifier.getColumnName();

@@ -2727,14 +2727,10 @@ public class Config extends ConfigBase {
     @ConfField
     public static int dict_collect_thread_pool_size = 16;
 
+    // The tasks of the cache-stats and cache-stats-lake pools wait in a queue of this size while all threads
+    // are busy. A task that does not fit is rejected. Zero or less means no queue.
     @ConfField
     public static int dict_collect_queue_size = 4096;
-
-    // Dictionary Collection Rejection Policy
-    // ignore: ignore the task and print the log.
-    // queue: Queue until the task is consumed. The maximum length is dict_collect_queue_size.
-    @ConfField
-    public static String dict_collect_reject_policy = "ignore";
 
     @ConfField
     public static int dict_collect_thread_pool_for_lake_size = 4;

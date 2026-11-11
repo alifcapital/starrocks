@@ -34,6 +34,7 @@
 
 package com.starrocks.common;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.Maps;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import com.starrocks.metric.GaugeMetric;
@@ -98,13 +99,21 @@ public class ThreadPoolManager {
                     "cache-stats-lake");
 
     private static ThreadPoolExecutor newCollectThreadPool(int maxNumThread, String poolName) {
-        if (Config.dict_collect_reject_policy.equals("ignore")) {
-            return newDaemonCacheThreadPool(maxNumThread, poolName, false);
-        } else if (Config.dict_collect_reject_policy.equals("queue")) {
-            return newDaemonCacheThreadPool(maxNumThread, Config.dict_collect_queue_size, poolName, false);
-        } else {
-            throw new RuntimeException("unknown config" + Config.dict_collect_reject_policy);
-        }
+        return newCollectThreadPool(maxNumThread, Config.dict_collect_queue_size, poolName);
+    }
+
+    // The statistics caches and the global dict update expect a submitted task either to run or to be rejected
+    // with RejectedExecutionException, so the pool never drops a task silently. While all threads are busy,
+    // a task waits in the queue, and a queue size of zero or less means no queue.
+    // With a queue, ThreadPoolExecutor starts threads above the core size only when the queue is full, so we set
+    // the core size to the thread limit and let idle core threads exit.
+    @VisibleForTesting
+    static ThreadPoolExecutor newCollectThreadPool(int maxNumThread, int queueSize, String poolName) {
+        BlockingQueue<Runnable> queue = queueSize > 0 ? new LinkedBlockingQueue<>(queueSize) : new SynchronousQueue<>();
+        ThreadPoolExecutor pool = newDaemonThreadPool(maxNumThread, maxNumThread, KEEP_ALIVE_TIME, TimeUnit.SECONDS,
+                queue, new ThreadPoolExecutor.AbortPolicy(), poolName, false);
+        pool.allowCoreThreadTimeOut(true);
+        return pool;
     }
 
     public static ThreadPoolExecutor getStatsCacheThread() {

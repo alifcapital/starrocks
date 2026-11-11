@@ -30,6 +30,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 public class ThreadPoolManagerTest {
 
@@ -221,5 +222,60 @@ public class ThreadPoolManagerTest {
         // can't set to <= 0
         Assertions.assertThrows(IllegalArgumentException.class, () -> ThreadPoolManager.setFixedThreadPoolSize(testPool, 0));
         Assertions.assertThrows(IllegalArgumentException.class, () -> ThreadPoolManager.setFixedThreadPoolSize(testPool, -1));
+    }
+
+    // A busy collect pool queues the task, rejects the one that does not fit, and runs up to its thread limit at once.
+    @Test
+    public void testCollectPoolQueuesAndRejects() throws Exception {
+        ThreadPoolExecutor pool = ThreadPoolManager.newCollectThreadPool(2, 1, "test_collect_pool");
+        CountDownLatch started = new CountDownLatch(2);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch queuedRan = new CountDownLatch(1);
+        try {
+            for (int i = 0; i < 2; i++) {
+                pool.execute(() -> {
+                    started.countDown();
+                    try {
+                        release.await();
+                    } catch (InterruptedException ignored) {
+                        Thread.currentThread().interrupt();
+                    }
+                });
+            }
+            Assertions.assertTrue(started.await(10, TimeUnit.SECONDS));
+            pool.execute(queuedRan::countDown);
+            Assertions.assertEquals(1, pool.getQueue().size());
+            Assertions.assertThrows(RejectedExecutionException.class, () -> pool.execute(() -> { }));
+            release.countDown();
+            Assertions.assertTrue(queuedRan.await(10, TimeUnit.SECONDS));
+        } finally {
+            release.countDown();
+            pool.shutdownNow();
+        }
+    }
+
+    // Without a queue a busy collect pool rejects the task instead of dropping it.
+    @Test
+    public void testCollectPoolWithoutQueueRejects() throws Exception {
+        for (int queueSize : new int[] {0, -1}) {
+            ThreadPoolExecutor pool = ThreadPoolManager.newCollectThreadPool(1, queueSize, "test_collect_pool");
+            CountDownLatch started = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            try {
+                pool.execute(() -> {
+                    started.countDown();
+                    try {
+                        release.await();
+                    } catch (InterruptedException ignored) {
+                        Thread.currentThread().interrupt();
+                    }
+                });
+                Assertions.assertTrue(started.await(10, TimeUnit.SECONDS));
+                Assertions.assertThrows(RejectedExecutionException.class, () -> pool.execute(() -> { }));
+            } finally {
+                release.countDown();
+                pool.shutdownNow();
+            }
+        }
     }
 }

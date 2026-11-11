@@ -104,7 +104,7 @@ public class IcebergColumnMinMaxMgr implements IMinMaxStatsMgr, MemoryTrackable 
         @Override
         public @NonNull CompletableFuture<Optional<ColumnMinMax>> asyncLoad(@NonNull CacheKey key,
                                                                             @NonNull Executor executor) {
-            return CompletableFuture.supplyAsync(() -> {
+            return StatsCacheLoads.supplyAsync(() -> {
                 try {
                     List<String> names = StatisticsUtils.getTableNameByUUID(key.id.getTableUuid());
                     if (names.size() < 3) {

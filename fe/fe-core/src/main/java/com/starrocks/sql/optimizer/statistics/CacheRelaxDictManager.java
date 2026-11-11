@@ -110,7 +110,7 @@ public class CacheRelaxDictManager implements IRelaxDictManager, MemoryTrackable
         public CompletableFuture<Optional<ColumnDict>> asyncReload(
                 @NonNull ConnectorTableColumnKey key, @NonNull Optional<ColumnDict> oldValue,
                 @NonNull Executor executor) {
-            return CompletableFuture.supplyAsync(() -> {
+            return StatsCacheLoads.supplyAsync(() -> {
                 try {
                     if (NO_DICT_STRING_COLUMNS.contains(key)) {
                         return Optional.empty();
