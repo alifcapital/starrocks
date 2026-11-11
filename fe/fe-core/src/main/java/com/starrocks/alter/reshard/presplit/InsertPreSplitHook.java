@@ -221,6 +221,11 @@ public final class InsertPreSplitHook {
      * rest bought nothing.
      */
     private static boolean passesCommonPreFilters(InsertStmt insertStmt, ConnectContext context) {
+        // INSERT INTO BLACKHOLE() (the plan of CACHE SELECT) and INSERT INTO FILES() write no table, so there are no
+        // tablets to split, and their target name is a placeholder that no catalog resolves.
+        if (insertStmt.useBlackHoleTableAsTargetTable() || insertStmt.useTableFunctionAsTargetTable()) {
+            return false;
+        }
         // An explicit target column list is validated after target resolution:
         // the source-agnostic targetColumnListIsPreSplitSafe gate plus each
         // source's own column/source alignment in prepare(). The sort-key columns

@@ -203,6 +203,26 @@ public class InsertPreSplitHookTableTest {
     }
 
     @Test
+    public void testBlackHoleTargetIsNotResolved() throws Exception {
+        // CACHE SELECT runs as INSERT INTO BLACKHOLE(), whose target is a placeholder that no catalog resolves.
+        try (SourceFixture fixture = sourceFixture()) {
+            when(fixture.insertStmt.useBlackHoleTableAsTargetTable()).thenReturn(true);
+            fixture.assertNoSubmit();
+            verify(fixture.metadataMgr, never()).getDb(any(), any(), any());
+        }
+    }
+
+    @Test
+    public void testFilesTargetIsNotResolved() throws Exception {
+        // INSERT INTO FILES() writes files, so its target is a placeholder that no catalog resolves.
+        try (SourceFixture fixture = sourceFixture()) {
+            when(fixture.insertStmt.useTableFunctionAsTargetTable()).thenReturn(true);
+            fixture.assertNoSubmit();
+            verify(fixture.metadataMgr, never()).getDb(any(), any(), any());
+        }
+    }
+
+    @Test
     public void testTargetPartitionSpecBuildsRestrictedTemporaryScope() {
         InsertStmt stmt = simpleTableInsertStmt();
         when(stmt.isSpecifyPartitionNames()).thenReturn(true);
