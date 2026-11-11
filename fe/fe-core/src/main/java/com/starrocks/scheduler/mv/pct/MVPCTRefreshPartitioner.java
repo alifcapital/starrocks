@@ -54,6 +54,7 @@ import com.starrocks.sql.common.DmlException;
 import com.starrocks.sql.common.PCellSetMapping;
 import com.starrocks.sql.common.PCellSortedSet;
 import com.starrocks.sql.common.PCellWithName;
+import com.starrocks.sql.common.SyncPartitionUtils;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -246,6 +247,42 @@ public abstract class MVPCTRefreshPartitioner {
 
     public void addMVToRefreshPotentialPartitions(PCellSortedSet potentialPartitions) {
         mvToRefreshPotentialPartitions.addAll(potentialPartitions);
+    }
+
+    /**
+     * Adds to {@code mvToRefreshedPartitions} the MV partitions that share changed base table partitions with them.
+     *
+     * @return false when the MV partitions map to no base table partitions; the set is then final and is not cut
+     * into batches
+     */
+    public boolean addPotentialRefreshPartitions(PCellSortedSet mvToRefreshedPartitions) {
+        Map<Table, PCellSortedSet> baseChangedPartitionNames =
+                getBasePartitionNamesByMVPartitionNames(mvToRefreshedPartitions);
+        if (baseChangedPartitionNames.isEmpty()) {
+            logger.info("Cannot get associated base table change partitions from mv's refresh partitions {}",
+                    mvToRefreshedPartitions);
+            return false;
+        }
+
+        Map<Table, PCellSortedSet> baseChangedPCellsSortedSet = toBaseTableWithSortedSet(baseChangedPartitionNames);
+        if (isCalcPotentialRefreshPartition(baseChangedPCellsSortedSet, mvToRefreshedPartitions)) {
+            logger.info("Start calcPotentialRefreshPartition, needRefreshMvPartitionNames: {},"
+                            + " baseChangedPartitionNames: {}",
+                    mvToRefreshedPartitions, baseChangedPCellsSortedSet);
+            PCTPartitionTopology partitionTopology = mvContext.getPartitionTopology();
+            PCellSortedSet potentialPartitions = PCellSortedSet.of();
+            SyncPartitionUtils.calcPotentialRefreshPartition(mvToRefreshedPartitions,
+                    baseChangedPartitionNames,
+                    partitionTopology.getRefBaseTableMVIntersectedPartitions(),
+                    partitionTopology.getMvRefBaseTableIntersectedPartitions(),
+                    potentialPartitions);
+            addMVToRefreshPotentialPartitions(potentialPartitions);
+            mvToRefreshedPartitions.addAll(getMVToRefreshPotentialPartitions());
+            logger.info("Finish calcPotentialRefreshPartition, needRefreshMvPartitionNames: {},"
+                            + " baseChangedPartitionNames: {}",
+                    mvToRefreshedPartitions, baseChangedPartitionNames);
+        }
+        return true;
     }
 
     /**

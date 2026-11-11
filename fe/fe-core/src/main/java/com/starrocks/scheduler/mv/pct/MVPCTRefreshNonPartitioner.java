@@ -99,6 +99,13 @@ public final class MVPCTRefreshNonPartitioner extends MVPCTRefreshPartitioner {
         // do nothing
     }
 
+    // The single partition of a non-partitioned MV is refreshed as a whole, and it maps to no base table
+    // partitions, so we do not look for them.
+    @Override
+    public boolean addPotentialRefreshPartitions(PCellSortedSet mvToRefreshedPartitions) {
+        return false;
+    }
+
     @Override
     public boolean isCalcPotentialRefreshPartition(Map<Table, PCellSortedSet> baseChangedPartitionNames,
                                                    PCellSortedSet mvPartitions) {

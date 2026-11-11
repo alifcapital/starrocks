@@ -19,10 +19,14 @@ import com.starrocks.catalog.MaterializedView;
 import com.starrocks.scheduler.MvTaskRunContext;
 import com.starrocks.scheduler.TaskRunContext;
 import com.starrocks.scheduler.mv.pct.MVPCTRefreshNonPartitioner;
+import com.starrocks.sql.common.PCellNone;
 import com.starrocks.sql.common.PCellSortedSet;
+import com.starrocks.sql.common.PCellWithName;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
+
+import java.util.List;
 
 public class MVPCTRefreshNonPartitionerTest {
 
@@ -37,5 +41,22 @@ public class MVPCTRefreshNonPartitionerTest {
                 database, mv, mvRefreshParams);
         int result = job.getAdaptivePartitionRefreshNumber(PCellSortedSet.of());
         Assertions.assertEquals(0, result);
+    }
+
+    // A non-partitioned MV is refreshed as a whole, so the refresh does not map its partition to base table
+    // partitions: the set stays as it is and is not cut into batches.
+    @Test
+    public void testRefreshScopeIsNotExpanded() {
+        MvTaskRunContext mvTaskRunContext = Mockito.mock(MvTaskRunContext.class);
+        MVPCTRefreshNonPartitioner job = new MVPCTRefreshNonPartitioner(mvTaskRunContext,
+                Mockito.mock(TaskRunContext.class), Mockito.mock(Database.class), Mockito.mock(MaterializedView.class),
+                Mockito.mock(MVRefreshParams.class));
+        Mockito.clearInvocations(mvTaskRunContext);
+
+        PCellSortedSet toRefresh = PCellSortedSet.of(List.of(PCellWithName.of("mv1", new PCellNone())));
+        Assertions.assertFalse(job.addPotentialRefreshPartitions(toRefresh));
+        Assertions.assertEquals(1, toRefresh.size());
+        Assertions.assertTrue(job.getMVToRefreshPotentialPartitions().isEmpty());
+        Mockito.verifyNoInteractions(mvTaskRunContext);
     }
 }
