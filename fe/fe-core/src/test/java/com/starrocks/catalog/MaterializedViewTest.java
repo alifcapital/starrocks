@@ -66,6 +66,7 @@ import org.junit.jupiter.api.MethodOrderer.MethodName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.lang.reflect.Field;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
@@ -1277,6 +1278,30 @@ public class MaterializedViewTest extends StarRocksTestBase {
             }
         } finally {
             Config.enable_mv_post_image_reload_cache = oldPostImageReload;
+        }
+    }
+
+    // A checkpoint loads the image only to write the next one: it reloads no mv, so it resolves no base table
+    // through a connector, and every mv keeps the state the image has.
+    @Test
+    public void testCheckpointDoesNotReloadMvsAfterLoadingImage() throws Exception {
+        MaterializedView[] chain = createStartupActivationChain("checkpoint_no_reload");
+        for (MaterializedView mv : chain) {
+            mv.changeReloadState(-1);
+        }
+        GlobalStateMgr state = GlobalStateMgr.getCurrentState();
+        Field checkpointThreadId = GlobalStateMgr.class.getDeclaredField("checkpointThreadId");
+        checkpointThreadId.setAccessible(true);
+        long previous = checkpointThreadId.getLong(null);
+        try {
+            checkpointThreadId.setLong(null, Thread.currentThread().getId());
+            state.processMvRelatedMeta();
+        } finally {
+            checkpointThreadId.setLong(null, previous);
+        }
+        for (MaterializedView mv : chain) {
+            Assertions.assertFalse(mv.hasReloaded(), mv.getName());
+            Assertions.assertTrue(mv.isActive(), mv.getName());
         }
     }
 

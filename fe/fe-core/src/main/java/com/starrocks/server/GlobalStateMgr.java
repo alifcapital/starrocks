@@ -1849,6 +1849,13 @@ public class GlobalStateMgr {
 
     @VisibleForTesting
     public void processMvRelatedMeta() {
+        // A checkpoint loads the image only to write the next one, and the reload changes nothing that an mv writes
+        // to the image. It resolves every base table through its connector, though, so the checkpoint skips it: an
+        // FE that loads the image reloads every mv anyway.
+        if (isCheckpointThread()) {
+            LOG.info("skip reloading materialized views after loading the image on the checkpoint thread");
+            return;
+        }
         long startMillis = System.currentTimeMillis();
         List<MaterializedView> allMVs = new ArrayList<>();
         for (Database db : localMetastore.getIdToDb().values()) {
@@ -1857,8 +1864,8 @@ public class GlobalStateMgr {
             }
         }
 
-        // only load image async when FE restart and it's not checkpoint thread to avoid changing original behavior.
-        boolean isReloadAsync = Config.enable_mv_post_image_reload_cache && !isCheckpointThread();
+        // only load image async when FE restart to avoid changing original behavior.
+        boolean isReloadAsync = Config.enable_mv_post_image_reload_cache;
         if (!isReloadAsync) {
             reloadMvsSynchronously(allMVs, startMillis);
             return;
