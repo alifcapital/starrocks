@@ -52,6 +52,7 @@ import org.apache.iceberg.view.ViewVersion;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.io.Closeable;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -284,6 +285,21 @@ public interface IcebergCatalog extends MemoryTrackable {
 
     /** Releases clients and threads owned by this catalog; called when its connector shuts down. */
     default void shutdown() {
+    }
+
+    /**
+     * Closes the Iceberg catalog that an implementation wraps. Until it is closed, it keeps the FileIO of every
+     * table it loaded and its clients, so an implementation calls this from {@link #shutdown}.
+     */
+    static void closeWrappedCatalog(org.apache.iceberg.catalog.Catalog catalog) {
+        if (!(catalog instanceof Closeable closeable)) {
+            return;
+        }
+        try {
+            closeable.close();
+        } catch (IOException | RuntimeException e) {
+            DEFAULT_LOGGER.warn("Failed to close Iceberg catalog {}", catalog.name(), e);
+        }
     }
 
     default StarRocksIcebergTableScan getTableScan(Table table, StarRocksIcebergTableScanContext srScanContext) {

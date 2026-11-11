@@ -23,6 +23,7 @@ import com.starrocks.qe.ConnectContext;
 import com.starrocks.utframe.UtFrameUtils;
 import mockit.Expectations;
 import mockit.Mocked;
+import mockit.Verifications;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.iceberg.aws.glue.GlueCatalog;
 import org.apache.iceberg.catalog.Namespace;
@@ -31,6 +32,7 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
@@ -120,5 +122,33 @@ public class IcebergGlueCatalogTest {
         ExceptionChecker.expectThrowsWithMsg(StarRocksConnectorException.class,
                 "Failed to access database testdb",
                 () -> icebergGlueCatalog.dropDB(connectContext, "testdb"));
+    }
+
+    // The connector shuts the catalog down when the catalog is dropped or replaced and when a checkpoint discards
+    // its copy of the metadata, and the wrapped Iceberg catalog releases what it holds only when it is closed.
+    @Test
+    public void testShutdownClosesIcebergCatalog(@Mocked GlueCatalog glueCatalog) throws Exception {
+        IcebergGlueCatalog catalog = new IcebergGlueCatalog("glue_native_catalog", new Configuration(), new HashMap<>());
+        catalog.shutdown();
+        new Verifications() {
+            {
+                glueCatalog.close();
+                times = 1;
+            }
+        };
+    }
+
+    // A failure to close the Iceberg catalog does not fail the shutdown of the connector.
+    @Test
+    public void testShutdownToleratesCloseFailure(@Mocked GlueCatalog glueCatalog) throws Exception {
+        new Expectations() {
+            {
+                glueCatalog.close();
+                result = new IOException("close failed");
+            }
+        };
+        IcebergGlueCatalog icebergGlueCatalog = new IcebergGlueCatalog(
+                "glue_native_catalog", new Configuration(), new HashMap<>());
+        Assertions.assertDoesNotThrow(icebergGlueCatalog::shutdown);
     }
 }

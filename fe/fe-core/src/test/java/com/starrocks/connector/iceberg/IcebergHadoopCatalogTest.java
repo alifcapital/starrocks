@@ -22,6 +22,7 @@ import com.starrocks.qe.ConnectContext;
 import com.starrocks.utframe.UtFrameUtils;
 import mockit.Expectations;
 import mockit.Mocked;
+import mockit.Verifications;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.TableIdentifier;
@@ -99,5 +100,20 @@ public class IcebergHadoopCatalogTest {
         icebergHadoopCatalog.renameTable(connectContext, "db", "tb1", "tb2");
         boolean exists = icebergHadoopCatalog.tableExists(connectContext, "db", "tbl2");
         Assertions.assertTrue(exists);
+    }
+
+    // The connector shuts the catalog down when the catalog is dropped or replaced and when a checkpoint discards
+    // its copy of the metadata, and the wrapped Iceberg catalog releases what it holds only when it is closed.
+    @Test
+    public void testShutdownClosesIcebergCatalog(@Mocked HadoopCatalog hadoopCatalog) throws Exception {
+        IcebergHadoopCatalog catalog = new IcebergHadoopCatalog("catalog", new Configuration(),
+                ImmutableMap.of("iceberg.catalog.warehouse", "s3://path/to/warehouse"));
+        catalog.shutdown();
+        new Verifications() {
+            {
+                hadoopCatalog.close();
+                times = 1;
+            }
+        };
     }
 }

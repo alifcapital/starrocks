@@ -230,4 +230,9 @@ public class IcebergHadoopCatalog implements IcebergCatalog {
     public String toString() {
         return delegate.toString();
     }
+
+    @Override
+    public void shutdown() {
+        IcebergCatalog.closeWrappedCatalog(delegate);
+    }
 }

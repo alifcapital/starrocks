@@ -25,6 +25,7 @@ import com.starrocks.qe.ConnectContext;
 import com.starrocks.utframe.UtFrameUtils;
 import mockit.Expectations;
 import mockit.Mocked;
+import mockit.Verifications;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -284,4 +285,18 @@ public class IcebergJdbcCatalogTest {
                 Arrays.asList("/tmp/iceberg/db/table/part-00000", "/tmp/iceberg/db/table/part-00001"));
     }
 
+    // The connector shuts the catalog down when the catalog is dropped or replaced and when a checkpoint discards
+    // its copy of the metadata, and the wrapped Iceberg catalog releases what it holds only when it is closed.
+    @Test
+    public void testShutdownClosesIcebergCatalog(@Mocked JdbcCatalog jdbcCatalog) throws Exception {
+        IcebergJdbcCatalog catalog = new IcebergJdbcCatalog("catalog", new Configuration(),
+                ImmutableMap.of("iceberg.catalog.warehouse", LOCATION, "iceberg.catalog.uri", URI));
+        catalog.shutdown();
+        new Verifications() {
+            {
+                jdbcCatalog.close();
+                times = 1;
+            }
+        };
+    }
 }

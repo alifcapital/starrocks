@@ -38,6 +38,7 @@ import com.starrocks.sql.parser.NodePosition;
 import com.starrocks.utframe.UtFrameUtils;
 import mockit.Expectations;
 import mockit.Mocked;
+import mockit.Verifications;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.catalog.Namespace;
@@ -387,5 +388,20 @@ public class IcebergHiveCatalogTest {
         Assertions.assertTrue(ddl.contains("PROPERTIES ("));
         Assertions.assertTrue(ddl.contains("\"owner\" = \"alex\""));
         Assertions.assertTrue(ddl.contains("\"comment\" = \"this is a test view\""));
+    }
+
+    // The connector shuts the catalog down when the catalog is dropped or replaced and when a checkpoint discards
+    // its copy of the metadata, and the wrapped Iceberg catalog releases what it holds only when it is closed.
+    @Test
+    public void testShutdownClosesIcebergCatalog(@Mocked HiveCatalog hiveCatalog) throws Exception {
+        IcebergHiveCatalog catalog = new IcebergHiveCatalog("hive_native_catalog", new Configuration(),
+                Map.of("hive.metastore.uris", "thrift://129.1.2.3:9876"));
+        catalog.shutdown();
+        new Verifications() {
+            {
+                hiveCatalog.close();
+                times = 1;
+            }
+        };
     }
 }
