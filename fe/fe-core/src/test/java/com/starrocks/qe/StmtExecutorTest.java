@@ -160,6 +160,24 @@ public class StmtExecutorTest {
     }
 
     @Test
+    public void testCancelBeforeCoordinatorReachesIt() throws Exception {
+        // A KILL QUERY can arrive while the statement is planned, before it has a coordinator.
+        ConnectContext ctx = UtFrameUtils.createDefaultCtx();
+        StmtExecutor killed = new StmtExecutor(ctx, new ShowFrontendsStmt());
+        killed.cancel("killed manually: KILL QUERY 1");
+        com.starrocks.qe.scheduler.Coordinator coordinator =
+                org.mockito.Mockito.mock(com.starrocks.qe.scheduler.Coordinator.class);
+        killed.setCoordinator(coordinator);
+        org.mockito.Mockito.verify(coordinator).cancel("killed manually: KILL QUERY 1");
+
+        StmtExecutor running = new StmtExecutor(ctx, new ShowFrontendsStmt());
+        com.starrocks.qe.scheduler.Coordinator untouched =
+                org.mockito.Mockito.mock(com.starrocks.qe.scheduler.Coordinator.class);
+        running.setCoordinator(untouched);
+        org.mockito.Mockito.verify(untouched, org.mockito.Mockito.never()).cancel(org.mockito.ArgumentMatchers.anyString());
+    }
+
+    @Test
     public void testForwardExplicitTxnSelectOnFollower() {
         // Daemon threads that earlier tests started keep calling GlobalStateMgr while this test runs. Expectations
         // record such a call as an expected invocation of this test, so we fake the follower with a MockUp, which

@@ -88,6 +88,25 @@ public class StartSchedulingTest extends SchedulerTestBase {
     }
 
     @Test
+    public void testCancelBeforeDeployDeploysNothing() throws Exception {
+        java.util.concurrent.atomic.AtomicInteger deployed = new java.util.concurrent.atomic.AtomicInteger();
+        setBackendService(address -> new MockPBackendService() {
+            @Override
+            public Future<PExecPlanFragmentResult> execPlanFragmentAsync(PExecPlanFragmentRequest request) {
+                deployed.incrementAndGet();
+                return super.execPlanFragmentAsync(request);
+            }
+        });
+
+        // A KILL QUERY during planning reaches the coordinator before its deployment.
+        DefaultCoordinator scheduler = getSchedulerWithQueryId("select count(1) from lineitem");
+        scheduler.cancel("killed manually: KILL QUERY 1");
+        StarRocksException error = Assertions.assertThrows(StarRocksException.class, scheduler::exec);
+        Assertions.assertTrue(error.getMessage().contains("KILL QUERY 1"), error.getMessage());
+        Assertions.assertEquals(0, deployed.get(), "a cancelled query must not deploy fragments");
+    }
+
+    @Test
     public void testDeploySuccess() throws Exception {
         Map<TNetworkAddress, Integer> backendToNumInstances = Maps.newHashMap();
         Map<TNetworkAddress, List<TExecPlanFragmentParams>> backendToRequests = Maps.newHashMap();

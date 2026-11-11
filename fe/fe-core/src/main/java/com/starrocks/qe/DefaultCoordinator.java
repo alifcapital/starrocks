@@ -703,6 +703,12 @@ public class DefaultCoordinator extends Coordinator {
     private void deliverExecFragments(ScheduleOption option) throws RpcException, StarRocksException {
         lock();
         try (Timer ignored = Tracers.watchScope(Tracers.Module.SCHEDULER, "DeployLockInternalTime")) {
+            // A query cancelled before its deployment, for example by a KILL QUERY during planning, had no fragments
+            // to cancel then. We fear that deploying it would start fragments that nothing cancels any more, so we
+            // stop here. cancel() takes the same lock, so a cancel during the deployment still cancels what it sent.
+            if (!queryStatus.ok()) {
+                throw new StarRocksException(queryStatus.getErrorMsg());
+            }
             Deployer deployer =
                     new Deployer(connectContext, jobSpec, executionDAG, coordinatorPreprocessor.getCoordAddress(),
                             this::handleErrorExecution, option.doDeploy);
