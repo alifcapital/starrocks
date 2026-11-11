@@ -138,6 +138,47 @@ public class ChangeCatalogDBTest {
     }
 
     @Test
+    void testChangeCatalogDbWithCatalogOnly(@Mocked CatalogMgr catalogMgr) throws DdlException {
+        new Expectations() {
+            {
+                catalogMgr.catalogExists("default_catalog");
+                result = true;
+
+                catalogMgr.catalogExists("hive_catalog");
+                result = true;
+
+                catalogMgr.catalogExists("nonexistent_catalog");
+                result = false;
+            }
+        };
+
+        new MockUp<Authorizer>() {
+            @Mock
+            public void checkAnyActionOnCatalog(ConnectContext ctx, String catalogName) {
+            }
+
+            @Mock
+            public void checkAnyActionOnOrInDb(ConnectContext ctx, String catalogName, String db) {
+                Assertions.fail("no database privilege check for a catalog without a database");
+            }
+        };
+
+        ctx.setCurrentCatalog("default_catalog");
+        ctx.setDatabase("db");
+        ctx.changeCatalogDb("default_catalog.");
+        Assertions.assertEquals("default_catalog", ctx.getCurrentCatalog());
+        Assertions.assertEquals("", ctx.getDatabase());
+
+        ctx.changeCatalogDb("hive_catalog.");
+        Assertions.assertEquals("hive_catalog", ctx.getCurrentCatalog());
+        Assertions.assertEquals("", ctx.getDatabase());
+
+        Assertions.assertThrows(DdlException.class, () -> {
+            ctx.changeCatalogDb("nonexistent_catalog.");
+        });
+    }
+
+    @Test
     void testChangeCatalogDbAccessDeniedThrowsRuntimeException(@Mocked MetadataMgr metadataMgr) {
         new Expectations() {
             {

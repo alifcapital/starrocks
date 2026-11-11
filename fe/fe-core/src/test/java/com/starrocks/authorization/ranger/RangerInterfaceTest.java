@@ -302,6 +302,15 @@ public class RangerInterfaceTest {
     }
 
     @Test
+    public void testCheckAnyActionOnAnyTableOfMissingDb() {
+        RangerStarRocksAccessController controller = new RangerStarRocksAccessController();
+        Assertions.assertThrows(AccessDeniedException.class,
+                () -> controller.checkAnyActionOnAnyTable(connectContext, "default_catalog", ""));
+        Assertions.assertThrows(AccessDeniedException.class,
+                () -> controller.checkAnyActionOnAnyTable(connectContext, "default_catalog", "no_such_db"));
+    }
+
+    @Test
     public void testRewriteWithAlias() throws Exception {
         Expr e = SqlParser.parseSqlToExpr("v4+1", new ConnectContext().getSessionVariable().getSqlMode());
         HashMap<String, Expr> exprHashMap = new HashMap<>();

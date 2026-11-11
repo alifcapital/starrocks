@@ -1687,6 +1687,11 @@ public class ConnectContext {
 
         if (parts.length == 1) { // use database
             dbName = identifier;
+        } else if (parts[1].isEmpty()) {
+            // Clients send "catalog." to name only a catalog, also as the database of a login.
+            // There is no database to check privileges on, so we switch the catalog like SET CATALOG does.
+            changeCatalog(parts[0]);
+            return;
         } else { // use catalog.database
             String newCatalogName = normalizeName(parts[0]);
             if (!catalogMgr.catalogExists(newCatalogName)) {

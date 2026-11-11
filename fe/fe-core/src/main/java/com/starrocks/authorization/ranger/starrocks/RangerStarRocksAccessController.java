@@ -138,6 +138,10 @@ public class RangerStarRocksAccessController extends RangerAccessController {
     public void checkAnyActionOnAnyTable(ConnectContext context, String catalog, String db)
             throws AccessDeniedException {
         Database database = GlobalStateMgr.getCurrentState().getMetadataMgr().getDb(context, catalog, db);
+        if (database == null) {
+            // A database that does not exist has no tables, so the user has no action on any of them.
+            throw new AccessDeniedException();
+        }
         for (Table table : GlobalStateMgr.getCurrentState().getLocalMetastore().getTables(database.getId())) {
             try {
                 hasPermission(
