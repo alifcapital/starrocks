@@ -1571,7 +1571,7 @@ public class DistributedEnvPlanWithCostTest extends DistributedEnvPlanTestBase {
     }
 
     @Test
-    public void testRnagePredicateJoin() throws Exception {
+    public void testRangePredicateJoin() throws Exception {
         new MockUp<DeriveRangeJoinPredicateRule>() {
             @Mock
             public boolean check(OptExpression input, OptimizerContext context) {
@@ -1625,10 +1625,10 @@ public class DistributedEnvPlanWithCostTest extends DistributedEnvPlanTestBase {
         sql = "select * from t0 left outer join t1 on t0.v1 = t1.v4 + t1.v5  and t1.v4 + t1.v5 < t0.v2 and " +
                 "t0.v2 < t1.v4 + t1.v6";
         plan = getFragmentPlan(sql);
-        assertContains(plan, "  2:SELECT\n" +
+        assertContains(plan, "  3:SELECT\n" +
                 "  |  predicates: 7: add <= CAST('test_max_v2' AS BIGINT), 4: v4 + 6: v6 >= CAST('test_min_v2' AS BIGINT)\n" +
                 "  |  \n" +
-                "  1:Project\n" +
+                "  2:Project\n" +
                 "  |  <slot 4> : 4: v4\n" +
                 "  |  <slot 5> : 5: v5\n" +
                 "  |  <slot 6> : 6: v6\n" +

@@ -21,6 +21,7 @@ import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
+import com.starrocks.sql.optimizer.operator.scalar.CastOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CompoundPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
@@ -30,6 +31,7 @@ import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.sql.optimizer.rewrite.ScalarRangePredicateExtractor;
 import com.starrocks.type.BooleanType;
 import com.starrocks.type.DateType;
+import com.starrocks.type.FloatType;
 import com.starrocks.type.IntegerType;
 import com.starrocks.type.VarcharType;
 import org.junit.jupiter.api.Assertions;
@@ -124,6 +126,34 @@ public class PredicateStatisticsCalculatorTest {
                 PredicateStatisticsCalculator.statisticsCalculate(binaryPredicateOperator, statistics);
         Assertions.assertEquals(5000, estimatedStatistics.getOutputRowCount(), 0.001);
         Assertions.assertEquals(1, estimatedStatistics.getColumnStatistic(c1).getNullsFraction(), 0.001);
+    }
+
+    @Test
+    public void testComparisonWithConstantCastToNull() {
+        // An INT column compared with a date text: the comparison is in DOUBLE and the text casts to NULL.
+        ColumnRefOperator c1 = new ColumnRefOperator(0, IntegerType.INT, "c1", true);
+        Statistics statistics = Statistics.builder()
+                .addColumnStatistic(c1, ColumnStatistic.builder().setMinValue(17013).setMaxValue(20766)
+                        .setNullsFraction(0).setDistinctValuesCount(3000).setAverageRowSize(4).build())
+                .setOutputRowCount(10000).build();
+        CastOperator column = new CastOperator(FloatType.DOUBLE, c1);
+        CastOperator text = new CastOperator(FloatType.DOUBLE, ConstantOperator.createVarchar("2026-11-10"));
+        for (BinaryType type : List.of(BinaryType.EQ, BinaryType.NE, BinaryType.LT, BinaryType.LE,
+                BinaryType.GT, BinaryType.GE)) {
+            Statistics estimated = PredicateStatisticsCalculator.statisticsCalculate(
+                    new BinaryPredicateOperator(type, column, text), statistics);
+            // No rows, which the statistics hold as their least row count of one
+            Assertions.assertEquals(1, estimated.getOutputRowCount(), 0.001, type.toString());
+        }
+
+        Statistics nullSafe = PredicateStatisticsCalculator.statisticsCalculate(
+                new BinaryPredicateOperator(BinaryType.EQ_FOR_NULL, column, text), statistics);
+        Assertions.assertEquals(1, nullSafe.getOutputRowCount(), 0.001);
+
+        Statistics number = PredicateStatisticsCalculator.statisticsCalculate(new BinaryPredicateOperator(
+                BinaryType.LE, column, new CastOperator(FloatType.DOUBLE, ConstantOperator.createVarchar("20000"))),
+                statistics);
+        Assertions.assertTrue(number.getOutputRowCount() > 0);
     }
 
     @Test

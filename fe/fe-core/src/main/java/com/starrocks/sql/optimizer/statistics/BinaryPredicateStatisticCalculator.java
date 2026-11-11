@@ -50,6 +50,11 @@ public class BinaryPredicateStatisticCalculator {
                                                                 BinaryPredicateOperator predicate,
                                                                 Optional<ConstantOperator> constant,
                                                                 Statistics statistics) {
+        // A comparison with NULL other than <=> is never true, so we expect no rows. The constant is NULL also when
+        // the statistics evaluate a cast that the BE turns into NULL, such as '2026-11-10' cast to DOUBLE.
+        if (constant.isPresent() && constant.get().isNull() && predicate.getBinaryType() != BinaryType.EQ_FOR_NULL) {
+            return statistics.withOutputRowCount(0.0);
+        }
         if (columnStatistic.getHistogram() != null && columnStatistic.getHistogram().hasStringValues()
                 && constant.isPresent() && !constant.get().isNull() && constant.get().getType().isStringType()) {
             return StringHistogramEstimator.comparison(columnRefOperator, columnStatistic, predicate.getBinaryType(),

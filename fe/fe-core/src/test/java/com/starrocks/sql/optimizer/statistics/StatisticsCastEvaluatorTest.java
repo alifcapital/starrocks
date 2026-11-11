@@ -299,6 +299,48 @@ public class StatisticsCastEvaluatorTest {
                 decimal(PrimitiveType.DECIMAL64, 10, 2)), FloatType.DOUBLE).getDouble());
     }
 
+    // A comparison with a constant that the statistics cast to NULL keeps no rows in the estimate, so a NULL here
+    // must be a NULL of the BE. The results of CAST(v AS DOUBLE), CAST(v AS DATETIME) of a VARCHAR column on a
+    // cluster of this branch; FLOAT and DATE gave the same NULLs.
+    @Test
+    public void testTextCastsFromBeColumnOracle() {
+        Object[][] cases = {
+                {"2026-11-10", null, "2026-11-10T00:00:00"}, {" 12 ", 12.0, null}, {"\t5\n", 5.0, null},
+                {"1e3", 1000.0, null}, {"1E+3", 1000.0, null}, {"1e", null, null}, {".5", 0.5, null},
+                {"5.", 5.0, null}, {".", null, null}, {"+", null, null}, {"-", null, null}, {"", null, null},
+                {"1.2.3", null, "2001-02-03T00:00:00"}, {"inf", null, null}, {"-inf", null, null},
+                {"Infinity", null, null}, {"nan", null, null}, {"NaN", null, null}, {"1e400", null, null},
+                {"-1e400", null, null}, {"0x10", null, null}, {"1d", null, null}, {"1f", null, null},
+                {"12abc", null, null}, {"+-1", null, null}, {"00012", 12.0, "2000-01-02T00:00:00"},
+                {"1,5", null, null}, {"1e+", null, null}, {"e5", null, null}, {"1e5e", null, null},
+                {"- 1", null, null}, {"١٢", null, null},
+                {"2026-11-10 10:00:00", null, "2026-11-10T10:00:00"}, {"20261110", 20261110.0, "2026-11-10T00:00:00"},
+                {"2026-13-01", null, null}, {"2026-02-30", null, null}, {"2026-11-10 25:00:00", null, null},
+                {"2026/11/10", null, "2026-11-10T00:00:00"}, {"26-11-10", null, "2026-11-10T00:00:00"},
+                {"2026-11-10T10:00:00", null, "2026-11-10T10:00:00"}, {" 2026-11-10 ", null, "2026-11-10T00:00:00"},
+                {"2026-11-10x", null, "2026-11-10T00:00:00"}, {"10.11.2026", null, null},
+                {"9999999-01-01", null, null}, {"0000-00-00", null, null},
+                {"2026-11-10 10:00:00.1234567", null, "2026-11-10T10:00:00.123456"},
+                {"2026-1-1", null, "2026-01-01T00:00:00"}, {"abc", null, null},
+                {"2026-11-10 10:00", null, "2026-11-10T10:00:00"}, {"2026111010", 2026111010.0, null},
+                {"20261110100000", 20261110100000.0, "2026-11-10T10:00:00"},
+        };
+        for (Object[] item : cases) {
+            String input = (String) item[0];
+            Double number = (Double) item[1];
+            ConstantOperator asDouble = cast(text(input), FloatType.DOUBLE);
+            ConstantOperator asFloat = cast(text(input), FloatType.FLOAT);
+            if (number == null) {
+                Assertions.assertTrue(asDouble.isNull(), input);
+                Assertions.assertTrue(asFloat.isNull(), input);
+            } else {
+                Assertions.assertEquals(number, asDouble.getDouble(), input);
+                Assertions.assertEquals((double) (float) (double) number, asFloat.getFloat(), input);
+            }
+            assertDatetime(input, (String) item[2]);
+        }
+    }
+
     @Test
     public void testDecimalRoundingAndExtremeExponent() {
         DecimalType type = decimal(PrimitiveType.DECIMAL64, 10, 1);
