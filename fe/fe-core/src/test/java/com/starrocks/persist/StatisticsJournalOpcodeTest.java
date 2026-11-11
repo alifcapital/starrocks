@@ -21,6 +21,7 @@ import com.starrocks.persist.gson.GsonUtils;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.ast.StatisticsType;
 import com.starrocks.statistic.AnalyzeMgr;
+import com.starrocks.statistic.BasicStatsMeta;
 import com.starrocks.statistic.ExternalMcvStatsMeta;
 import com.starrocks.statistic.JoinStatisticsDefinition;
 import com.starrocks.statistic.JoinStatisticsMeta;
@@ -109,5 +110,22 @@ class StatisticsJournalOpcodeTest {
         Mockito.when(state.getAnalyzeMgr()).thenReturn(analyze);
         new EditLog(new LinkedBlockingQueue<>()).loadJournal(state, entry);
         Mockito.verify(analyze).replayJoinStatistics(restored, drop);
+    }
+
+    // While the FE is not ready it may know no compute node alive, so the replay leaves the statistics cache to the
+    // preloader. Once the FE is ready, the replay refreshes the cache.
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void basicStatsMetaRefreshesCacheOnlyWhenReady(boolean ready) throws Exception {
+        BasicStatsMeta meta = new BasicStatsMeta(1, 2, List.of("c1"), StatsConstants.AnalyzeType.FULL,
+                LocalDateTime.of(2026, 11, 12, 0, 0), Map.of());
+        AnalyzeMgr analyze = Mockito.mock(AnalyzeMgr.class);
+        GlobalStateMgr state = Mockito.mock(GlobalStateMgr.class);
+        Mockito.when(state.getAnalyzeMgr()).thenReturn(analyze);
+        Mockito.when(state.isReady()).thenReturn(ready);
+        new EditLog(new LinkedBlockingQueue<>()).loadJournal(state,
+                new JournalEntity(OperationType.OP_ADD_BASIC_STATS_META, meta));
+        Mockito.verify(analyze).replayAddBasicStatsMeta(meta);
+        Mockito.verify(analyze, Mockito.times(ready ? 1 : 0)).refreshBasicStatisticsCache(1L, 2L, List.of("c1"), true);
     }
 }

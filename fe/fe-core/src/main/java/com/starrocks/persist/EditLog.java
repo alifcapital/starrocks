@@ -895,8 +895,10 @@ public class EditLog {
                     globalStateMgr.getAnalyzeMgr().replayAddBasicStatsMeta(basicStatsMeta);
                     // The follower replays the stats meta log, indicating that the master has re-completed
                     // statistic, and the follower's should refresh cache here.
-                    // We don't need to refresh statistics when checkpointing
-                    if (!GlobalStateMgr.isCheckpointThread()) {
+                    // Until the FE is ready -- while it replays the journal on start, and in a checkpoint -- it may
+                    // know no compute node alive yet, and the refresh would fail. The statistics cache preloader
+                    // fills the cache once a compute node is alive.
+                    if (globalStateMgr.isReady()) {
                         globalStateMgr.getAnalyzeMgr().refreshBasicStatisticsCache(basicStatsMeta.getDbId(),
                                 basicStatsMeta.getTableId(), basicStatsMeta.getColumns(), true);
                     }
