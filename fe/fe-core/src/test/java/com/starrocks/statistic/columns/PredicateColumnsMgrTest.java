@@ -74,6 +74,7 @@ class PredicateColumnsMgrTest extends PlanTestBase {
         Mockito.when(t.getName()).thenReturn(table);
         Mockito.when(t.isNativeTableOrMaterializedView()).thenReturn(false);
         Mockito.when(t.isTemporaryTable()).thenReturn(false);
+        Mockito.when(t.isAnalyzableExternalTable()).thenReturn(true);
         return t;
     }
 

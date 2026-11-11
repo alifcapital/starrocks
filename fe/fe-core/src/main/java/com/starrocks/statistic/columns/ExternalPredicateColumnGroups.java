@@ -19,7 +19,6 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import com.starrocks.catalog.Table;
 import com.starrocks.common.Config;
 import com.starrocks.common.util.TimeUtils;
-import com.starrocks.server.CatalogMgr;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.base.ColumnRefFactory;
@@ -136,7 +135,7 @@ public class ExternalPredicateColumnGroups {
         LocalDateTime now = null;
         for (List<Source> group : groups.values()) {
             Table table = group.get(0).table;
-            if (!CatalogMgr.isExternalCatalog(table.getCatalogName()) || table.isTemporaryTable()) {
+            if (!table.isAnalyzableExternalTable()) {
                 continue;
             }
             List<String> names = group.stream().map(Source::column).distinct().sorted().toList();
@@ -169,11 +168,11 @@ public class ExternalPredicateColumnGroups {
     }
 
     private void recordColumns(Table table, List<String> columns, ColumnUsage.UseCase useCase, LocalDateTime now) {
-        // Metadata relations describe connector internals, not tables we can ANALYZE.
-        // Their catalog database/table accessors need not be implemented.
-        if (!enabled() || columns.isEmpty() || table.isMetadataTable()
-                || !CatalogMgr.isExternalCatalog(table.getCatalogName())
-                || table.isTemporaryTable()) {
+        // We record columns so that the FE can ANALYZE them later, so we keep only the table types it can ANALYZE.
+        // An external catalog also serves tables of other types: information_schema, which the FE builds itself,
+        // and the metadata tables of a connector. They are not in the connector database, and only connector
+        // tables have the catalog database and table names that the record needs.
+        if (!enabled() || columns.isEmpty() || !table.isAnalyzableExternalTable()) {
             return;
         }
         ExternalColumnGroupUsage usage = ExternalColumnGroupUsage.of(table, columns, useCase, now);

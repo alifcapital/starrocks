@@ -17,6 +17,7 @@ package com.starrocks.statistic.columns;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.IcebergTable;
 import com.starrocks.catalog.Table;
+import com.starrocks.catalog.system.SystemTable;
 import com.starrocks.common.Config;
 import com.starrocks.common.FeConstants;
 import com.starrocks.connector.metadata.MetadataTable;
@@ -31,6 +32,7 @@ import com.starrocks.sql.optimizer.operator.scalar.BinaryPredicateOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
+import com.starrocks.thrift.TSchemaTableType;
 import com.starrocks.type.IntegerType;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -75,6 +77,7 @@ class ExternalPredicateColumnGroupsTest {
         when(table.getCatalogName()).thenReturn("iceberg");
         when(table.getCatalogDBName()).thenReturn("db");
         when(table.getCatalogTableName()).thenReturn(name);
+        when(table.isAnalyzableExternalTable()).thenReturn(true);
         return table;
     }
 
@@ -105,6 +108,26 @@ class ExternalPredicateColumnGroupsTest {
             groups.record(List.of(ref), useCase, factory, null);
         }
         manager.recordScanColumns(Map.of(ref, partition), metadata, null);
+        manager.recordPredicateColumns(eq(ref, ref), factory, null);
+        assertTrue(groups.snapshot().isEmpty());
+
+        var ordinary = column(table("transactions"), 2, "user_id");
+        groups.recordJoin(List.of(eq(ref, ordinary)), factory, null);
+        assertEquals(Set.of(List.of("user_id")), columns());
+    }
+
+    @Test
+    void informationSchemaOfExternalCatalogIsNotRecorded() {
+        Column name = new Column("TABLE_NAME", IntegerType.INT);
+        SystemTable tables = new SystemTable("iceberg", 124, "tables", Table.TableType.SCHEMA, List.of(name),
+                TSchemaTableType.SCH_TABLES);
+        var ref = column(tables, 1, "TABLE_NAME");
+        // Use the actual SystemTable: its inherited catalog DB accessor throws.
+        for (ColumnUsage.UseCase useCase : ColumnUsage.UseCase.values()) {
+            groups.recordColumns(tables, List.of("TABLE_NAME"), useCase);
+            groups.record(List.of(ref), useCase, factory, null);
+        }
+        manager.recordScanColumns(Map.of(ref, name), tables, null);
         manager.recordPredicateColumns(eq(ref, ref), factory, null);
         assertTrue(groups.snapshot().isEmpty());
 
