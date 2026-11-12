@@ -255,6 +255,44 @@ public class MonotonicFilterDerivationTest {
         }
     }
 
+    private static CallOperator timeShift(String fn, ScalarOperator input, int amount) {
+        return new CallOperator(fn, DateType.DATETIME, ImmutableList.of(input, ConstantOperator.createInt(amount)));
+    }
+
+    // A microsecond shift bounds the datetime by the opposite shift of the constant, like the coarser shifts.
+    @Test
+    public void testMicrosecondShiftBoundsTheDatetime() {
+        ColumnRefOperator ts = new ColumnRefOperator(6, DateType.DATETIME, "ts", true);
+        ConstantOperator value = ConstantOperator.createDatetime(LocalDateTime.of(2024, 1, 1, 0, 0));
+        Object[][] cases = {
+                {"microseconds_add", LocalDateTime.of(2023, 12, 31, 23, 59, 59, 500_000_000)},
+                {"microseconds_sub", LocalDateTime.of(2024, 1, 1, 0, 0, 0, 500_000_000)},
+        };
+        for (Object[] c : cases) {
+            String fn = (String) c[0];
+            CallOperator shift = timeShift(fn, ts, 500_000);
+            assertSame(ts, MonotonicFunctionRegistry.dataChildOf(shift));
+            BinaryPredicateOperator bound = (BinaryPredicateOperator) MonotonicFunctionRegistry.filterInverse(fn)
+                    .invert(shift, ts, BinaryType.GE, value).orElseThrow();
+            assertSame(ts, bound.getChild(0));
+            assertEquals(BinaryType.GE, bound.getBinaryType());
+            assertEquals(c[1], ((ConstantOperator) bound.getChild(1)).getDatetime(), fn);
+        }
+    }
+
+    // ts + INTERVAL 1.5 SECOND is microseconds_add(seconds_add(ts, 1), 500000), and the scan gets a bound on ts.
+    @Test
+    public void testFractionalSecondIntervalBoundIsAddedToTheScan() {
+        ColumnRefOperator ts = new ColumnRefOperator(6, DateType.DATETIME, "ts", true);
+        CallOperator shifted = timeShift("microseconds_add", timeShift("seconds_add", ts, 1), 500_000);
+        List<ScalarOperator> bounds = addedBounds(new BinaryPredicateOperator(BinaryType.GE, shifted,
+                ConstantOperator.createDatetime(LocalDateTime.of(2024, 1, 1, 0, 0))));
+        assertTrue(bounds.stream().anyMatch(p -> p instanceof BinaryPredicateOperator
+                && p.getChild(0).equals(ts) && ((BinaryPredicateOperator) p).getBinaryType() == BinaryType.GE
+                && ((ConstantOperator) p.getChild(1)).getDatetime()
+                        .equals(LocalDateTime.of(2023, 12, 31, 23, 59, 58, 500_000_000))), bounds.toString());
+    }
+
     @Test
     public void testDayShiftAmountBoundIsAddedToTheScan() {
         ColumnRefOperator days = new ColumnRefOperator(3, IntegerType.INT, "d", true);

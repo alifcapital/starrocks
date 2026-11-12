@@ -94,6 +94,7 @@ public final class MonotonicFunctionRegistry {
             .put(FunctionSet.MINUTES_ADD, Set.of(0))
             .put(FunctionSet.SECONDS_ADD, Set.of(0))
             .put(FunctionSet.MILLISECONDS_ADD, Set.of(0))
+            .put(FunctionSet.MICROSECONDS_ADD, Set.of(0))
             .put(FunctionSet.YEARS_SUB, Set.of(0))
             .put(FunctionSet.QUARTERS_SUB, Set.of(0))
             .put(FunctionSet.MONTHS_SUB, Set.of(0))
@@ -105,6 +106,7 @@ public final class MonotonicFunctionRegistry {
             .put(FunctionSet.MINUTES_SUB, Set.of(0))
             .put(FunctionSet.SECONDS_SUB, Set.of(0))
             .put(FunctionSet.MILLISECONDS_SUB, Set.of(0))
+            .put(FunctionSet.MICROSECONDS_SUB, Set.of(0))
             .build();
 
     /**
@@ -164,6 +166,9 @@ public final class MonotonicFunctionRegistry {
             .put(FunctionSet.SECONDS_SUB, MonotonicInverse.shift(FunctionSet.SECONDS_ADD))
             .put(FunctionSet.MILLISECONDS_ADD, MonotonicInverse.shift(FunctionSet.MILLISECONDS_SUB))
             .put(FunctionSet.MILLISECONDS_SUB, MonotonicInverse.shift(FunctionSet.MILLISECONDS_ADD))
+            // INTERVAL n.f SECOND becomes a whole-second shift followed by a microsecond shift
+            .put(FunctionSet.MICROSECONDS_ADD, MonotonicInverse.shift(FunctionSet.MICROSECONDS_SUB))
+            .put(FunctionSet.MICROSECONDS_SUB, MonotonicInverse.shift(FunctionSet.MICROSECONDS_ADD))
             .put(FunctionSet.ADDDATE, MonotonicInverse.shift(FunctionSet.SUBDATE))
             .put(FunctionSet.SUBDATE, MonotonicInverse.shift(FunctionSet.ADDDATE))
             .put(FunctionSet.DATE_ADD, MonotonicInverse.shift(FunctionSet.DATE_SUB))
