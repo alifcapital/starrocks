@@ -1117,18 +1117,27 @@ void ExecEnv::_wait_for_fragments_finish() {
     }
 
     size_t running_fragments = _get_running_fragments_count();
+    // A load into a table writes the rows of each tablet on the node the tablet is assigned to, through a load
+    // channel there. We expect the nodes that run the load to keep sending rows into it after the fragments of
+    // this node have finished, so the exit waits for the open load channels too.
+    auto open_load_channels_count = [this]() {
+        return _load_channel_mgr != nullptr ? _load_channel_mgr->num_open_load_channels() : 0;
+    };
+    size_t open_load_channels = open_load_channels_count();
     size_t loop_secs = 0;
 
     // TODO: decouple the heartbeat with the graceful exit
     // only wait for frontend's heartbeat when the node is ever received heartbeats from the frontend
     bool need_wait_frontend_hb = config::graceful_exit_wait_for_frontend_heartbeat && get_backend_id().has_value();
 
-    while ((running_fragments > 0 || (need_wait_frontend_hb && !is_frontend_aware_of_exit())) &&
+    while ((running_fragments > 0 || open_load_channels > 0 ||
+            (need_wait_frontend_hb && !is_frontend_aware_of_exit())) &&
            loop_secs < max_loop_secs) {
         LOG(INFO) << "Frontend is aware of exit: " << is_frontend_aware_of_exit() << ", " << running_fragments
-                  << " fragment(s) are still running...";
+                  << " fragment(s) and " << open_load_channels << " load channel(s) are still running...";
         sleep(1);
         running_fragments = _get_running_fragments_count();
+        open_load_channels = open_load_channels_count();
         loop_secs++;
     }
 }

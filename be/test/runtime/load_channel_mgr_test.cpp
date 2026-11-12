@@ -233,6 +233,7 @@ TEST_F(LoadChannelMgrTest, test_aborted_load_channel) {
     closure.wait();
     ASSERT_TRUE(closure.has_run());
     ASSERT_EQ(TStatusCode::OK, result.status().status_code());
+    ASSERT_EQ(1, _load_channel_mgr->num_open_load_channels());
 
     // 2. Cancel (Abort)
     PTabletWriterCancelRequest cancel_request;
@@ -245,6 +246,8 @@ TEST_F(LoadChannelMgrTest, test_aborted_load_channel) {
     _load_channel_mgr->cancel(&cntl, cancel_request, &cancel_result, &cancel_closure);
     cancel_closure.wait();
     ASSERT_TRUE(cancel_closure.has_run());
+    // An aborted load channel is not open any more, so the graceful exit does not wait for it.
+    ASSERT_EQ(0, _load_channel_mgr->num_open_load_channels());
 
     // 3. Try to Open again - should be ABORTED
     MockCountDownClosure closure2;
@@ -311,9 +314,12 @@ TEST_F(LoadChannelMgrTest, test_timeout_load_channel) {
     _load_channel_mgr->open(&cntl, request, &result, &closure);
     closure.wait();
     ASSERT_EQ(TStatusCode::OK, result.status().status_code());
+    ASSERT_EQ(1, _load_channel_mgr->num_open_load_channels());
 
     // 1 second for timeout, 1 second for backend thread to clean up
     std::this_thread::sleep_for(std::chrono::milliseconds(3500));
+    // A load channel that timed out is not open any more, so the graceful exit does not wait for it.
+    ASSERT_EQ(0, _load_channel_mgr->num_open_load_channels());
 
     // 2. Try add_chunk - should be ABORTED (timeout)
     PTabletWriterAddChunkRequest add_chunk_request;

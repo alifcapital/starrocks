@@ -135,6 +135,10 @@ public:
 
     void close();
 
+    // The number of load channels open on this node. The graceful exit waits for them: other nodes keep sending
+    // the rows of the tablets of this node into them after the fragments of this node have finished.
+    size_t num_open_load_channels() const;
+
     ThreadPool* async_rpc_pool() { return _async_rpc_pool.get(); }
 
     std::shared_ptr<LoadChannel> TEST_get_load_channel(UniqueId load_id) {

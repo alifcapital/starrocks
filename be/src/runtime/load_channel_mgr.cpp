@@ -418,6 +418,11 @@ std::shared_ptr<LoadChannel> LoadChannelMgr::_find_load_channel(int64_t txn_id) 
     return nullptr;
 }
 
+size_t LoadChannelMgr::num_open_load_channels() const {
+    std::lock_guard l(_lock);
+    return _load_channels.size();
+}
+
 std::shared_ptr<LoadChannel> LoadChannelMgr::remove_load_channel(const UniqueId& load_id) {
     return _remove_load_channel(load_id, false, "");
 }
