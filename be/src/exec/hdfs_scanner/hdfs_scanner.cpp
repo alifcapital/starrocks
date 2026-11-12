@@ -798,12 +798,11 @@ void HdfsScannerContext::update_min_max_columns() {
             // actual data from the file.
             update_with_none_existed_slot(column.slot_desc);
         } else if (options.can_use_any_column && !options.any_column_queried_slots.contains(column.slot_id())) {
-            // This column has no min/max statistics (e.g. STRING or TIMESTAMP type
-            // which are not yet supported, or a placeholder column injected by
-            // PruneHDFSScanColumnRule when every queried column is a partition column).
-            // Because can_use_any_column is set and the query does not read this column,
-            // its value is irrelevant to the query result, so fill it with a default value
-            // and skip reading the file.
+            // This column has no exact min/max value for this file: the FE sends none for a type such as
+            // STRING or DECIMAL, nor for a column whose metrics the writer did not keep. It is the placeholder
+            // column that PruneHDFSScanColumnRule injects when every queried column is a partition column:
+            // can_use_any_column is set and the query does not read this column, so its value is irrelevant
+            // to the query result. We fill it with a default value and skip reading the file.
             update_with_none_existed_slot(column.slot_desc);
         } else {
             // This column genuinely needs to be read from the data file.

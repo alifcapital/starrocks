@@ -160,7 +160,7 @@ public final class IcebergUtil {
 
     private static final Set<Type.TypeID> MIN_MAX_SUPPORTED_TYPES = Set.of(
             // TODO(yanz): to support more types.
-            // datetime and timestamp: need to consider timezone.
+            // timestamp with time zone: the bounds are converted into the session time zone below.
             // decimal: need to consider precision and scale.
             // binary: min/max is not accurate for binary type.
             Type.TypeID.BOOLEAN,
