@@ -16,6 +16,7 @@ package com.starrocks.sql.analyzer;
 
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import com.starrocks.catalog.BasicTable;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.HiveTable;
@@ -834,10 +835,12 @@ public class AnalyzeStmtTest {
         analyzeMgr.replayAddAnalyzeStatus(externalStatus);
 
         List<String> loadedCatalogs = new ArrayList<>();
+        // SHOW ANALYZE STATUS looks a table up through getBasicTable, which loads only the table of the internal
+        // catalog, so we record the lookup itself.
         new MockUp<MetadataMgr>() {
             @Mock
-            public Table getTable(Invocation inv, ConnectContext context, String catalogName, String dbName,
-                                  String tblName) {
+            public BasicTable getBasicTable(Invocation inv, ConnectContext context, String catalogName, String dbName,
+                                            String tblName, boolean fetchExternalMetadata) {
                 loadedCatalogs.add(catalogName);
                 return inv.proceed();
             }

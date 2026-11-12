@@ -41,6 +41,7 @@ import com.google.common.collect.Maps;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.PartitionNames;
+import com.starrocks.common.Config;
 import com.starrocks.common.ErrorCode;
 import com.starrocks.common.ErrorReportException;
 import com.starrocks.common.InternalErrorCode;
@@ -94,14 +95,18 @@ public class RoutineLoadJobTest {
 
     private static final long AZ_CN_GROUP_ID = 10001L;
 
+    private boolean enableMultiWarehouse;
+
     @BeforeEach
     public void setUp() throws Exception {
         // Initialize test environment
         UtFrameUtils.setUpForPersistTest();
+        enableMultiWarehouse = Config.enable_multi_warehouse;
     }
 
     @AfterEach
     public void tearDown() {
+        Config.enable_multi_warehouse = enableMultiWarehouse;
         UtFrameUtils.tearDownForPersisTest();
     }
 
@@ -875,6 +880,9 @@ public class RoutineLoadJobTest {
     // in an AZ-named CN group, and the builtin CN group 0 is empty. Group 0 of default_warehouse is
     // also the compute resource that a routine load job holds until prepare() acquires one.
     private static void mockEmptyBuiltinCnGroup(long aliveComputeNodeId) {
+        // With multi-warehouse off a job runs in the default resource of default_warehouse whatever it holds, so
+        // the CN groups of a warehouse only take effect with it on. tearDown() restores the flag.
+        Config.enable_multi_warehouse = true;
         new MockUp<RunMode>() {
             @Mock
             public RunMode getCurrentRunMode() {
@@ -885,7 +893,7 @@ public class RoutineLoadJobTest {
         GlobalStateMgr.getCurrentState().getWarehouseMgr().initDefaultWarehouse();
         new MockUp<WarehouseManager>() {
             @Mock
-            public List<Long> getAllComputeNodeIds(ComputeResource computeResource) {
+            public List<Long> getWarehouseComputeNodeIds(ComputeResource computeResource) {
                 return computeResource.getWorkerGroupId() == AZ_CN_GROUP_ID
                         ? Lists.newArrayList(aliveComputeNodeId) : Lists.newArrayList();
             }
