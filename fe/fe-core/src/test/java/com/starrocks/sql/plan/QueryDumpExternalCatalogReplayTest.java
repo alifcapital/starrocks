@@ -180,16 +180,13 @@ public class QueryDumpExternalCatalogReplayTest extends ReplayFromDumpTestBase {
                 "expected the captured dt statistic on the scan, plan:\n" + plan);
         Assertions.assertTrue(plan.contains("k-->[1.0, 3.0, 0.0, 4.0, 3.0]"),
                 "expected the captured k statistic on the scan, plan:\n" + plan);
-        // (5) The scan cardinality is the real captured total (1000), not the old "1" fallback that clamped
-        // everything. NOTE: the cluster itself estimates 500 here, by applying the dt range-predicate
-        // selectivity (0.5) on top of the total. Replay serves external stats through the connector path (as
-        // all external-table replay does -- FeConstants.runningUnitTest disables the internal-statistics
-        // path), so StatisticsCalculator.removePartitionPredicate drops the partition-column predicate before
-        // selectivity and the scan keeps the full total. That divergence is a pre-existing property of
-        // external-table replay, independent of this change; what this test locks down is that the real total
-        // (1000), not 1, now reaches the planner.
-        Assertions.assertTrue(plan.contains("cardinality=1000"),
-                "expected the captured total row count (1000) as the scan cardinality, plan:\n" + plan);
+        // (5) The scan cardinality starts from the real captured total (1000), not the "1" fallback that clamped
+        // everything. The replayed statistics describe the whole table, not the files planned for the scan, so
+        // StatisticsCalculator.removePartitionPredicate keeps the dt range predicate, and its selectivity (0.5)
+        // gives 500, the estimate of the cluster itself.
+        Assertions.assertTrue(plan.contains("cardinality=500"),
+                "expected the captured total row count (1000) with the dt selectivity as the scan cardinality, plan:\n"
+                        + plan);
     }
 
     // A TWO-column-partitioned iceberg table (iceberg_test_rd.qd_test.part_multi): identity partitions on
@@ -222,10 +219,10 @@ public class QueryDumpExternalCatalogReplayTest extends ReplayFromDumpTestBase {
                 "expected multi-column partition pruning 3/5, plan:\n" + plan);
         Assertions.assertTrue(plan.contains("dt-->[2.0240102E7, 2.0240103E7, 0.0, 4.0, 3.0]"),
                 "expected the captured dt statistic on the scan, plan:\n" + plan);
-        // Cardinality is the full captured total (see the single-column test for why the partition-column
-        // predicate is not selectivized in the replay env).
-        Assertions.assertTrue(plan.contains("cardinality=1000"),
-                "expected the captured total row count (1000) as the scan cardinality, plan:\n" + plan);
+        // Cardinality is the captured total with the selectivity of the partition-column predicate (see the
+        // single-column test).
+        Assertions.assertTrue(plan.contains("cardinality=500"),
+                "expected the captured total row count (1000) with the partition predicate selectivity, plan:\n" + plan);
     }
 
     // A day()-TRANSFORM-partitioned iceberg table (iceberg_test_rd.qd_test.part_tf): partitioned by day(ts)
@@ -263,10 +260,10 @@ public class QueryDumpExternalCatalogReplayTest extends ReplayFromDumpTestBase {
                 "expected day() transform partition pruning 2/4, plan:\n" + plan);
         Assertions.assertTrue(plan.contains("k-->[1.0, 4.0, 0.0, 4.0, 4.0]"),
                 "expected the captured k statistic on the scan, plan:\n" + plan);
-        // Cardinality is the full captured total (see the single-column identity test for why the
-        // partition-column predicate is not selectivized in the replay env).
-        Assertions.assertTrue(plan.contains("cardinality=1000"),
-                "expected the captured total row count (1000) as the scan cardinality, plan:\n" + plan);
+        // Cardinality is the captured total with the selectivity of the ts predicate (see the single-column
+        // identity test).
+        Assertions.assertTrue(plan.contains("cardinality=472"),
+                "expected the captured total row count (1000) with the partition predicate selectivity, plan:\n" + plan);
     }
 
     @Test
