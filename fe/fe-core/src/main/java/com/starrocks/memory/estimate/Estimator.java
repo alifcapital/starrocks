@@ -66,20 +66,9 @@ public class Estimator {
 
     private static final long HIDDEN_CLASS_SHALLOW_SIZE = 16;
 
-    // Reference size on 64-bit JVM (with compressed oops, typically 4 bytes; without, 8 bytes)
-    private static final int REFERENCE_SIZE = 4;
+    // Reference size on 64-bit JVM: 4 bytes with compressed oops, 8 bytes without them, as under ZGC.
+    private static final int REFERENCE_SIZE = "false".equals(vmOption("UseCompressedOops")) ? 8 : 4;
 
-    // Per-entry structural overhead of common container internals. The shallow-size + sampled-element
-    // estimate does not otherwise count the node/entry wrappers or the backing table, which on wide
-    // maps dominate the footprint. Sizes assume compressed oops (FE heap < 32G):
-    //   HashMap.Node / ConcurrentHashMap.Node : header(12)+hash(4)+key+value+next(3*4)  -> 32
-    //   LinkedHashMap.Entry                   : Node + before + after(2*4)               -> 40
-    //   TreeMap.Entry / TreeSet               : header+key+value+left+right+parent+color -> 40
-    //   LinkedList.Node                       : header(12)+item+prev+next(3*4)           -> 24
-    private static final int HASH_NODE_SIZE = 32;
-    private static final int LINKED_HASH_ENTRY_SIZE = 40;
-    private static final int TREE_ENTRY_SIZE = 40;
-    private static final int LINKED_LIST_NODE_SIZE = 24;
     private static final double HASH_LOAD_FACTOR = 0.75;
 
     // A sampled collection counts each of its elements by the average of the samples. We then mark all its elements
@@ -109,6 +98,16 @@ public class Estimator {
             }
         }
     };
+
+    // Per-entry structural overhead of common container internals. The shallow-size + sampled-element
+    // estimate does not otherwise count the node/entry wrappers or the backing table, which on wide
+    // maps dominate the footprint. We take the sizes from the layout of the JDK classes, so that they follow
+    // the reference size: a HashMap node takes 32 bytes with compressed oops and 40 bytes under ZGC.
+    // ConcurrentHashMap.Node has the fields of HashMap.Node, and a TreeSet keeps TreeMap entries.
+    private static final int HASH_NODE_SIZE = nodeSize("java.util.HashMap$Node", 32);
+    private static final int LINKED_HASH_ENTRY_SIZE = nodeSize("java.util.LinkedHashMap$Entry", 40);
+    private static final int TREE_ENTRY_SIZE = nodeSize("java.util.TreeMap$Entry", 40);
+    private static final int LINKED_LIST_NODE_SIZE = nodeSize("java.util.LinkedList$Node", 24);
 
     // Registry for custom estimators
     protected static final Map<String, CustomEstimator> CUSTOM_ESTIMATORS = new HashMap<>();
@@ -795,6 +794,23 @@ public class Estimator {
         }
 
         return samples;
+    }
+
+    // The value of a HotSpot flag, or null if the JVM does not report it.
+    private static String vmOption(String name) {
+        try {
+            return ManagementFactory.getPlatformMXBean(HotSpotDiagnosticMXBean.class).getVMOption(name).getValue();
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    private static int nodeSize(String className, int defaultSize) {
+        try {
+            return (int) shallow(Class.forName(className));
+        } catch (ClassNotFoundException e) {
+            return defaultSize;
+        }
     }
 
     static Layouter layouterFromVmFlags() {
