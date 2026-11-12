@@ -19,6 +19,7 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.openjdk.jol.info.ClassLayout;
 import org.openjdk.jol.info.GraphLayout;
 
 import java.lang.reflect.Field;
@@ -1624,5 +1625,28 @@ class EstimatorTest {
         String name;
         SharedData sharedData1;
         AnotherSharedData sharedData2;
+    }
+
+    // ==================== Layout From VM Flags ====================
+
+    @Test
+    void testShallowSizeMatchesJolGuessOnTestJvm() throws ClassNotFoundException {
+        // The test JVM runs a collector under which the JOL guess of the layout is right, so the layout that we build
+        // from the VM flags must give the same sizes. The classes mix field types and inherit fields, as the
+        // metadata in the caches does.
+        assertNotNull(Estimator.layouterFromVmFlags());
+        String[] classNames = {
+                "java.lang.Object", "java.lang.String", "java.lang.Integer", "java.lang.Long",
+                "java.math.BigDecimal", "java.util.ArrayList", "java.util.HashMap", "java.util.LinkedHashMap",
+                "java.util.TreeMap", "java.util.concurrent.ConcurrentHashMap",
+                "org.apache.iceberg.TableMetadata", "org.apache.iceberg.BaseSnapshot",
+                "org.apache.iceberg.GenericDataFile", "org.apache.iceberg.types.Types$NestedField",
+                "com.starrocks.catalog.Column", "com.starrocks.catalog.OlapTable",
+        };
+        for (String name : classNames) {
+            Class<?> clazz = Class.forName(name);
+            assertEquals(ClassLayout.parseClass(clazz).instanceSize(), Estimator.shallow(clazz), name);
+        }
+        assertEquals(ClassLayout.parseClass(SimpleObject.class).instanceSize(), Estimator.shallow(SimpleObject.class));
     }
 }

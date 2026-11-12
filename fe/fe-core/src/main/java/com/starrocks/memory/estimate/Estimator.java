@@ -14,9 +14,17 @@
 
 package com.starrocks.memory.estimate;
 
+import com.sun.management.HotSpotDiagnosticMXBean;
 import org.jetbrains.annotations.NotNull;
+import org.openjdk.jol.datamodel.DataModel;
+import org.openjdk.jol.datamodel.Model64;
+import org.openjdk.jol.datamodel.Model64_CCPS;
+import org.openjdk.jol.datamodel.Model64_COOPS_CCPS;
 import org.openjdk.jol.info.ClassLayout;
+import org.openjdk.jol.layouters.HotSpotLayouter;
+import org.openjdk.jol.layouters.Layouter;
 
+import java.lang.management.ManagementFactory;
 import java.lang.reflect.Array;
 import java.lang.reflect.Field;
 import java.lang.reflect.InaccessibleObjectException;
@@ -74,6 +82,12 @@ public class Estimator {
     private static final int LINKED_LIST_NODE_SIZE = 24;
     private static final double HASH_LOAD_FACTOR = 0.75;
 
+    // By default JOL guesses the object layout of the running JVM from the addresses of objects it allocates. Under
+    // generational ZGC it guesses that objects are aligned to 64 KB, so every object would count as 64 KB and the caches
+    // that are bounded by these sizes would hold almost nothing. We read the layout flags of the JVM instead and let JOL
+    // place the fields by the rules of HotSpot for this JDK version. If the flags cannot be read, we keep the guess.
+    private static final Layouter LAYOUTER = layouterFromVmFlags();
+
     // Shallow sizes of classes (bound to Class lifecycle, avoids ClassLoader leaks)
     private static final ClassValue<Long> SHALLOW_SIZE = new ClassValue<>() {
         @Override
@@ -82,7 +96,8 @@ public class Estimator {
                 return HIDDEN_CLASS_SHALLOW_SIZE;
             }
             try {
-                return ClassLayout.parseClass(clazz).instanceSize();
+                ClassLayout layout = LAYOUTER != null ? ClassLayout.parseClass(clazz, LAYOUTER) : ClassLayout.parseClass(clazz);
+                return layout.instanceSize();
             } catch (RuntimeException e) {
                 return HIDDEN_CLASS_SHALLOW_SIZE;
             }
@@ -701,6 +716,29 @@ public class Estimator {
         }
 
         return samples;
+    }
+
+    static Layouter layouterFromVmFlags() {
+        try {
+            HotSpotDiagnosticMXBean vm = ManagementFactory.getPlatformMXBean(HotSpotDiagnosticMXBean.class);
+            boolean compressedOops = Boolean.parseBoolean(vm.getVMOption("UseCompressedOops").getValue());
+            boolean compressedClassPointers = Boolean.parseBoolean(vm.getVMOption("UseCompressedClassPointers").getValue());
+            int alignment = Integer.parseInt(vm.getVMOption("ObjectAlignmentInBytes").getValue());
+            DataModel model;
+            if (compressedOops && compressedClassPointers) {
+                model = new Model64_COOPS_CCPS(alignment);
+            } else if (compressedClassPointers) {
+                model = new Model64_CCPS(alignment);
+            } else if (!compressedOops) {
+                model = new Model64(alignment);
+            } else {
+                // JOL has no model for compressed oops without compressed class pointers.
+                return null;
+            }
+            return new HotSpotLayouter(model, Runtime.version().feature());
+        } catch (RuntimeException e) {
+            return null;
+        }
     }
 
     private static boolean isHiddenClass(Class<?> c) {
