@@ -567,12 +567,18 @@ public class AuthorizerStmtVisitor implements AstVisitorExtendInterface<Void, Co
 
     @Override
     public Void visitUseDbStatement(UseDbStmt statement, ConnectContext context) {
+        // USE catalog.db switches to that catalog, so we check the database in it, not in the catalog of the
+        // session. A catalog that does not exist has nothing to check: executing the statement reports it.
+        String catalog = statement.getCatalogName() != null ? statement.getCatalogName() : context.getCurrentCatalog();
+        if (statement.getCatalogName() != null &&
+                !GlobalStateMgr.getCurrentState().getCatalogMgr().catalogExists(catalog)) {
+            return null;
+        }
         try {
-            Authorizer.checkAnyActionOnOrInDb(context,
-                    context.getCurrentCatalog(), statement.getDbName());
+            Authorizer.checkAnyActionOnOrInDb(context, catalog, statement.getDbName());
         } catch (AccessDeniedException e) {
             AccessDeniedException.reportAccessDenied(
-                    context.getCurrentCatalog(),
+                    catalog,
                     context.getCurrentUserIdentity(), context.getCurrentRoleIds(),
                     PrivilegeType.ANY.name(), ObjectType.DATABASE.name(), statement.getDbName());
         }

@@ -310,6 +310,21 @@ public class RangerInterfaceTest {
                 () -> controller.checkAnyActionOnAnyTable(connectContext, "default_catalog", "no_such_db"));
     }
 
+    // A database that does not exist has no views, materialized views, functions or tables, so we expect each check
+    // to deny access rather than fail.
+    @Test
+    public void testChecksInMissingDbDenyAccess() {
+        RangerStarRocksAccessController controller = new RangerStarRocksAccessController();
+        Assertions.assertThrows(AccessDeniedException.class,
+                () -> controller.checkAnyActionOnAnyView(connectContext, "no_such_db"));
+        Assertions.assertThrows(AccessDeniedException.class,
+                () -> controller.checkAnyActionOnAnyMaterializedView(connectContext, "no_such_db"));
+        Assertions.assertThrows(AccessDeniedException.class,
+                () -> controller.checkAnyActionOnAnyFunction(connectContext, "no_such_db"));
+        Assertions.assertThrows(AccessDeniedException.class,
+                () -> controller.checkActionInDb(connectContext, "no_such_db", PrivilegeType.SELECT));
+    }
+
     @Test
     public void testRewriteWithAlias() throws Exception {
         Expr e = SqlParser.parseSqlToExpr("v4+1", new ConnectContext().getSessionVariable().getSqlMode());

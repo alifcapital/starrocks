@@ -212,6 +212,10 @@ public class RangerStarRocksAccessController extends RangerAccessController {
     @Override
     public void checkAnyActionOnAnyView(ConnectContext context, String db) throws AccessDeniedException {
         Database database = GlobalStateMgr.getServingState().getLocalMetastore().getDb(db);
+        if (database == null) {
+            // A database that does not exist has no views, so the user has no action on any of them.
+            throw new AccessDeniedException();
+        }
         for (Table table : database.getViews()) {
             try {
                 hasPermission(
@@ -263,6 +267,10 @@ public class RangerStarRocksAccessController extends RangerAccessController {
     public void checkAnyActionOnAnyMaterializedView(ConnectContext context, String db)
             throws AccessDeniedException {
         Database database = GlobalStateMgr.getServingState().getLocalMetastore().getDb(db);
+        if (database == null) {
+            // A database that does not exist has no materialized views, so the user has no action on any of them.
+            throw new AccessDeniedException();
+        }
         for (Table table : database.getMaterializedViews()) {
             try {
                 hasPermission(
@@ -313,6 +321,10 @@ public class RangerStarRocksAccessController extends RangerAccessController {
     @Override
     public void checkAnyActionOnAnyFunction(ConnectContext context, String db) throws AccessDeniedException {
         Database database = GlobalStateMgr.getServingState().getLocalMetastore().getDb(db);
+        if (database == null) {
+            // A database that does not exist has no functions, so the user has no action on any of them.
+            throw new AccessDeniedException();
+        }
         for (Function function : database.getFunctions()) {
             try {
                 hasPermission(
@@ -363,6 +375,10 @@ public class RangerStarRocksAccessController extends RangerAccessController {
     public void checkActionInDb(ConnectContext context, String db, PrivilegeType privilegeType)
             throws AccessDeniedException {
         Database database = GlobalStateMgr.getCurrentState().getLocalMetastore().getDb(db);
+        if (database == null) {
+            // A database that does not exist has no tables, so the user has no action on any of them.
+            throw new AccessDeniedException();
+        }
         for (Table table : GlobalStateMgr.getCurrentState().getLocalMetastore().getTables(database.getId())) {
             if (table.isOlapView()) {
                 checkViewAction(context, new TableName(database.getFullName(), table.getName()), privilegeType);

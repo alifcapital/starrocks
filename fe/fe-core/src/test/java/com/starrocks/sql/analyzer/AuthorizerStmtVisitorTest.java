@@ -17,14 +17,21 @@ package com.starrocks.sql.analyzer;
 import com.starrocks.common.Config;
 import com.starrocks.common.FeConstants;
 import com.starrocks.qe.ConnectContext;
+import com.starrocks.server.CatalogMgr;
 import com.starrocks.sql.ast.RecoverDbStmt;
 import com.starrocks.sql.ast.ShowCreateDbStmt;
+import com.starrocks.sql.ast.UseDbStmt;
 import com.starrocks.sql.parser.SqlParser;
 import com.starrocks.utframe.UtFrameUtils;
+import mockit.Mock;
+import mockit.MockUp;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+
+import java.util.ArrayList;
+import java.util.List;
 
 public class AuthorizerStmtVisitorTest {
 
@@ -131,5 +138,36 @@ public class AuthorizerStmtVisitorTest {
             Assertions.assertFalse(e.getMessage().contains("No catalog selected"),
                     "Should not throw noCatalogSelected exception when catalog is set: " + e.getMessage());
         }
+    }
+
+    // USE catalog.db switches to that catalog, so we expect the privileges to be checked on the database in that
+    // catalog, not in the catalog of the session.
+    @Test
+    public void testUseDbChecksTheCatalogOfTheStatement() throws Exception {
+        List<String> checkedCatalogs = new ArrayList<>();
+        new MockUp<CatalogMgr>() {
+            @Mock
+            public boolean catalogExists(String name) {
+                return !name.equals("no_such_catalog");
+            }
+        };
+        new MockUp<Authorizer>() {
+            @Mock
+            public void checkAnyActionOnOrInDb(ConnectContext ctx, String catalogName, String db) {
+                checkedCatalogs.add(catalogName + "." + db);
+            }
+        };
+        connectContext.setCurrentCatalog("default_catalog");
+        AuthorizerStmtVisitor visitor = new AuthorizerStmtVisitor();
+
+        visitor.visitUseDbStatement((UseDbStmt) SqlParser.parse("USE iceberg_catalog.db1",
+                connectContext.getSessionVariable()).get(0), connectContext);
+        visitor.visitUseDbStatement((UseDbStmt) SqlParser.parse("USE db2",
+                connectContext.getSessionVariable()).get(0), connectContext);
+        // Executing the statement reports a catalog that does not exist.
+        visitor.visitUseDbStatement((UseDbStmt) SqlParser.parse("USE no_such_catalog.db3",
+                connectContext.getSessionVariable()).get(0), connectContext);
+
+        Assertions.assertEquals(List.of("iceberg_catalog.db1", "default_catalog.db2"), checkedCatalogs);
     }
 }
