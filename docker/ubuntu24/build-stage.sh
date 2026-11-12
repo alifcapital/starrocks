@@ -6,7 +6,8 @@ container=${SR_BUILD_CONTAINER:-starrocks-4.1-ubuntu24}
 repo=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
 mkdir -p "$HOME/build-logs"
 case "$stage" in
-    release) command='./build.sh --be --fe --enable-shared-data -j$(nproc)' ;;
+    # The binaries we deploy are built with AVX-512, so the release stage warms the cache for that build.
+    release) command='USE_AVX512=ON ./build.sh --be --fe --enable-shared-data -j$(nproc)' ;;
     asan) command='BUILD_TYPE=ASAN ./build.sh --be --enable-shared-data -j$(nproc)' ;;
     ut) command='./run-be-ut.sh --enable-shared-data --without-java-ext -j$(nproc) --gtest_filter="AggregateTest.*:HashMapTest.*:ChunkTest.*:StarCacheEngineTest.*:BlockCacheTest.*:NewFsStarletTest.*"' ;;
     fe-tests) command='CUSTOM_MVN="mvn -Dmaven.clean.skip=true" ./run-fe-ut.sh -j4 --test "com.starrocks.proc.FrontendsProcNodeTest,com.starrocks.service.FrontendOptionsTest,com.starrocks.system.SystemInfoServiceTest,com.starrocks.service.GroovyUDSServerTest,com.starrocks.sql.analyzer.CreateFunctionStmtAnalyzerTest,com.starrocks.sql.plan.UDFTest"' ;;
