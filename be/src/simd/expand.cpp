@@ -300,6 +300,7 @@ void expand_load_simd(int64_t* dst_data, const int64_t* src_data, const uint8_t*
 #endif
 }
 
+template void expand_load_branchless<uint8_t>(uint8_t*, const uint8_t*, const uint8_t*, size_t);
 template void expand_load_branchless<int32_t>(int32_t*, const int32_t*, const uint8_t*, size_t);
 template void expand_load_branchless<uint32_t>(uint32_t*, const uint32_t*, const uint8_t*, size_t);
 template void expand_load_branchless<double>(double*, const double*, const uint8_t*, size_t);

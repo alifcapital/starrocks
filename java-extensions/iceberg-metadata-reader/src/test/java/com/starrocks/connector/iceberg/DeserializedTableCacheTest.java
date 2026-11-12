@@ -22,6 +22,7 @@ import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.inmemory.InMemoryCatalog;
 import org.apache.iceberg.inmemory.InMemoryFileIO;
+import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.SerializationUtil;
 import org.junit.jupiter.api.Test;
@@ -65,11 +66,11 @@ public class DeserializedTableCacheTest {
             for (int i = 0; i < threads; i++) {
                 futures.add(pool.submit(() -> {
                     gate.await();
-                    return cache.get("same-payload", () -> {
+                    return cache.acquire("same-payload", () -> {
                         loadCount.incrementAndGet();
                         Thread.sleep(20);
                         return makeTable();
-                    });
+                    }).table();
                 }));
             }
             Table first = futures.get(0).get(10, TimeUnit.SECONDS);
@@ -87,13 +88,13 @@ public class DeserializedTableCacheTest {
     @Test
     public void testDistinctPayloadsAreIsolated() {
         DeserializedTableCache cache = new DeserializedTableCache(600, NO_EVICTION);
-        Table a = cache.get("payload-A", DeserializedTableCacheTest::makeTable);
-        Table b = cache.get("payload-B", DeserializedTableCacheTest::makeTable);
+        Table a = cache.acquire("payload-A", DeserializedTableCacheTest::makeTable).table();
+        Table b = cache.acquire("payload-B", DeserializedTableCacheTest::makeTable).table();
         assertNotSame(a, b);
 
-        Table aHit = cache.get("payload-A", () -> {
+        Table aHit = cache.acquire("payload-A", () -> {
             throw new AssertionError("loader must not run on a cache hit");
-        });
+        }).table();
         assertSame(a, aHit);
     }
 
@@ -104,13 +105,13 @@ public class DeserializedTableCacheTest {
         DeserializedTableCache cache = new DeserializedTableCache(600, 1);
         AtomicInteger keepLoads = new AtomicInteger();
 
-        cache.get("keep", () -> {
+        cache.acquire("keep", () -> {
             keepLoads.incrementAndGet();
             return makeTable();
         });
         // maxEntries=1, so inserting another distinct payload evicts "keep" (LRU)
-        cache.get("other", DeserializedTableCacheTest::makeTable);
-        cache.get("keep", () -> {
+        cache.acquire("other", DeserializedTableCacheTest::makeTable);
+        cache.acquire("keep", () -> {
             keepLoads.incrementAndGet();
             return makeTable();
         });
@@ -118,21 +119,89 @@ public class DeserializedTableCacheTest {
         assertEquals(2, keepLoads.get(), "evicted entry must be reloaded on next access");
     }
 
-    // public get() path: a real serialized payload is deserialized once and then served from cache.
+    // public acquire() path: a real serialized payload is deserialized once and then served from cache.
     @Test
     public void testGetDeserializesAndCachesRealPayload() {
         String payload = SerializationUtil.serializeToBase64(makeTable());
         DeserializedTableCache cache = new DeserializedTableCache(600, NO_EVICTION);
-        Table first = cache.get(payload);
+        Table first = cache.acquire(payload).table();
         assertNotNull(first.schema());
-        assertSame(first, cache.get(payload), "second get must hit the cache");
+        assertSame(first, cache.acquire(payload).table(), "second acquire must hit the cache");
+    }
+
+    // The FileIO of the shared table is closed once the entry left the cache and the last lease is closed, not
+    // before: the other scan tasks of the table still read through it.
+    @Test
+    public void testFileIOClosedWhenRemovedAndNoLeaseHoldsIt() {
+        DeserializedTableCache cache = new DeserializedTableCache(600, NO_EVICTION);
+        CountingFileIO io = new CountingFileIO();
+        DeserializedTableCache.Lease first = cache.acquire("payload", () -> makeTable(io));
+        DeserializedTableCache.Lease second = cache.acquire("payload", () -> {
+            throw new AssertionError("loader must not run on a cache hit");
+        });
+        assertSame(first.table(), second.table());
+
+        first.close();
+        assertEquals(0, io.closes.get(), "an entry in the cache keeps its FileIO open");
+        cache.invalidateAll();
+        assertEquals(0, io.closes.get(), "a lease still holds the removed entry");
+        second.close();
+        assertEquals(1, io.closes.get(), "the last lease of a removed entry closes its FileIO");
+        // closing a lease again releases nothing more
+        second.close();
+        first.close();
+        assertEquals(1, io.closes.get());
+    }
+
+    // An entry without leases closes its FileIO as it leaves the cache, also by size eviction.
+    @Test
+    public void testFileIOClosedOnEvictionWithoutLease() {
+        DeserializedTableCache cache = new DeserializedTableCache(600, 1);
+        CountingFileIO io = new CountingFileIO();
+        cache.acquire("evicted", () -> makeTable(io)).close();
+        assertEquals(0, io.closes.get());
+        cache.acquire("other", DeserializedTableCacheTest::makeTable).close();
+        assertEquals(1, io.closes.get());
+    }
+
+    // A lookup never hands out an entry that left the cache, whose FileIO may be closed: it loads a new one.
+    @Test
+    public void testRemovedEntryIsNotHandedOut() {
+        DeserializedTableCache cache = new DeserializedTableCache(600, NO_EVICTION);
+        AtomicInteger loads = new AtomicInteger();
+        CountingFileIO io = new CountingFileIO();
+        Table first = cache.acquire("payload", () -> {
+            loads.incrementAndGet();
+            return makeTable(io);
+        }).table();
+        cache.invalidateAll();
+        Table second = cache.acquire("payload", () -> {
+            loads.incrementAndGet();
+            return makeTable();
+        }).table();
+        assertNotSame(first, second);
+        assertEquals(2, loads.get());
+    }
+
+    private static final class CountingFileIO extends InMemoryFileIO {
+        private final AtomicInteger closes = new AtomicInteger();
+
+        @Override
+        public void close() {
+            closes.incrementAndGet();
+            super.close();
+        }
     }
 
     private static Table makeTable() {
+        return makeTable(new InMemoryFileIO());
+    }
+
+    private static Table makeTable(FileIO io) {
         InMemoryCatalog catalog = new InMemoryCatalog();
         catalog.initialize("test", new HashMap<>());
         catalog.createNamespace(Namespace.of("db"));
         Table table = catalog.createTable(TableIdentifier.of("db", "tbl"), SCHEMA, PartitionSpec.unpartitioned());
-        return new SerializableTable(table, new InMemoryFileIO());
+        return new SerializableTable(table, io);
     }
 }

@@ -67,7 +67,6 @@ class ReorderJoinStatisticsPruningTest {
                 .addColumnStatistic(id, known).addColumnStatistic(source, known)
                 .addColumnStatistic(cast, known).addColumnStatistic(unused, known)
                 .addMultiColumnStatistics(Set.of(id, source), new MultiColumnCombinedStats(100)).build());
-        optimizer.setObtainedFromInternalStatistics(true);
         return expression;
     }
 

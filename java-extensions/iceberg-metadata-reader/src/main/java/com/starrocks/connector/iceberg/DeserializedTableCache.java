@@ -28,6 +28,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.apache.iceberg.util.SerializationUtil.deserializeFromBase64;
@@ -59,7 +60,13 @@ import static org.apache.iceberg.util.SerializationUtil.deserializeFromBase64;
  * size-eviction warning below.
  *
  * <p>Expiry uses {@code expireAfterWrite} (not {@code expireAfterAccess}) because the table carries
- * a {@code FileIO} bound to credentials that can expire; the TTL matches the FileIO cache.
+ * a {@code FileIO} bound to credentials that can expire.
+ *
+ * <p>FileIO: the scan tasks read files through the {@code FileIO} of the shared table, so they share it
+ * too. We fear that a task closing it would break the reads of the other tasks, and that a FileIO nobody
+ * closes keeps its client open. So a task holds the entry through a {@link Lease}, and the cache closes the
+ * FileIO of an entry once the entry has left the cache and no lease holds it. A task never gets an entry
+ * that has left the cache: it loads a new one.
  */
 public class DeserializedTableCache {
     private static final Logger LOG = LoggerFactory.getLogger(DeserializedTableCache.class);
@@ -67,7 +74,7 @@ public class DeserializedTableCache {
     // Throttle: warn on the first size-eviction (early signal) and then once per this many.
     private static final long EVICTION_LOG_INTERVAL = 100;
 
-    private final Cache<String, Table> cache;
+    private final Cache<String, Entry> cache;
     private final int maxEntries;
     private final AtomicLong sizeEvictions = new AtomicLong();
 
@@ -80,10 +87,11 @@ public class DeserializedTableCache {
                 .concurrencyLevel(1)
                 .expireAfterWrite(expireSeconds, TimeUnit.SECONDS)
                 .maximumSize(maxEntries)
-                .removalListener((RemovalListener<String, Table>) notification -> {
+                .removalListener((RemovalListener<String, Entry>) notification -> {
                     if (notification.getCause() == RemovalCause.SIZE) {
                         onSizeEviction();
                     }
+                    notification.getValue().remove();
                 })
                 .build();
     }
@@ -92,25 +100,120 @@ public class DeserializedTableCache {
         return maxEntries;
     }
 
-    public Table get(String serializedTable) {
-        return get(serializedTable, () -> deserializeFromBase64(serializedTable));
+    /**
+     * The shared table of the payload, held until the lease is closed. The caller must close the lease.
+     */
+    public Lease acquire(String serializedTable) {
+        return acquire(serializedTable, () -> deserializeFromBase64(serializedTable));
     }
 
     // Single-flight: exactly one loader call runs per key; concurrent callers of the same key block
     // on it and share the result. The loader seam lets tests count and delay deserialization.
-    Table get(String payload, Callable<Table> loader) {
+    Lease acquire(String payload, Callable<Table> loader) {
         String cacheKey = sha256Hex(payload);
-        try {
-            return cache.get(cacheKey, () -> {
-                LOG.debug("DeserializedTableCache miss for key {}", cacheKey);
-                return loader.call();
-            });
-        } catch (ExecutionException e) {
-            Throwable cause = e.getCause() != null ? e.getCause() : e;
-            if (cause instanceof RuntimeException) {
-                throw (RuntimeException) cause;
+        while (true) {
+            Entry entry;
+            try {
+                entry = cache.get(cacheKey, () -> {
+                    LOG.debug("DeserializedTableCache miss for key {}", cacheKey);
+                    return new Entry(loader.call());
+                });
+            } catch (ExecutionException e) {
+                Throwable cause = e.getCause() != null ? e.getCause() : e;
+                if (cause instanceof RuntimeException) {
+                    throw (RuntimeException) cause;
+                }
+                throw new RuntimeException("Failed to deserialize iceberg table", cause);
             }
-            throw new RuntimeException("Failed to deserialize iceberg table", cause);
+            if (entry.hold()) {
+                return new Lease(entry);
+            }
+            // The entry left the cache after the lookup, so its FileIO may be closed already. The next lookup
+            // does not find it and loads a new one.
+        }
+    }
+
+    /**
+     * Drops every entry. The FileIO of each one is closed once no lease holds it.
+     */
+    void invalidateAll() {
+        cache.invalidateAll();
+    }
+
+    /**
+     * A hold on a shared table. Closing it more than once has no effect.
+     */
+    public static final class Lease implements AutoCloseable {
+        private final Entry entry;
+        private final AtomicBoolean closed = new AtomicBoolean();
+
+        private Lease(Entry entry) {
+            this.entry = entry;
+        }
+
+        public Table table() {
+            return entry.table;
+        }
+
+        @Override
+        public void close() {
+            if (closed.compareAndSet(false, true)) {
+                entry.release();
+            }
+        }
+    }
+
+    private static final class Entry {
+        private final Table table;
+        // guarded by this
+        private int leases;
+        // guarded by this
+        private boolean removed;
+
+        private Entry(Table table) {
+            this.table = table;
+        }
+
+        private boolean hold() {
+            synchronized (this) {
+                if (removed) {
+                    return false;
+                }
+                leases++;
+                return true;
+            }
+        }
+
+        private void release() {
+            boolean close;
+            synchronized (this) {
+                leases--;
+                close = removed && leases == 0;
+            }
+            if (close) {
+                closeFileIO();
+            }
+        }
+
+        private void remove() {
+            boolean close;
+            synchronized (this) {
+                removed = true;
+                close = leases == 0;
+            }
+            if (close) {
+                closeFileIO();
+            }
+        }
+
+        private void closeFileIO() {
+            try {
+                if (table.io() != null) {
+                    table.io().close();
+                }
+            } catch (RuntimeException e) {
+                LOG.warn("Failed to close the FileIO of iceberg table {}", table.name(), e);
+            }
         }
     }
 

@@ -298,7 +298,7 @@ private:
     StatusOr<ColumnPtr> divide(ExprContext* context, const ColumnPtr& l, const ColumnPtr& r) {
         if constexpr (is_intdiv_op<Op> && lt_is_bigint<Type>) {
 #define EVALUATE_CHECKED_OVERFLOW(Mode)                                                   \
-    using CastFunction = VectorizedUnaryFunction<DecimalTo<Mode>>;                        \
+    using CastFunction = VectorizedDecimalCastFunction<DecimalTo, Mode>;                  \
     switch (_children[0]->type().type) {                                                  \
     case TYPE_DECIMAL32: {                                                                \
         ASSIGN_OR_RETURN(auto column, divide_internal<TYPE_DECIMAL32>(context, l, r));    \

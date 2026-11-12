@@ -567,12 +567,16 @@ public class MetadataMgrTest {
         ColumnRefOperator uncollected = new ColumnRefOperator(2, IntegerType.INT, "uncollected", true);
         ColumnStatistic known = ColumnStatistic.builder().setMinValue(1).setMaxValue(100)
                 .setNullsFraction(0).setAverageRowSize(4).setDistinctValuesCount(50).build();
+        // The sources are the ones of the real lookups: ANALYZE for internal statistics, TABLE_METADATA for the connector.
         Statistics partial = Statistics.builder().setOutputRowCount(1000)
+                .setStatsSource(Statistics.StatsSource.ANALYZE)
                 .addColumnStatistic(collected, known)
                 .addColumnStatistic(uncollected, ColumnStatistic.unknown()).build();
         Statistics full = Statistics.builder().setOutputRowCount(1000)
+                .setStatsSource(Statistics.StatsSource.ANALYZE)
                 .addColumnStatistic(collected, known).addColumnStatistic(uncollected, known).build();
         Statistics connector = Statistics.builder().setOutputRowCount(100)
+                .setStatsSource(Statistics.StatsSource.TABLE_METADATA)
                 .addColumnStatistic(collected, known).addColumnStatistic(uncollected, known).build();
         Statistics[] internalResult = {partial};
         Statistics[] connectorResult = {connector};
@@ -622,7 +626,8 @@ public class MetadataMgrTest {
                 boolean usesConnector = scenario == 0 || scenario == 5;
                 Assertions.assertEquals(usesConnector ? 100 : 1000, result.getOutputRowCount(), 0.001,
                         "scenario " + scenario);
-                Assertions.assertEquals(!usesConnector, session.isObtainedFromInternalStatistics(),
+                Assertions.assertEquals(usesConnector ? Statistics.StatsSource.TABLE_METADATA :
+                                Statistics.StatsSource.ANALYZE, result.getStatsSource(),
                         "partition pruning must follow the row-count source; scenario " + scenario);
                 Assertions.assertEquals(scenario == 0 || scenario == 2 || scenario == 5 ? 1 : 0,
                         connectorCalls[0], "scenario " + scenario);

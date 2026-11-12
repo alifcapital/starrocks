@@ -210,6 +210,7 @@ set(EXEC_FILES
         ./exprs/decimal_cast_expr_float_test.cpp
         ./exprs/decimal_cast_expr_time_test.cpp
         ./exprs/decimal_cast_expr_decimalv2_test.cpp
+        ./exprs/decimal_null_row_report_error_test.cpp
         ./exprs/coalesce_expr_test.cpp
         ./exprs/compound_predicate_test.cpp
         ./exprs/condition_expr_test.cpp
@@ -376,7 +377,6 @@ set(EXEC_FILES
         ./exec/pipeline/spillable_sort_source_lockstep_test.cpp
         ./exec/query_cache/cache_wrapper_forwarding_test.cpp
         ./io/spill_observable_test.cpp
-        ./io/spill_prefetch_test.cpp
         ./util/spill_metrics_test.cpp
         ./io/dir_manager_test.cpp
         ./io/spill_test.cpp
@@ -419,6 +419,7 @@ set(EXEC_FILES
         ./runtime/routine_load/data_consumer_test.cpp
         ./runtime/small_file_mgr_test.cpp
         ./runtime/snapshot_loader_test.cpp
+        ./runtime/stream_context_mgr_test.cpp
         ./runtime/stream_load_pipe_test.cpp
         ./runtime/time_bounded_stream_load_pipe_test.cpp
         ./runtime/type_descriptor_test.cpp
@@ -650,6 +651,7 @@ SET(DW_TEST_FILES
     ./storage/lake/primary_key_compaction_task_test.cpp
     ./storage/lake/primary_key_publish_test.cpp
     ./storage/lake/lake_merged_del_op_offset_test.cpp
+    ./storage/lake/lake_merged_bundled_segments_test.cpp
     ./storage/lake/lake_multi_statement_bundle_mix_test.cpp
     ./storage/lake/lake_multi_statement_publish_test.cpp
     ./storage/lake/tablet_reshard_helper_test.cpp

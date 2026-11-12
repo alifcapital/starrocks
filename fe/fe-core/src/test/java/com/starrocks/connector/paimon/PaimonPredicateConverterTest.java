@@ -553,4 +553,24 @@ public class PaimonPredicateConverterTest {
                         new com.starrocks.type.DecimalType(PrimitiveType.DECIMAL64, 15, 3)));
         Assertions.assertNull(result);
     }
+
+    @Test
+    public void testLikePrefixPushdownRejectsWildcardsAndEscapes() {
+        // 'a_c%' also matches abc1 and axc2, so pushing startsWith("a_c") prunes the data files whose
+        // statistics only hold those two and the rows in them go missing
+        Assertions.assertNull(CONVERTER.convert(new LikePredicateOperator(
+                        LikePredicateOperator.LikeType.LIKE, F1, ConstantOperator.createVarchar("a_c%"))),
+                "A single-character wildcard has no prefix form");
+
+        // '\' escapes the character behind it, as in the BE: an escaped underscore is a literal underscore of the
+        // prefix, and after an escaped trailing percent sign no wildcard is left, so there is no prefix
+        Predicate escaped = CONVERTER.convert(new LikePredicateOperator(
+                LikePredicateOperator.LikeType.LIKE, F1, ConstantOperator.createVarchar("a\\_c%")));
+        Assertions.assertTrue(escaped instanceof LeafPredicate, "An escaped underscore is a literal underscore of the prefix");
+        Assertions.assertTrue(((LeafPredicate) escaped).function() instanceof StartsWith);
+        Assertions.assertEquals("a_c", ((LeafPredicate) escaped).literals().get(0).toString());
+        Assertions.assertNull(CONVERTER.convert(new LikePredicateOperator(
+                        LikePredicateOperator.LikeType.LIKE, F1, ConstantOperator.createVarchar("abc\\%"))),
+                "An escaped trailing percent sign is a literal, not a wildcard");
+    }
 }

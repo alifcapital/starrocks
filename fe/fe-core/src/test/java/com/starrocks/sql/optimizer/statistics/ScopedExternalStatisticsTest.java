@@ -155,10 +155,8 @@ class ScopedExternalStatisticsTest {
             Assertions.assertEquals(101, first.getOutputRowCount());
             // Deriving a filtered output must not replace the cached base scan.
             Assertions.assertEquals(50, first.withOutputRowCount(50).getOutputRowCount());
-            optimizer.setObtainedFromInternalStatistics(true);
             Assertions.assertSame(first, baseEstimate(metadata, optimizer, Map.copyOf(columns), null,
                     predicate.clone(), -1, TvrTableSnapshot.of(123L)));
-            Assertions.assertFalse(optimizer.isObtainedFromInternalStatistics());
             verify(metadata, times(1)).prepareExternalStatisticsRequest(any(), any(), any(), any(), any(),
                     any(), anyLong(), any());
             Assertions.assertEquals(1, fallbacks.get());
@@ -189,7 +187,7 @@ class ScopedExternalStatisticsTest {
             Statistics collected = baseEstimate(metadata, nextQuery, columns, null, predicate,
                     -1, TvrTableSnapshot.of(123L));
             Assertions.assertEquals(10, collected.getColumnStatistic(ref).getDistinctValuesCount());
-            Assertions.assertTrue(nextQuery.isObtainedFromInternalStatistics());
+            Assertions.assertEquals(Statistics.StatsSource.ANALYZE, collected.getStatsSource());
             Assertions.assertEquals(5, fallbacks.get());
         } finally {
             FeConstants.runningUnitTest = oldUnit;

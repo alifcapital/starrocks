@@ -612,7 +612,7 @@ public class ScalarOperatorsReuseTest {
         outputs.put(o5, b);
         outputs.put(o6, addOne(a));
         Projection result = ScalarOperatorsReuse.rewriteProjectionOrLambdaExpr(new Projection(outputs),
-                columnRefFactory);
+                columnRefFactory, false);
 
         assertEquals(1, result.getCommonSubOperatorMap().size());
         ColumnRefOperator common = result.getCommonSubOperatorMap().keySet().iterator().next();

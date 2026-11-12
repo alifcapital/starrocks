@@ -21,6 +21,7 @@ import com.starrocks.catalog.AggregateFunction;
 import com.starrocks.catalog.Function;
 import com.starrocks.catalog.FunctionSet;
 import com.starrocks.common.AnalysisException;
+import com.starrocks.common.Pair;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.SessionVariable;
 import com.starrocks.sql.analyzer.SemanticException;
@@ -43,6 +44,7 @@ import com.starrocks.sql.optimizer.operator.logical.LogicalWindowOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ScalarOperatorUtil;
 import com.starrocks.type.IntegerType;
 import com.starrocks.type.PrimitiveType;
 import com.starrocks.type.Type;
@@ -52,6 +54,7 @@ import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -103,6 +106,9 @@ public class WindowTransformer {
         FunctionCallExpr callExpr = analyticExpr.getFnCall();
         AnalyticWindow windowFrame = analyticExpr.getWindow();
         List<OrderByElement> orderByElements = analyticExpr.getOrderByElements();
+        // The function name the window is evaluated with. It differs from callExpr's when the window is reversed.
+        String fnName = callExpr.getFunctionName();
+        Pair<String, Function> reversedFunction = null;
 
         // Set a window from UNBOUNDED PRECEDING to CURRENT_ROW for row_number().
         if (isRowNumberFn(callExpr.getFn())) {
@@ -170,16 +176,36 @@ public class WindowTransformer {
 
         // Reverse the ordering and window for windows ending with UNBOUNDED FOLLOWING,
         // and not starting with UNBOUNDED PRECEDING.
-        String fnName = callExpr.getFunctionName();
-        if (windowFrame != null && isReversedWindow(windowFrame)) {
+        if (windowFrame != null
+                && windowFrame.getRightBoundary().getBoundaryType() == AnalyticWindowBoundary.BoundaryType.UNBOUNDED_FOLLOWING
+                && windowFrame.getLeftBoundary().getBoundaryType() != AnalyticWindowBoundary.BoundaryType.UNBOUNDED_PRECEDING) {
             orderByElements = OrderByElement.reverse(orderByElements);
             windowFrame = windowFrame.reverse();
 
             // Also flip first_value()/last_value(). For other analytic functions there is no
             // need to also change the function.
-            String reversedFnName = reversedFnName(callExpr);
+            String reversedFnName = null;
+
+            if (callExpr.getFunctionName().equalsIgnoreCase(AnalyticExpr.FIRSTVALUE)) {
+                reversedFnName = FunctionSet.LAST_VALUE;
+            } else if (callExpr.getFunctionName().equalsIgnoreCase(AnalyticExpr.LASTVALUE)) {
+                reversedFnName = FunctionSet.FIRST_VALUE;
+            }
+
             if (reversedFnName != null) {
+                Function analyzedFn = callExpr.getFn();
+                Function builtinFn = ExprUtils.getBuiltinFunction(reversedFnName,
+                        analyzedFn.getArgs(), Function.CompareMode.IS_IDENTICAL);
+                Preconditions.checkState(builtinFn != null, "No builtin function %s for %s",
+                        reversedFnName, analyzedFn);
+                // The builtin signature uses wildcard types such as DECIMAL128(-1, -1). Keep the
+                // argument and return types the analyzer resolved, or BE builds the result column
+                // with an invalid precision and scale.
+                // Do not rename callExpr in place: the same AST can be planned more than once (for example
+                // INSERT OVERWRITE and MV refresh), and a renamed function would be reversed a second time.
                 fnName = reversedFnName;
+                reversedFunction = Pair.create(reversedFnName, ScalarOperatorUtil.withConcreteTypes(builtinFn,
+                        analyzedFn.getArgs(), analyzedFn.getReturnType()));
             }
         }
 
@@ -203,7 +229,8 @@ public class WindowTransformer {
         }
 
         // Change first_value/last_value RANGE windows to ROWS
-        if ((fnName.equalsIgnoreCase(AnalyticExpr.FIRSTVALUE) || fnName.equalsIgnoreCase(AnalyticExpr.LASTVALUE))
+        if ((fnName.equalsIgnoreCase(AnalyticExpr.FIRSTVALUE)
+                || fnName.equalsIgnoreCase(AnalyticExpr.LASTVALUE))
                 && windowFrame != null
                 && windowFrame.getType() == AnalyticWindow.Type.RANGE) {
             windowFrame = new AnalyticWindow(AnalyticWindow.Type.ROWS, windowFrame.getLeftBoundary(),
@@ -234,41 +261,12 @@ public class WindowTransformer {
 
         analyticExpr.getOrderByElements().clear();
         analyticExpr.getOrderByElements().addAll(orderings);
-        return new WindowOperator(analyticExpr, analyticExpr.getPartitionExprs(),
+        WindowOperator windowOperator = new WindowOperator(analyticExpr, analyticExpr.getPartitionExprs(),
                 orderByElements, windowFrame);
-    }
-
-    private static boolean isReversedWindow(AnalyticWindow window) {
-        return window.getRightBoundary().getBoundaryType() == AnalyticWindowBoundary.BoundaryType.UNBOUNDED_FOLLOWING
-                && window.getLeftBoundary().getBoundaryType() != AnalyticWindowBoundary.BoundaryType.UNBOUNDED_PRECEDING;
-    }
-
-    private static String reversedFnName(FunctionCallExpr callExpr) {
-        if (callExpr.getFunctionName().equalsIgnoreCase(AnalyticExpr.FIRSTVALUE)) {
-            return AnalyticExpr.LASTVALUE;
-        } else if (callExpr.getFunctionName().equalsIgnoreCase(AnalyticExpr.LASTVALUE)) {
-            return AnalyticExpr.FIRSTVALUE;
+        if (reversedFunction != null) {
+            windowOperator.reversedFunctions.put(analyticExpr, reversedFunction);
         }
-        return null;
-    }
-
-    // We expect the same analyzed AnalyticExpr to be planned more than once: once per reference of a CTE,
-    // again when the planner retries, and twice in one query when ORDER BY names it by position. So
-    // standardize() keeps it unchanged, and we flip first_value()/last_value() of a reversed window here,
-    // in the translated call only. For these two functions standardize() reverses the window written in
-    // the query, so we check that window.
-    private static CallOperator reverseFirstLastValue(AnalyticExpr analyticExpr, CallOperator call) {
-        FunctionCallExpr callExpr = analyticExpr.getFnCall();
-        String reversedFnName = reversedFnName(callExpr);
-        if (reversedFnName == null || analyticExpr.getWindow() == null || !isReversedWindow(analyticExpr.getWindow())) {
-            return call;
-        }
-        Function reversedFn = ExprUtils.getBuiltinFunction(reversedFnName,
-                callExpr.getFn().getArgs(), Function.CompareMode.IS_IDENTICAL);
-        CallOperator reversedCall = new CallOperator(reversedFnName.toLowerCase(), call.getType(), call.getChildren(),
-                reversedFn, call.isDistinct());
-        reversedCall.setIgnoreNulls(call.getIgnoreNulls());
-        return reversedCall;
+        return windowOperator;
     }
 
     /**
@@ -291,9 +289,17 @@ public class WindowTransformer {
                 // because it may conflict with the function of the same name
                 // in the aggregation and be converted into the expression generated on agg
                 // eg. select sum(v1), sum(v1) over(order by v2) from foo
-                ScalarOperator agg = reverseFirstLastValue(analyticExpr, (CallOperator)
+                ScalarOperator agg =
                         SqlToScalarOperatorTranslator.translate(analyticExpr, subOpt.getExpressionMapping(),
-                                columnRefFactory));
+                                columnRefFactory);
+                Pair<String, Function> reversedFunction = windowOperator.reversedFunctions.get(analyticExpr);
+                if (reversedFunction != null) {
+                    CallOperator call = (CallOperator) agg;
+                    CallOperator reversedCall = new CallOperator(reversedFunction.first, call.getType(),
+                            call.getChildren(), reversedFunction.second, call.isDistinct());
+                    reversedCall.setIgnoreNulls(call.getIgnoreNulls());
+                    agg = reversedCall;
+                }
                 ColumnRefOperator columnRefOperator =
                         columnRefFactory.create(agg.toString(), agg.getType(), agg.isNullable());
                 analyticCall.put(columnRefOperator, (CallOperator) agg);
@@ -661,6 +667,8 @@ public class WindowTransformer {
 
     public static class WindowOperator {
         private final List<AnalyticExpr> windowFunctions = Lists.newArrayList();
+        // first_value/last_value evaluated as the other one because the window is reversed, keyed by identity.
+        private final Map<AnalyticExpr, Pair<String, Function>> reversedFunctions = new IdentityHashMap<>();
         private final List<Expr> partitionExprs;
         private final List<Expr> orderedPartitionExprs;
         private List<OrderByElement> orderByElements;
@@ -707,9 +715,13 @@ public class WindowTransformer {
             }
         }
 
-        public void addFunction(AnalyticExpr analyticExpr) {
+        public void addFunction(AnalyticExpr analyticExpr, WindowOperator standardized) {
             if (!windowFunctions.contains(analyticExpr)) {
                 windowFunctions.add(analyticExpr);
+                Pair<String, Function> reversedFunction = standardized.reversedFunctions.get(analyticExpr);
+                if (reversedFunction != null) {
+                    reversedFunctions.put(analyticExpr, reversedFunction);
+                }
             }
         }
 

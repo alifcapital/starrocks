@@ -109,7 +109,6 @@ class ExternalScanStatisticsDerivationTest {
                 minTimes = 0;
             }
         };
-        optimizer.setObtainedFromInternalStatistics(true);
     }
 
     private LogicalScanOperator scan(Connector connector) {

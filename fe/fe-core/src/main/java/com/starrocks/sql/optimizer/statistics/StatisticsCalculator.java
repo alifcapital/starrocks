@@ -23,8 +23,10 @@ import com.google.common.collect.Maps;
 import com.google.common.collect.Range;
 import com.google.common.collect.Sets;
 import com.starrocks.catalog.Column;
+import com.starrocks.catalog.DeltaLakeTable;
 import com.starrocks.catalog.FileTable;
 import com.starrocks.catalog.FunctionSet;
+import com.starrocks.catalog.IcebergTable;
 import com.starrocks.catalog.ListPartitionInfo;
 import com.starrocks.catalog.MaterializedView;
 import com.starrocks.catalog.OlapTable;
@@ -41,10 +43,14 @@ import com.starrocks.common.Pair;
 import com.starrocks.common.tvr.TvrTableSnapshot;
 import com.starrocks.common.tvr.TvrVersionRange;
 import com.starrocks.common.util.StringDateFormat;
+import com.starrocks.connector.PartitionCastPredicatePruner;
 import com.starrocks.connector.PartitionUtil;
 import com.starrocks.connector.RemoteFileDesc;
+import com.starrocks.connector.delta.DeltaLakeMetadata;
+import com.starrocks.connector.delta.ScalarOperationToDeltaLakeExpr;
 import com.starrocks.connector.hive.HiveStorageFormat;
 import com.starrocks.connector.iceberg.IcebergMORParams;
+import com.starrocks.connector.iceberg.ScalarOperatorToIcebergExpr;
 import com.starrocks.connector.statistics.ConnectorTableColumnStats;
 import com.starrocks.connector.statistics.RowCountEstimator;
 import com.starrocks.connector.statistics.StatisticsUtils;
@@ -170,9 +176,12 @@ import com.starrocks.system.BackendResourceStat;
 import com.starrocks.thrift.TBrokerFileStatus;
 import com.starrocks.type.DateType;
 import com.starrocks.type.Type;
+import io.delta.kernel.internal.actions.Metadata;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.collections4.MapUtils;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.iceberg.PartitionField;
+import org.apache.iceberg.PartitionSpec;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -191,6 +200,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.Set;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -294,7 +304,7 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
                 context.getOptExpression());
 
         ScalarOperator scanPredicate = predicate;
-        predicate = removePartitionPredicate(predicate, node, optimizerContext);
+        predicate = removePartitionPredicate(predicate, node, context.getStatistics());
         Statistics statistics = narrowDroppedPartitionColumns(scanPredicate, predicate, context.getStatistics());
         // Only the scan itself reads the statistics on expressions of its columns: an operator that passes the
         // statistics of its child on can carry them above the scan.
@@ -337,9 +347,11 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
             Map<ColumnRefOperator, SubfieldOperator> subfieldColumns = Maps.newHashMap();
             Preconditions.checkState(projection.getCommonSubOperatorMap().isEmpty());
             for (Map.Entry<ColumnRefOperator, ScalarOperator> entry : projection.getColumnRefMap().entrySet()) {
-                if (entry.getValue() instanceof SubfieldOperator && (node instanceof LogicalScanOperator ||
-                        node instanceof PhysicalScanOperator)) {
-                    subfieldColumns.put(entry.getKey(), (SubfieldOperator) entry.getValue());
+                if (entry.getValue() instanceof SubfieldOperator subfieldOperator &&
+                        (node instanceof LogicalScanOperator ||
+                        node instanceof PhysicalScanOperator) &&
+                        canUseSubfieldStatistics(subfieldOperator)) {
+                    subfieldColumns.put(entry.getKey(), subfieldOperator);
                 } else {
                     ColumnStatistic fromExpressions = scanExpressions == null ? null
                             : ExpressionProjectionStatistics.calculate(entry.getValue(), scanExpressions,
@@ -366,6 +378,12 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
         }
         context.setStatistics(statisticsBuilder == null ? statistics : statisticsBuilder.build());
         return null;
+    }
+
+    private static boolean canUseSubfieldStatistics(SubfieldOperator subfieldOperator) {
+        // Persistent subfield statistics paths must be rooted directly at a table column. Expression roots such as
+        // array_col[1] cannot be represented by a persistent STRUCT path.
+        return subfieldOperator.getChild(0) instanceof ColumnRefOperator;
     }
 
     private void addSubFiledStatistics(Operator node, Map<ColumnRefOperator, SubfieldOperator> subfieldColumns,
@@ -559,7 +577,7 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
         // We keep the flags of the predicates as they are. The caller skips the estimate of the predicate when this
         // block applied it, so a predicate that is never estimated, such as a bound that the scan holds only to skip
         // files, stays out of this estimate too.
-        predicate = removePartitionPredicate(predicate, node, optimizerContext);
+        predicate = removePartitionPredicate(predicate, node, null);
         for (var entry : partitionStatistics.entrySet()) {
             Statistics partitionStat = estimateStatistics(ImmutableList.of(predicate), entry.getValue());
             long partitionSelectedRows = (long) partitionStat.getOutputRowCount();
@@ -1230,11 +1248,12 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
 
         for (ColumnRefOperator requiredColumnRefOperator : columnRefMap.keySet()) {
             ScalarOperator mapOperator = columnRefMap.get(requiredColumnRefOperator);
-            if (mapOperator instanceof SubfieldOperator && context.getOptExpression() != null) {
+            if (mapOperator instanceof SubfieldOperator subfieldOperator &&
+                    canUseSubfieldStatistics(subfieldOperator) &&
+                    context.getOptExpression() != null) {
                 Operator child = context.getOptExpression().inputAt(0).getOp();
                 if (child instanceof LogicalScanOperator || child instanceof PhysicalScanOperator) {
-                    addSubFiledStatistics(child, ImmutableMap.of(requiredColumnRefOperator,
-                            (SubfieldOperator) mapOperator), builder);
+                    addSubFiledStatistics(child, ImmutableMap.of(requiredColumnRefOperator, subfieldOperator), builder);
                     continue;
                 }
             }
@@ -2953,34 +2972,155 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
         }
     }
 
-    // avoid use partition cols filter rows twice
+    // Avoid filtering rows twice with partition-column conjuncts that the scan's row count already reflects.
+    // The decision is made per scan from its own statistics, never from query-wide state:
+    // - OLAP list partition: the row count is the sum of the selected partitions.
+    // - Hive / Hudi: the connector counts the rows of the selected partitions (TABLE_METADATA). A partition holds one
+    //   value of each partition column, so every conjunct that pruned partitions is in that row count already.
+    // - Iceberg / Delta Lake: the row count comes from the files (or manifests) planned with the scan predicate
+    //   (TABLE_METADATA, not ANALYZE full-table or default statistics), and only conjuncts that prune whole
+    //   partitions in that planning are removed.
     @VisibleForTesting
     public ScalarOperator removePartitionPredicate(ScalarOperator predicate, Operator operator,
-                                                   OptimizerContext optimizerContext) {
-        boolean isTableTypeSupported = operator instanceof LogicalIcebergScanOperator ||
-                operator instanceof LogicalHiveScanOperator || operator instanceof LogicalHudiScanOperator ||
-                isOlapScanListPartitionTable(operator);
-        // Connector statistics count the selected partitions only; internal statistics restricted to
-        // them keep the predicates (see MetadataMgr#computeScopedExternalStatistics).
-        if (isTableTypeSupported && !optimizerContext.isObtainedFromInternalStatistics()) {
-            LogicalScanOperator scanOperator = operator.cast();
-            // A copy: a Hive table hands out its own list of partition columns.
-            Set<String> partitionColNames = new HashSet<>(scanOperator.getTable().getPartitionColumnNames());
-            partitionColNames.addAll(ListPartitionPruner.deduceGenerateColumns(scanOperator));
+                                                   Statistics scanStatistics) {
+        if (predicate == null) {
+            return null;
+        }
+        Predicate<ScalarOperator> prunedByScan;
+        if (isOlapScanListPartitionTable(operator)) {
+            prunedByScan = conjunct -> true;
+        } else if (operator instanceof LogicalHiveScanOperator || operator instanceof LogicalHudiScanOperator) {
+            if (scanStatistics == null || scanStatistics.getStatsSource() != Statistics.StatsSource.TABLE_METADATA) {
+                return predicate;
+            }
+            prunedByScan = conjunct -> true;
+        } else if (operator instanceof LogicalIcebergScanOperator) {
+            if (scanStatistics == null || scanStatistics.getStatsSource() != Statistics.StatsSource.TABLE_METADATA) {
+                return predicate;
+            }
+            prunedByScan = icebergPushedConjunct((LogicalIcebergScanOperator) operator);
+            if (prunedByScan == null) {
+                return predicate;
+            }
+        } else if (operator instanceof LogicalDeltaLakeScanOperator) {
+            if (scanStatistics == null || scanStatistics.getStatsSource() != Statistics.StatsSource.TABLE_METADATA) {
+                return predicate;
+            }
+            prunedByScan = deltaLakePushedConjunct((LogicalDeltaLakeScanOperator) operator);
+            if (prunedByScan == null) {
+                return predicate;
+            }
+        } else {
+            return predicate;
+        }
 
-            List<ScalarOperator> conjuncts = Utils.extractConjuncts(predicate);
-            List<ScalarOperator> newPredicates = Lists.newArrayList();
-            for (ScalarOperator scalarOperator : conjuncts) {
-                if (ListPartitionPruner.canPruneWithConjunct(scalarOperator) &&
-                        isPartitionCol(scalarOperator.getChild(0), partitionColNames)) {
-                    // drop this predicate
-                } else {
-                    newPredicates.add(scalarOperator);
+        LogicalScanOperator scanOperator = operator.cast();
+        Set<String> partitionColNames = new HashSet<>();
+        scanOperator.getTable().getPartitionColumnNames().forEach(name -> partitionColNames.add(
+                StringUtils.lowerCase(name)));
+        ListPartitionPruner.deduceGenerateColumns(scanOperator).forEach(name -> partitionColNames.add(
+                StringUtils.lowerCase(name)));
+
+        List<ScalarOperator> conjuncts = Utils.extractConjuncts(predicate);
+        List<ScalarOperator> newPredicates = Lists.newArrayList();
+        for (ScalarOperator scalarOperator : conjuncts) {
+            if (ListPartitionPruner.canPruneWithConjunct(scalarOperator) &&
+                    isPartitionCol(scalarOperator.getChild(0), partitionColNames) &&
+                    prunedByScan.test(scalarOperator)) {
+                // drop this predicate
+            } else {
+                newPredicates.add(scalarOperator);
+            }
+        }
+        return newPredicates.isEmpty() ? ConstantOperator.TRUE : Utils.compoundAnd(newPredicates);
+    }
+
+    // Iceberg prunes by partition transform: a conjunct on the source column of a bucket / truncate / time transform
+    // only narrows the row count to whole transformed partitions (a range on a bucket column does not prune at all),
+    // so only conjuncts on columns that are identity-partitioned in every partition spec are removed. Conjuncts the
+    // Iceberg expression converter rejects are kept. A string-to-temporal cast on an identity string partition column
+    // is not converted, but the connector prunes with it outside the converted predicate (the partition residual of
+    // PartitionCastPredicatePruner.split). It is removed only when that residual prunes on both the
+    // manifest and the file path: the CAST(c AS DATETIME) <op> <temporal const> shape the manifest range check
+    // handles, on a table without partition transform evolution (whose file partition values are not read).
+    private static Predicate<ScalarOperator> icebergPushedConjunct(LogicalIcebergScanOperator scan) {
+        IcebergTable table = (IcebergTable) scan.getTable();
+        org.apache.iceberg.Table nativeTable;
+        try {
+            nativeTable = table.getNativeTable();
+        } catch (Exception e) {
+            return null;
+        }
+        if (nativeTable == null) {
+            return null;
+        }
+        org.apache.iceberg.Schema schema = nativeTable.schema();
+        Set<String> identityColumns = null;
+        for (PartitionSpec spec : nativeTable.specs().values()) {
+            Set<String> specIdentityColumns = new HashSet<>();
+            for (PartitionField field : spec.fields()) {
+                String name = field.transform().isIdentity() ? schema.findColumnName(field.sourceId()) : null;
+                if (name != null) {
+                    specIdentityColumns.add(StringUtils.lowerCase(name));
                 }
             }
-            return newPredicates.isEmpty() ? ConstantOperator.TRUE : Utils.compoundAnd(newPredicates);
+            if (identityColumns == null) {
+                identityColumns = specIdentityColumns;
+            } else {
+                identityColumns.retainAll(specIdentityColumns);
+            }
         }
-        return predicate;
+        if (identityColumns == null || identityColumns.isEmpty()) {
+            return null;
+        }
+        Set<String> identityPartitionColumns = identityColumns;
+        boolean castResidualPrunes = !table.hasPartitionTransformedEvolution();
+        ScalarOperatorToIcebergExpr.IcebergContext context =
+                new ScalarOperatorToIcebergExpr.IcebergContext(schema.asStruct());
+        ScalarOperatorToIcebergExpr converter = new ScalarOperatorToIcebergExpr();
+        return conjunct -> {
+            ScalarOperator column = conjunct.getChild(0);
+            if (!column.isColumnRef() && !(column instanceof CastOperator && column.getChild(0).isColumnRef())) {
+                return false;
+            }
+            ColumnRefOperator ref = column.isColumnRef() ? (ColumnRefOperator) column : column.getChild(0).cast();
+            if (!identityPartitionColumns.contains(StringUtils.lowerCase(ref.getName()))) {
+                return false;
+            }
+            if (PartitionCastPredicatePruner.containsStringToTemporalCast(conjunct)) {
+                // the cast column is the identity partition column checked above, the other side a constant
+                return castResidualPrunes && PartitionCastPredicatePruner.isRangePrunable(conjunct);
+            }
+            return converter.convertStrict(List.of(conjunct), context) != null;
+        };
+    }
+
+    // Conjuncts not converted into the kernel scan predicate (non-identity cast, long or large IN list, unsupported
+    // literal ...) do not prune files, so the row count still includes the rows they filter out. The exception is a
+    // string-to-temporal cast on string partition columns, which the connector prunes files with separately.
+    private static Predicate<ScalarOperator> deltaLakePushedConjunct(LogicalDeltaLakeScanOperator scan) {
+        DeltaLakeTable table = (DeltaLakeTable) scan.getTable();
+        if (table.getDeltaSnapshot() == null) {
+            return null;
+        }
+        Metadata metadata = table.getDeltaMetadata();
+        ScalarOperationToDeltaLakeExpr.DeltaLakeContext context =
+                new ScalarOperationToDeltaLakeExpr.DeltaLakeContext(metadata.getSchema(),
+                        metadata.getPartitionColNames());
+        ScalarOperationToDeltaLakeExpr converter = new ScalarOperationToDeltaLakeExpr();
+        // A string-to-temporal cast on string partition columns is not converted, but DeltaLakeMetadata evaluates it
+        // against each file's partition values when planning (PartitionCastPredicatePruner.split), so the
+        // row count already reflects it.
+        Set<String> stringPartitionColumns =
+                DeltaLakeMetadata.identityStringPartitionColumns(table, metadata.getPartitionColNames());
+        return conjunct -> {
+            if (PartitionCastPredicatePruner.containsStringToTemporalCast(conjunct)) {
+                List<ColumnRefOperator> refs = conjunct.getColumnRefs();
+                return !refs.isEmpty() && refs.stream().allMatch(r ->
+                        stringPartitionColumns.contains(StringUtils.lowerCase(r.getName())));
+            }
+            return converter.canConvert(conjunct, context);
+        };
     }
 
     // NOTE: Why list partition ?

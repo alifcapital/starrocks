@@ -34,19 +34,14 @@
 #include "column/object_column.h"
 #include "common/status.h"
 #include "exec/spill/block_manager.h"
+#include "exec/spill/input_stream_internal.h"
 #include "exec/spill/serde.h"
 #include "exec/spill/spiller.h"
 #include "exec/workgroup/work_group.h"
 #include "runtime/sorted_chunks_merger.h"
 #include "util/blocking_queue.hpp"
-#include "util/defer_op.h"
-#include "util/failpoint/fail_point.h"
 
 namespace starrocks::spill {
-
-#ifdef FIU_ENABLE
-failpoint::OneToAnyBarrier& spill_prefetch_after_put_barrier();
-#endif
 
 static const int chunk_buffer_max_size = 2;
 
@@ -295,6 +290,8 @@ public:
     StatusOr<ChunkUniquePtr> read_from_buffer();
 
 private:
+    Status _prefetch_one(workgroup::YieldContext& yield_ctx, SerdeContext& ctx);
+
     bool _acquire() {
         bool expected = false;
         return _is_prefetching.compare_exchange_strong(expected, true);
@@ -311,6 +308,9 @@ private:
     InputStreamPtr _input_stream;
     UnboundedBlockingQueue<ChunkUniquePtr> _chunk_buffer;
     std::atomic_bool _is_prefetching = false;
+    // Set by every prefetch caller before it tries to take _is_prefetching; the holder re-checks it after
+    // releasing the flag so that a request which lost the race is never dropped. See prefetch().
+    std::atomic_bool _prefetch_requested = false;
     Spiller* _spiller = nullptr;
 };
 
@@ -340,31 +340,50 @@ StatusOr<ChunkUniquePtr> BufferedInputStream::get_next(workgroup::YieldContext& 
     return Status::InternalError("spill BufferedInputStream: no buffered chunk and stream is not at EOF");
 }
 
+Status BufferedInputStream::_prefetch_one(workgroup::YieldContext& yield_ctx, SerdeContext& ctx) {
+    auto res = _input_stream->get_next(yield_ctx, ctx);
+    if (res.ok()) {
+        COUNTER_ADD(_spiller->metrics().input_stream_peak_memory_usage, res.value()->memory_usage());
+        _chunk_buffer.put(std::move(res.value()));
+        return Status::OK();
+    } else if (res.status().is_end_of_file()) {
+        mark_is_eof();
+        return Status::OK();
+    }
+    return res.status();
+}
+
 Status BufferedInputStream::prefetch(workgroup::YieldContext& yield_ctx, SerdeContext& ctx) {
-    // Only one prefetch reads the input at a time. A prefetch that finds another one reading returns at once
-    // and leaves the refill to it, so the reading prefetch fills the buffer until it is full and checks the
-    // buffer again after every release: a consumer can take the chunk between the put and the release, and
-    // the consumer triggers no more prefetches while the stream is not ready.
-    while (!is_buffer_full() && !eof()) {
+    while (true) {
+        if (is_buffer_full() || eof()) {
+            return Status::OK();
+        }
+        // Concurrent prefetch is not allowed (it would reorder chunks of an ordered stream), so only the
+        // task holding _is_prefetching reads. A task that fails to take the flag must not simply drop its
+        // request: the holder may already have published its chunk and be on its way out, while the reader
+        // consumes that chunk and triggers new restore tasks that all land in this window. Each of them
+        // would see the flag held and return, the holder would exit after its single chunk, and the stream
+        // would be left with an empty buffer, not at EOF, and no restore task in flight -- the source
+        // operator then waits forever for data nothing will produce.
+        // So announce the request before trying to take the flag; the holder re-checks it after releasing
+        // the flag and serves it. The store precedes the CAS and the holder's load follows its release (all
+        // seq_cst), so either the holder observes the request or the requester's CAS succeeds.
+        _prefetch_requested.store(true);
         if (!_acquire()) {
             return Status::OK();
         }
-        DeferOp defer([this]() { _release(); });
-
-        auto res = _input_stream->get_next(yield_ctx, ctx);
-        if (res.ok()) {
-            COUNTER_ADD(_spiller->metrics().input_stream_peak_memory_usage, res.value()->memory_usage());
-            _chunk_buffer.put(std::move(res.value()));
-            FAIL_POINT_TRIGGER_EXECUTE(spill_prefetch_after_put, { spill_prefetch_after_put_barrier().arrive_A(); });
-            continue;
-        }
-        if (res.status().is_end_of_file()) {
-            mark_is_eof();
+        _prefetch_requested.store(false);
+        Status st = _prefetch_one(yield_ctx, ctx);
+        _release();
+        RETURN_IF_ERROR(st);
+        if (!_prefetch_requested.load()) {
             return Status::OK();
         }
-        return res.status();
     }
-    return Status::OK();
+}
+
+InputStreamPtr detail::make_buffered_input_stream(int capacity, InputStreamPtr stream, Spiller* spiller) {
+    return std::make_shared<BufferedInputStream>(capacity, std::move(stream), spiller);
 }
 
 class SequenceInputStream : public SpillInputStream {

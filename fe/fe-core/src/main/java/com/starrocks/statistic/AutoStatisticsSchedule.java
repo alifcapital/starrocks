@@ -154,7 +154,8 @@ public class AutoStatisticsSchedule {
                         DateUtils.TIME_FORMATTER);
                 LocalTime to = LocalTime.parse(Config.statistic_auto_analyze_end_time.replaceAll("[\"']", ""),
                         DateUtils.TIME_FORMATTER);
-                // The collector excludes both endpoints. Schedule on whole seconds strictly inside.
+                // The collector includes both endpoints. We schedule on whole seconds strictly inside them,
+                // which keeps every slot inside the collector window.
                 long span = Math.floorMod(to.toSecondOfDay() - from.toSecondOfDay(), DAY_SECONDS);
                 // Leave one polling interval before closing, so deadlines are not placed
                 // in the tail that the next normal collector pass cannot reach.

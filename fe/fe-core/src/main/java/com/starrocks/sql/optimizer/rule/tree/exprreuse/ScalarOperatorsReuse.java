@@ -22,6 +22,8 @@ import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import com.starrocks.catalog.FunctionSet;
 import com.starrocks.common.Config;
+import com.starrocks.qe.SessionVariable;
+import com.starrocks.qe.SqlModeHelper;
 import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.base.ColumnRefFactory;
 import com.starrocks.sql.optimizer.base.ColumnRefSet;
@@ -55,6 +57,8 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -101,6 +105,29 @@ public class ScalarOperatorsReuse {
             Projection projection,
             List<ScalarOperator> scalarOperators,
             ColumnRefFactory columnRefFactory) {
+        return collectCommonSubScalarOperators(projection, scalarOperators, columnRefFactory, false);
+    }
+
+    /**
+     * Whether the session lets a scalar function fail the query instead of returning NULL. In that mode an
+     * expression must not be hoisted into a common map, which BE evaluates for every row before the outputs, when
+     * the original plan only evaluated it conditionally: in an IF/CASE/COALESCE/IFNULL/NULLIF branch, on the
+     * right side of AND/OR, or in a lambda body (skipped for empty or NULL arrays).
+     */
+    public static boolean allowThrowException(SessionVariable sessionVariable) {
+        return sessionVariable != null
+                && (sessionVariable.getSqlMode() & SqlModeHelper.MODE_ALLOW_THROW_EXCEPTION) != 0;
+    }
+
+    /**
+     * @param unconditionalOnly only reuse an operator that has at least one occurrence evaluated unconditionally,
+     *                          see {@link #allowThrowException}.
+     */
+    public static Map<Integer, Map<ScalarOperator, ColumnRefOperator>> collectCommonSubScalarOperators(
+            Projection projection,
+            List<ScalarOperator> scalarOperators,
+            ColumnRefFactory columnRefFactory,
+            boolean unconditionalOnly) {
         // 1. Recursively collect common sub operators for the input operators
         CommonSubScalarOperatorCollector operatorCollector = new CommonSubScalarOperatorCollector();
         // The sets of a non-lambda context are never modified, so all root operators can share one context.
@@ -120,13 +147,37 @@ public class ScalarOperatorsReuse {
             return ImmutableMap.of();
         }
 
+        Map<Integer, Set<CommonSubScalarOperatorCollector.OperatorId>> commonOperatorsByDepth =
+                operatorCollector.commonOperatorsByDepth;
+        if (unconditionalOnly) {
+            commonOperatorsByDepth = new LinkedHashMap<>();
+            for (Map.Entry<Integer, Set<CommonSubScalarOperatorCollector.OperatorId>> e :
+                    operatorCollector.commonOperatorsByDepth.entrySet()) {
+                Set<CommonSubScalarOperatorCollector.OperatorId> operators = new LinkedHashSet<>();
+                for (CommonSubScalarOperatorCollector.OperatorId id : e.getValue()) {
+                    // An operator holding a non-deterministic call is reused as before even when only referenced
+                    // conditionally: one evaluation of a shared rand() is what makes every reference see the same
+                    // value, and the replacement may not reach the call itself (e.g. inside an array constructor).
+                    if (operatorCollector.unconditionalOperators.contains(id) || Utils.hasNonDeterministicFunc(id.key())) {
+                        operators.add(id);
+                    }
+                }
+                if (!operators.isEmpty()) {
+                    commonOperatorsByDepth.put(e.getKey(), operators);
+                }
+            }
+            if (commonOperatorsByDepth.isEmpty()) {
+                return ImmutableMap.of();
+            }
+        }
+
         // 2. Rewrite high depth common operators with low depth common operators
         // 3. Create the result column ref for each common operators
         Map<ScalarOperator, ColumnRefOperator> rewriteWith = new HashMap<>();
         ImmutableMap.Builder<Integer, Map<ScalarOperator, ColumnRefOperator>> commonSubOperators =
                 ImmutableMap.builder();
         for (Map.Entry<Integer, Set<CommonSubScalarOperatorCollector.OperatorId>> kv :
-                operatorCollector.commonOperatorsByDepth.entrySet()) {
+                commonOperatorsByDepth.entrySet()) {
             // rewriteWith is only changed after this depth is finished, so the rewriter can read it directly.
             ScalarOperatorRewriter rewriter = new ScalarOperatorRewriter(rewriteWith, false);
             ImmutableMap.Builder<ScalarOperator, ColumnRefOperator> operatorColumnMapBuilder = ImmutableMap.builder();
@@ -289,13 +340,9 @@ public class ScalarOperatorsReuse {
 
         @Override
         public ScalarOperator visitSubfield(SubfieldOperator predicate, Void context) {
-            // only rewrite subfield operator if and only if child is DictionaryGetOperator
-            if (predicate.getChild(0) instanceof DictionaryGetOperator) {
-                ScalarOperator operator = new SubfieldOperator(predicate.getChild(0).accept(this, null),
-                                predicate.getType(), predicate.getFieldNames(), predicate.getCopyFlag());
-                return tryRewrite(operator);
-            }
-            return predicate;
+            ScalarOperator operator = new SubfieldOperator(predicate.getChild(0).accept(this, null),
+                    predicate.getType(), predicate.getFieldNames(), predicate.getCopyFlag());
+            return tryRewrite(operator);
         }
 
         @Override
@@ -356,6 +403,9 @@ public class ScalarOperatorsReuse {
                 usedColumns().union(other.usedColumns);
             }
         }
+        // true if the operator being visited is only evaluated under some condition of an enclosing operator,
+        // see allowThrowException.
+        public boolean isConditional;
 
         public CommonOperatorContext(boolean isPartOfLambdaExpr) {
             this.isPartOfLambdaExpr = isPartOfLambdaExpr;
@@ -368,8 +418,10 @@ public class ScalarOperatorsReuse {
         public CommonOperatorContext(boolean isPartOfLambdaExpr, Set<ColumnRefOperator> currentLambdaArguments,
                                      Set<ColumnRefOperator> outerLambdaArguments,
                                      Set<ColumnRefOperator> currentLambdaLocalRefs,
-                                     Set<ColumnRefOperator> outerLambdaLocalRefs) {
+                                     Set<ColumnRefOperator> outerLambdaLocalRefs,
+                                     boolean isConditional) {
             this.isPartOfLambdaExpr = isPartOfLambdaExpr;
+            this.isConditional = isConditional;
             this.currentLambdaArguments = currentLambdaArguments;
             this.outerLambdaArguments = outerLambdaArguments;
             this.currentLambdaLocalRefs = currentLambdaLocalRefs;
@@ -408,6 +460,8 @@ public class ScalarOperatorsReuse {
         // {[1] -> [a + b]}
         private final Map<Integer, Map<OperatorId, Integer>> operatorsByDepth = new HashMap<>();
         private final Map<Integer, Set<OperatorId>> commonOperatorsByDepth = new HashMap<>();
+        // operators with at least one occurrence that is evaluated whenever the root operator is
+        private final Set<OperatorId> unconditionalOperators = Sets.newHashSet();
         private int currentId = 0;
 
         // enable some special logic codes only for lambda functions.
@@ -463,6 +517,9 @@ public class ScalarOperatorsReuse {
             boolean isDuplicated = existing != null;
             int group = isDuplicated ? existing : currentId++;
             CommonResult result = new CommonResult(depth, List.of(group));
+            if (!context.isConditional) {
+                unconditionalOperators.add(id);
+            }
 
             boolean isDependentOnOuterLambda = context.usesAny(context.outerLambdaArguments)
                     || context.usesAny(context.outerLambdaLocalRefs);
@@ -519,14 +576,16 @@ public class ScalarOperatorsReuse {
                 depth = Math.max(depth, res.depth);
                 groups.addAll(res.childrenGroup);
             }
+            // the first child of a conditional operator is always evaluated, the others may not be
+            boolean isChildConditional = context.isConditional || evaluatesLaterChildrenConditionally(scalarOperator);
             for (int i = 1; i < scalarOperator.getChildren().size(); i++) {
-                // Outside a lambda body the lambda sets are empty, so the used columns are never read
-                // and the sibling context does not need to be isolated.
+                // Outside a lambda body the lambda sets are empty, so the used columns are never read, and a child
+                // evaluated under the same condition as its parent can share the context of the parent.
                 CommonOperatorContext childContext = context;
-                if (context.isPartOfLambdaExpr) {
-                    childContext = new CommonOperatorContext(true,
+                if (context.isPartOfLambdaExpr || isChildConditional != context.isConditional) {
+                    childContext = new CommonOperatorContext(context.isPartOfLambdaExpr,
                             context.currentLambdaArguments, context.outerLambdaArguments,
-                            context.currentLambdaLocalRefs, context.outerLambdaLocalRefs);
+                            context.currentLambdaLocalRefs, context.outerLambdaLocalRefs, isChildConditional);
                 }
                 CommonResult res = scalarOperator.getChild(i).accept(this, childContext);
                 depth = Math.max(depth, res.depth);
@@ -537,6 +596,24 @@ public class ScalarOperatorsReuse {
             }
 
             return new CommonResult(depth, groups);
+        }
+
+        // BE short-circuits these operators per chunk: e.g. IF skips ELSE when the condition is true for the whole
+        // chunk, AND skips its right side when the left side is false for every row.
+        private static boolean evaluatesLaterChildrenConditionally(ScalarOperator operator) {
+            if (operator instanceof CaseWhenOperator) {
+                return true;
+            }
+            if (operator instanceof CompoundPredicateOperator) {
+                return !((CompoundPredicateOperator) operator).isNot();
+            }
+            if (operator instanceof CallOperator) {
+                String fnName = ((CallOperator) operator).getFnName();
+                return FunctionSet.IF.equalsIgnoreCase(fnName) || FunctionSet.IFNULL.equalsIgnoreCase(fnName)
+                        || FunctionSet.NULLIF.equalsIgnoreCase(fnName)
+                        || FunctionSet.COALESCE.equalsIgnoreCase(fnName);
+            }
+            return false;
         }
 
         @Override
@@ -555,6 +632,8 @@ public class ScalarOperatorsReuse {
             // a lambda function like  x->x+1 can't be reused anymore, so directly visit its lambda expression.
             hasLambdaFunction = true;
             CommonOperatorContext newContext = new CommonOperatorContext(true);
+            // the lambda body is skipped for empty or NULL arrays
+            newContext.isConditional = true;
             newContext.outerLambdaArguments.addAll(context.outerLambdaArguments);
             newContext.outerLambdaArguments.addAll(context.currentLambdaArguments);
             newContext.currentLambdaArguments.addAll(scalarOperator.getRefColumns());
@@ -606,12 +685,13 @@ public class ScalarOperatorsReuse {
         return false;
     }
 
-    public static Projection rewriteProjectionOrLambdaExpr(Projection projection, ColumnRefFactory columnRefFactory) {
+    public static Projection rewriteProjectionOrLambdaExpr(Projection projection, ColumnRefFactory columnRefFactory,
+                                                           boolean unconditionalOnly) {
         Map<ColumnRefOperator, ScalarOperator> columnRefMap = projection.getColumnRefMap();
         List<ScalarOperator> scalarOperators = Lists.newArrayList(columnRefMap.values());
         Map<Integer, Map<ScalarOperator, ColumnRefOperator>> commonSubOperatorsByDepth = ScalarOperatorsReuse
                 .collectCommonSubScalarOperators(projection, scalarOperators,
-                        columnRefFactory);
+                        columnRefFactory, unconditionalOnly);
 
         if (commonSubOperatorsByDepth.isEmpty()) {
             // no rewrite
@@ -701,9 +781,11 @@ public class ScalarOperatorsReuse {
     public static class LambdaFunctionOperatorRewriter extends ScalarOperatorVisitor<Void, Void> {
 
         private final ColumnRefFactory columnRefFactory;
+        private final boolean unconditionalOnly;
 
-        public LambdaFunctionOperatorRewriter(ColumnRefFactory columnRefFactory) {
+        public LambdaFunctionOperatorRewriter(ColumnRefFactory columnRefFactory, boolean unconditionalOnly) {
             this.columnRefFactory = columnRefFactory;
+            this.unconditionalOnly = unconditionalOnly;
         }
 
         @Override
@@ -723,7 +805,7 @@ public class ScalarOperatorsReuse {
                     operator.isNullable(), false);
             columnRefMap.put(keyCol, operator.getLambdaExpr());
             Projection fakeProjection =
-                    rewriteProjectionOrLambdaExpr(new Projection(columnRefMap), columnRefFactory);
+                    rewriteProjectionOrLambdaExpr(new Projection(columnRefMap), columnRefFactory, unconditionalOnly);
             columnRefMap = fakeProjection.getCommonSubOperatorMap();
             if (!columnRefMap.isEmpty()) {
                 operator.addColumnToExpr(columnRefMap);

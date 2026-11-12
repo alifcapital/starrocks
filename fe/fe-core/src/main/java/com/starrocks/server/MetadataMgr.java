@@ -846,7 +846,6 @@ public class MetadataMgr {
         if (isIncrementalIcebergScan(table, versionRange)) {
             // ANALYZE rows describe entire partitions, not the newly appended files inside them.
             // Keep the connector's existing delta-file estimate, including for unpartitioned tables.
-            session.setObtainedFromInternalStatistics(false);
             Statistics delta = getOptionalMetadata(catalogName).map(metadata -> metadata.getTableStatistics(
                     session, table, columns, partitionKeys, predicate, limit, versionRange))
                     .orElseGet(() -> StatisticsUtils.buildDefaultStatistics(columns.keySet()));
@@ -861,7 +860,6 @@ public class MetadataMgr {
                             && session.getSourceTablesCount() == 1);
             Statistics cached = session.getExternalStatisticsFallback(fallbackKey);
             if (cached != null) {
-                session.setObtainedFromInternalStatistics(false);
                 return cached;
             }
         }
@@ -870,7 +868,8 @@ public class MetadataMgr {
         if (request != null) {
             Statistics statistics = computeScopedExternalStatistics(session, catalogName, table, columns, partitionKeys,
                     predicate, limit, versionRange, request);
-            if (fallbackKey != null && !session.isObtainedFromInternalStatistics()) {
+            // Only the connector fallback is cached here: the scoped ANALYZE statistics have their own snapshot.
+            if (fallbackKey != null && statistics.getStatsSource() != Statistics.StatsSource.ANALYZE) {
                 session.cacheExternalStatisticsFallback(fallbackKey, statistics);
             }
             return statistics;
@@ -880,7 +879,6 @@ public class MetadataMgr {
                 && referencesPartitionColumn(table, columns, predicate)) {
             // No complete cached partition domain: never substitute whole-table ANALYZE/MCV
             // for a restricted scan, and never enumerate files just to recover that domain.
-            session.setObtainedFromInternalStatistics(false);
             Statistics fallback = null;
             if (!(session.getSessionVariable().disableTableStatsFromMetadataForSingleTable()
                     && session.getSourceTablesCount() == 1)) {
@@ -898,7 +896,6 @@ public class MetadataMgr {
                 getTableStatisticsFromInternalStatistics(table, columns);
         boolean hasInternalStats = internalStatistics != null &&
                 internalStatistics.getColumnStatistics().values().stream().anyMatch(stat -> !stat.isUnknown());
-        session.setObtainedFromInternalStatistics(hasInternalStats);
 
         // Fast path: every requested column is covered by internal stats, no need to touch connector metadata.
         if (hasInternalStats && internalStatistics.getColumnStatistics().values().stream()
@@ -922,7 +919,6 @@ public class MetadataMgr {
             return hasInternalStats ? internalStatistics : null;
         }
         // Connector row counts already include partition pruning.
-        session.setObtainedFromInternalStatistics(false);
         if (internalStatistics == null) {
             return connectorBasicStats;
         }
@@ -1025,7 +1021,6 @@ public class MetadataMgr {
             long limit, TvrVersionRange versionRange, ExternalStatisticsRequest request) {
         boolean restricted = !request.wholeTable;
         if (!request.wholeTable && request.partitions.isEmpty()) {
-            session.setObtainedFromInternalStatistics(true);
             Statistics.Builder empty = Statistics.builder().setOutputRowCount(0)
                     .setStatsSource(Statistics.StatsSource.ANALYZE).setPartitionRestricted(true);
             columns.keySet().forEach(column -> empty.addColumnStatistic(column, ColumnStatistic.unknown()));
@@ -1074,13 +1069,11 @@ public class MetadataMgr {
             }
         }
         if (aggregate == null || aggregate.isEmpty()) {
-            session.setObtainedFromInternalStatistics(false);
             Statistics fallback = connectorStats == null ?
                     StatisticsUtils.buildDefaultStatistics(columns.keySet()) : connectorStats;
             return fallback.isPartitionRestricted() == restricted ? fallback
                     : Statistics.buildFrom(fallback).setPartitionRestricted(restricted).build();
         }
-        session.setObtainedFromInternalStatistics(true);
         Statistics.Builder result = Statistics.builder().setOutputRowCount(aggregate.rowCount)
                 .setStatsSource(Statistics.StatsSource.ANALYZE).setPartitionRestricted(restricted)
                 .setTableRowCountMayInaccurate(!aggregate.hasCompleteCoverage());
