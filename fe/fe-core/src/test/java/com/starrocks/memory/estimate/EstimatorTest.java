@@ -16,6 +16,8 @@ package com.starrocks.memory.estimate;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -1648,5 +1650,106 @@ class EstimatorTest {
             assertEquals(ClassLayout.parseClass(clazz).instanceSize(), Estimator.shallow(clazz), name);
         }
         assertEquals(ClassLayout.parseClass(SimpleObject.class).instanceSize(), Estimator.shallow(SimpleObject.class));
+    }
+
+    // ==================== Sampled Elements Counted Once ====================
+
+    // Shaped like an Iceberg snapshot: an id and a summary map of strings whose values differ in length.
+    static final class Snap {
+        final long id;
+        final Map<String, String> summary;
+
+        Snap(long id, Map<String, String> summary) {
+            this.id = id;
+            this.summary = summary;
+        }
+    }
+
+    // Shaped like Iceberg TableMetadata: the snapshots in a list and the same snapshots in an index by id.
+    static final class SnapHolder {
+        final List<Snap> snapshots;
+        final Map<Long, Snap> snapshotsById;
+
+        SnapHolder(List<Snap> snapshots, Map<Long, Snap> snapshotsById) {
+            this.snapshots = snapshots;
+            this.snapshotsById = snapshotsById;
+        }
+    }
+
+    // The same snapshots, with the index walked before the list.
+    static final class IndexFirstHolder {
+        final Map<Long, Snap> snapshotsById;
+        final List<Snap> snapshots;
+
+        IndexFirstHolder(Map<Long, Snap> snapshotsById, List<Snap> snapshots) {
+            this.snapshotsById = snapshotsById;
+            this.snapshots = snapshots;
+        }
+    }
+
+    private static Map<String, String> summary(int seed) {
+        ImmutableMap.Builder<String, String> builder = ImmutableMap.builder();
+        for (int k = 0; k < 19; k++) {
+            builder.put("summary-key-" + k, "v".repeat(1 + (seed * 7 + k * 13) % 60));
+        }
+        return builder.build();
+    }
+
+    private static List<Snap> snaps(int n) {
+        List<Snap> list = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            list.add(new Snap(1_000_000L + i, summary(i)));
+        }
+        return list;
+    }
+
+    // The FE counts strings by StringEstimator (see MemoryUsageTracker), and the setup of this test clears it.
+    private static void assertNearRetained(Object obj, String what) {
+        Estimator.registerCustomEstimator(String.class, new StringEstimator());
+        long real = GraphLayout.parseInstance(obj).totalSize();
+        long est = Estimator.estimate(obj);
+        assertTrue(est >= real * 0.8 && est <= real * 1.25, what + ": estimate " + est + ", retained " + real);
+    }
+
+    @Test
+    void testGuavaMapSampledNearRetained() {
+        // The entries of a Guava map sit in two arrays and link to the next entry of their hash bucket. We expect
+        // the estimate to count each entry once, so it stays near the retained size.
+        assertNearRetained(summary(3), "ImmutableMap of 19 strings");
+        ImmutableMap.Builder<Integer, IntBox> builder = ImmutableMap.builder();
+        for (int i = 0; i < 2000; i++) {
+            builder.put(i, new IntBox(i));
+        }
+        assertNearRetained(builder.build(), "ImmutableMap of 2000 boxes");
+    }
+
+    @Test
+    void testIndexOverListCountsElementsOnce() {
+        // The index holds the snapshots that the list holds. We expect them to be counted once, by the list.
+        List<Snap> list = snaps(1600);
+        ImmutableMap.Builder<Long, Snap> guavaIndex = ImmutableMap.builder();
+        Map<Long, Snap> jdkIndex = new HashMap<>();
+        for (Snap s : list) {
+            guavaIndex.put(s.id, s);
+            jdkIndex.put(s.id, s);
+        }
+        assertNearRetained(new SnapHolder(new ArrayList<>(list), guavaIndex.build()), "ArrayList with a Guava index");
+        assertNearRetained(new SnapHolder(ImmutableList.copyOf(list), jdkIndex), "ImmutableList with a HashMap index");
+        assertNearRetained(new IndexFirstHolder(guavaIndex.build(), list), "Guava index walked before the list");
+    }
+
+    @Test
+    void testWrappedMapOfBoxedValuesCountsElementsOnce() {
+        // Shaped like the null value counts of an Iceberg data file: a SerializableMap that wraps a HashMap from
+        // column id to count, where most counts are the same cached Long. The FE counts boxed values by their shallow
+        // size (see MemoryUsageTracker). We expect each Integer and Long to be counted once, although the wrapper and
+        // the HashMap inside it both hold them.
+        Estimator.registerShallowMemoryClass(Integer.class);
+        Estimator.registerShallowMemoryClass(Long.class);
+        Map<Integer, Long> counts = new HashMap<>();
+        for (int i = 1; i <= 57; i++) {
+            counts.put(i, i % 4 == 0 ? 1000L + i : 0L);
+        }
+        assertNearRetained(org.apache.iceberg.util.SerializableMap.copyOf(counts), "SerializableMap of boxed counts");
     }
 }

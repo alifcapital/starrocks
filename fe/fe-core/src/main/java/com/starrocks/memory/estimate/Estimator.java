@@ -82,6 +82,12 @@ public class Estimator {
     private static final int LINKED_LIST_NODE_SIZE = 24;
     private static final double HASH_LOAD_FACTOR = 0.75;
 
+    // A sampled collection counts each of its elements by the average of the samples. We then mark all its elements
+    // as visited, so that another collection that holds the same objects, such as an index by id over a list, does not
+    // count them again. Marking costs one entry in the visited set per element, so we mark only collections of up to
+    // this many elements; a larger one, such as the partitions of a table, keeps the plain sampling.
+    private static final int MAX_ELEMENTS_TO_MARK = 10_000;
+
     // By default JOL guesses the object layout of the running JVM from the addresses of objects it allocates. Under
     // generational ZGC it guesses that objects are aligned to 64 KB, so every object would count as 64 KB and the caches
     // that are bounded by these sizes would hold almost nothing. We read the layout flags of the JVM instead and let JOL
@@ -348,15 +354,21 @@ public class Estimator {
             return estimateArray(obj, maxDepth, sampleSize);
         }
 
-        // Handle collections. Non-JDK implementations (Iceberg SerializableMap, Guava Immutable*)
-        // typically wrap their real storage in a field; the element-sampling path would skip that
-        // storage's own structure entirely, so walk their fields instead — the wrapped JDK container
-        // is then estimated (and charged) when the recursion reaches it. Cache views are excluded
-        // (see isCacheView) and stay on the sampling path.
+        // Handle collections. Non-JDK implementations (Iceberg SerializableMap, Guava Immutable*) keep their
+        // storage in fields: arrays of elements or entries, hash tables, a wrapped JDK container. Sampling those
+        // arrays goes wrong: the same entries sit in two arrays, and an entry links to the next entry of its hash
+        // bucket, so a sample counts other entries too and the average is multiplied by the size. We therefore
+        // sample the elements through the collection itself and mark them all as visited. The walk of the fields
+        // then visits only the storage, as many entries as there are elements, and we walk it whole. Cache views
+        // are excluded (see isCacheView) and stay on the sampling path.
         if (obj instanceof Collection) {
             Collection<?> collection = (Collection<?>) obj;
             if (!isJdkContainer(clazz) && !isCacheView(clazz)) {
-                return estimateObject(obj, maxDepth, sampleSize);
+                if (collection.size() > MAX_ELEMENTS_TO_MARK) {
+                    return estimateObject(obj, maxDepth, sampleSize);
+                }
+                return estimateCollection(collection, maxDepth, sampleSize) +
+                        estimateFields(obj, maxDepth, Integer.MAX_VALUE);
             }
             return estimateCollection(collection, maxDepth, sampleSize) + collectionBackingOverhead(collection);
         }
@@ -365,12 +377,18 @@ public class Estimator {
         // mapStructureOverhead rather than inside estimateCollection.
         if (obj instanceof Map<?, ?> map) {
             if (!isJdkContainer(clazz) && !isCacheView(clazz)) {
-                return estimateObject(obj, maxDepth, sampleSize);
+                if (map.size() > MAX_ELEMENTS_TO_MARK) {
+                    return estimateObject(obj, maxDepth, sampleSize);
+                }
+                return shallow(obj) +
+                        estimateMapView(map.keySet(), maxDepth, sampleSize) +
+                        estimateMapView(map.values(), maxDepth, sampleSize) +
+                        estimateFields(obj, maxDepth, Integer.MAX_VALUE);
             }
             return shallow(obj) +
                     mapStructureOverhead(map) +
-                    estimateCollection(map.keySet(), maxDepth, sampleSize) +
-                    estimateCollection(map.values(), maxDepth, sampleSize);
+                    estimateMapView(map.keySet(), maxDepth, sampleSize) +
+                    estimateMapView(map.values(), maxDepth, sampleSize);
         }
 
         // Recursively calculate size for reference fields
@@ -445,22 +463,72 @@ public class Estimator {
         Class<?> elementClass = firstElement.getClass();
         if (isShallowMemoryClass(elementClass)) {
             long elementShallowSize = shallow(elementClass);
-            return shallowSize + elementShallowSize * collection.size();
+            return shallowSize + elementShallowSize * markCounted(collection);
         }
 
         List<Object> samples = getSamples(collection, sampleSize);
+        long sampleTotalSize = 0;
+        for (Object sample : samples) {
+            sampleTotalSize += estimateInternal(sample, maxDepth - 1, sampleSize);
+        }
+        markCounted(collection);
 
         if (samples.isEmpty()) {
             return shallowSize;
         }
 
-        long sampleTotalSize = 0;
-        for (Object sample : samples) {
-            sampleTotalSize += estimateInternal(sample, maxDepth - 1, sampleSize);
-        }
-
         double avgSize = (double) sampleTotalSize / samples.size();
         return shallowSize + (long) (avgSize * collection.size());
+    }
+
+    // A map keeps its keySet() and values() views in fields, and a wrapper map hands out the views of the map it
+    // wraps, so the same view can come here twice. We count the view object once.
+    private long estimateMapView(Collection<?> view, int maxDepth, int sampleSize) {
+        long size = estimateCollection(view, maxDepth, sampleSize);
+        return visited.add(view) ? size : size - shallow(view);
+    }
+
+    // Marks the elements as visited (see MAX_ELEMENTS_TO_MARK) and returns how many of them were not visited before.
+    // Above the limit it does not look at them and returns the size, as if all were new.
+    private long markCounted(Collection<?> collection) {
+        if (collection.size() > MAX_ELEMENTS_TO_MARK) {
+            return collection.size();
+        }
+        long added = 0;
+        for (Object item : collection) {
+            if (item != null && visited.add(item)) {
+                added++;
+            }
+        }
+        return added;
+    }
+
+    private long markCounted(Object[] array) {
+        if (array.length > MAX_ELEMENTS_TO_MARK) {
+            return array.length;
+        }
+        long added = 0;
+        for (Object item : array) {
+            if (item != null && visited.add(item)) {
+                added++;
+            }
+        }
+        return added;
+    }
+
+    // The number of elements that are not null. Above MAX_ELEMENTS_TO_MARK it does not look at them and returns the
+    // length, as if no slot were null.
+    private static long countElements(Object[] array) {
+        if (array.length > MAX_ELEMENTS_TO_MARK) {
+            return array.length;
+        }
+        long elements = 0;
+        for (Object item : array) {
+            if (item != null) {
+                elements++;
+            }
+        }
+        return elements;
     }
 
     // Structural overhead of a Map's internal entry objects plus the backing table, which shallow
@@ -568,22 +636,25 @@ public class Estimator {
         // Check if component type is a shallow memory class
         if (isShallowMemoryClass(componentType)) {
             long elementShallowSize = shallow(componentType);
-            return shallowSize + elementShallowSize * length;
+            return shallowSize + elementShallowSize * markCounted((Object[]) array);
         }
 
         List<Object> samples = getSamplesFromArray(array, length, sampleSize);
+        long sampleTotalSize = 0;
+        for (Object sample : samples) {
+            sampleTotalSize += estimateInternal(sample, maxDepth - 1, sampleSize);
+        }
+        // The samples skip null slots, so the average is per element and is multiplied by the number of elements.
+        // A hash table, such as the buckets of a Guava map, can be half empty.
+        long elements = countElements((Object[]) array);
+        markCounted((Object[]) array);
 
         if (samples.isEmpty()) {
             return shallowSize;
         }
 
-        long sampleTotalSize = 0;
-        for (Object sample : samples) {
-            sampleTotalSize += estimateInternal(sample, maxDepth - 1, sampleSize);
-        }
-
         double avgSize = (double) sampleTotalSize / samples.size();
-        return shallowSize + (long) (avgSize * length);
+        return shallowSize + (long) (avgSize * elements);
     }
 
     /**
@@ -599,8 +670,17 @@ public class Estimator {
             return HIDDEN_CLASS_SHALLOW_SIZE;
         }
 
-        long size = shallow(obj);
+        for (Class<?> c = obj.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
+            if (c.isAnnotationPresent(IgnoreMemoryTrack.class)) {
+                return 0;
+            }
+        }
+        return shallow(obj) + estimateFields(obj, maxDepth, sampleSize);
+    }
 
+    // The objects that the reference fields of obj reach, without obj itself.
+    private long estimateFields(Object obj, int maxDepth, int sampleSize) {
+        long size = 0;
         for (Class<?> c = obj.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
             if (c.isAnnotationPresent(IgnoreMemoryTrack.class)) {
                 return 0;
@@ -610,7 +690,6 @@ public class Estimator {
                 size += estimateNestedField(obj, field, maxDepth, sampleSize);
             }
         }
-
         return size;
     }
 
