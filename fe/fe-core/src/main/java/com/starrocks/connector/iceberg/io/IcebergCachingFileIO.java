@@ -119,6 +119,9 @@ public class IcebergCachingFileIO implements FileIO, HadoopConfigurable {
     private transient ContentCache fileContentCache;
     private ResolvingFileIO wrappedIO;
     private Map<String, String> properties;
+    // True when the properties carry a credential that buildConfFromProperties writes into a per-path
+    // configuration (an ADLS SAS token or a GCS access token).
+    private boolean propertiesNeedPathConf;
     private SerializableSupplier<Configuration> conf;
     private static final Pattern HADOOP_CATALOG_METADATA_JSON_PATTERN =
             Pattern.compile("^v\\d+(\\.gz)?\\.metadata\\.json(\\.gz)?$");
@@ -149,6 +152,7 @@ public class IcebergCachingFileIO implements FileIO, HadoopConfigurable {
     @Override
     public void initialize(Map<String, String> properties) {
         this.properties = properties;
+        this.propertiesNeedPathConf = hasPathCredential(properties);
         wrappedIO = new ResolvingFileIO();
         wrappedIO.initialize(properties);
 
@@ -232,7 +236,7 @@ public class IcebergCachingFileIO implements FileIO, HadoopConfigurable {
     public InputFile newInputFile(String path) {
         try {
             String normalizedPath = normalizeAzurePath(path);
-            setWrappedConf(buildConfFromProperties(properties, normalizedPath));
+            setPathConf(normalizedPath);
             // Keep the caller's path as location(): the content cache and the parsed-manifest caches
             // (seeded under ManifestFile.path()) are keyed by it. Only the storage access is normalized.
             return new CachingInputFile(fileContentCache, wrappedIO.newInputFile(normalizedPath), path);
@@ -247,7 +251,7 @@ public class IcebergCachingFileIO implements FileIO, HadoopConfigurable {
     public OutputFile newOutputFile(String path) {
         try {
             String normalizedPath = normalizeAzurePath(path);
-            setWrappedConf(buildConfFromProperties(properties, normalizedPath));
+            setPathConf(normalizedPath);
             return wrappedIO.newOutputFile(normalizedPath);
         } catch (StarRocksException e) {
             String errorMessage = String.format("Failed to new output file for path: %s, properties: %s", path, properties);
@@ -270,6 +274,45 @@ public class IcebergCachingFileIO implements FileIO, HadoopConfigurable {
     @Override
     public Map<String, String> properties() {
         return wrappedIO.properties();
+    }
+
+    // A file is opened for every manifest, manifest list and metadata file, and a copy of the Hadoop
+    // configuration costs about a thousand map entries. We expect most paths to need no copy: for them
+    // buildConfFromProperties returns a configuration equal to the base one, which the wrapped IO already
+    // holds since initialize() and setConf(). So we build and install a copy only when the path or the
+    // properties make it differ: a credential in the properties, a scheme that needs its own FileSystem,
+    // or no scheme at all, which fs.defaultFS resolves.
+    private void setPathConf(String path) throws StarRocksException {
+        if (propertiesNeedPathConf || !hasSchemeWithSharedFileSystem(path)) {
+            setWrappedConf(buildConfFromProperties(properties, path));
+        }
+    }
+
+    private static boolean hasPathCredential(Map<String, String> properties) {
+        for (String key : properties.keySet()) {
+            if ((key.startsWith(ADLS_SAS_TOKEN) && (key.endsWith(ADLS_ENDPOINT) || key.endsWith(BLOB_ENDPOINT)))
+                    || key.equals(GCPCloudConfigurationProvider.GCS_ACCESS_TOKEN)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // True when the path has a scheme, the way Hadoop's Path reads it (the part before the first ':' that
+    // comes before any '/'), and that scheme is not in SCHEMES_REQUIRING_FS_ISOLATION.
+    @VisibleForTesting
+    static boolean hasSchemeWithSharedFileSystem(String path) {
+        int colon = path.indexOf(':');
+        int slash = path.indexOf('/');
+        if (colon <= 0 || (slash >= 0 && slash < colon)) {
+            return false;
+        }
+        for (String scheme : SCHEMES_REQUIRING_FS_ISOLATION) {
+            if (scheme.length() == colon && path.startsWith(scheme)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     public Configuration buildConfFromProperties(Map<String, String> properties, String path) throws StarRocksException {

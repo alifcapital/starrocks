@@ -20,6 +20,7 @@ import com.github.benmanes.caffeine.cache.Weigher;
 import com.starrocks.common.StarRocksException;
 import com.starrocks.connector.exception.StarRocksConnectorException;
 import com.starrocks.credential.gcp.GCPCloudConfigurationProvider;
+import mockit.Invocation;
 import mockit.Mock;
 import mockit.MockUp;
 import org.apache.hadoop.conf.Configuration;
@@ -134,6 +135,77 @@ public class IcebergCachingFileIOTest {
         cachingFileIO.newOutputFile(path);
         cachingFileIO.deleteFile(path);
         Assertions.assertEquals(List.of(normalized, normalized, normalized), accessed);
+    }
+
+    @Test
+    public void testHasSchemeWithSharedFileSystem() {
+        Assertions.assertTrue(IcebergCachingFileIO.hasSchemeWithSharedFileSystem("s3://bucket/m0.avro"));
+        Assertions.assertTrue(IcebergCachingFileIO.hasSchemeWithSharedFileSystem("s3a://bucket/m0.avro"));
+        Assertions.assertTrue(IcebergCachingFileIO.hasSchemeWithSharedFileSystem("hdfs://nn/m0.avro"));
+        Assertions.assertTrue(IcebergCachingFileIO.hasSchemeWithSharedFileSystem("oss://bucket/m0.avro"));
+        Assertions.assertTrue(IcebergCachingFileIO.hasSchemeWithSharedFileSystem("file:/tmp/m0.avro"));
+
+        Assertions.assertFalse(IcebergCachingFileIO.hasSchemeWithSharedFileSystem("gs://bucket/m0.avro"));
+        Assertions.assertFalse(IcebergCachingFileIO.hasSchemeWithSharedFileSystem("abfs://c@a.dfs.core.windows.net/p"));
+        Assertions.assertFalse(IcebergCachingFileIO.hasSchemeWithSharedFileSystem("abfss://c@a.dfs.core.windows.net/p"));
+        Assertions.assertFalse(IcebergCachingFileIO.hasSchemeWithSharedFileSystem("wasb://c@a.blob.core.windows.net/p"));
+        Assertions.assertFalse(IcebergCachingFileIO.hasSchemeWithSharedFileSystem("wasbs://c@a.blob.core.windows.net/p"));
+        Assertions.assertFalse(IcebergCachingFileIO.hasSchemeWithSharedFileSystem("adl://a.azuredatalakestore.net/p"));
+        // no scheme: fs.defaultFS decides, so the path is treated as one that may need its own configuration
+        Assertions.assertFalse(IcebergCachingFileIO.hasSchemeWithSharedFileSystem("/warehouse/db/t/m0.avro"));
+        Assertions.assertFalse(IcebergCachingFileIO.hasSchemeWithSharedFileSystem("warehouse/a:b/m0.avro"));
+        // a scheme that only starts like an isolated one is not isolated
+        Assertions.assertTrue(IcebergCachingFileIO.hasSchemeWithSharedFileSystem("gsx://bucket/m0.avro"));
+    }
+
+    @Test
+    public void testPathConfBuiltOnlyWhenItDiffersFromBase() {
+        AtomicInteger built = new AtomicInteger();
+        new MockUp<IcebergCachingFileIO>() {
+            @Mock
+            public Configuration buildConfFromProperties(Invocation inv, Map<String, String> properties, String path) {
+                built.incrementAndGet();
+                return inv.proceed();
+            }
+        };
+        new MockUp<ResolvingFileIO>() {
+            @Mock
+            public InputFile newInputFile(String location) {
+                return Files.localInput("/tmp/non_existent_file");
+            }
+
+            @Mock
+            public OutputFile newOutputFile(String location) {
+                return null;
+            }
+        };
+
+        Configuration base = new Configuration();
+        IcebergCachingFileIO cachingFileIO = new IcebergCachingFileIO();
+        cachingFileIO.setConf(base);
+        cachingFileIO.initialize(new HashMap<>());
+
+        cachingFileIO.newInputFile("s3://bucket/m0.avro");
+        cachingFileIO.newOutputFile("s3a://bucket/m1.avro");
+        Assertions.assertEquals(0, built.get());
+        Assertions.assertSame(base, ((ResolvingFileIO) cachingFileIO.getWrappedIO()).getConf());
+
+        cachingFileIO.newInputFile("abfss://c@a.dfs.core.windows.net/m0.avro");
+        Assertions.assertEquals(1, built.get());
+        Assertions.assertTrue(((ResolvingFileIO) cachingFileIO.getWrappedIO()).getConf()
+                .getBoolean("fs.abfss.impl.disable.cache", false));
+        cachingFileIO.newInputFile("/warehouse/db/t/m0.avro");
+        Assertions.assertEquals(2, built.get());
+
+        Map<String, String> withToken = new HashMap<>();
+        withToken.put(GCS_ACCESS_TOKEN, "access_token");
+        IcebergCachingFileIO tokenFileIO = new IcebergCachingFileIO();
+        tokenFileIO.setConf(new Configuration());
+        tokenFileIO.initialize(withToken);
+        tokenFileIO.newInputFile("s3://bucket/m0.avro");
+        Assertions.assertEquals(3, built.get());
+        Assertions.assertEquals("access_token",
+                ((ResolvingFileIO) tokenFileIO.getWrappedIO()).getConf().get("fs.gs.temporary.access.token"));
     }
 
     @Test
