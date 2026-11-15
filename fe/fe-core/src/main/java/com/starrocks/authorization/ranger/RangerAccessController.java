@@ -38,8 +38,10 @@ import org.slf4j.LoggerFactory;
 
 import java.util.EnumSet;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
+import java.util.function.Supplier;
 
 import static com.starrocks.server.GlobalStateMgr.isCheckpointThread;
 import static java.util.Locale.ENGLISH;
@@ -112,10 +114,33 @@ public abstract class RangerAccessController extends ExternalAccessController im
         return rangerPlugin;
     }
 
+    // The transformer of a mask, before the column name and type are put into it. It can be null.
+    private record Mask(String transformer) {
+    }
+
     public Expr getColumnMaskingExpression(RangerAccessResourceImpl resource, Column column, ConnectContext context) {
-        RangerStarRocksAccessRequest request = RangerStarRocksAccessRequest.createAccessRequest(
-                resource, context.getCurrentUserIdentity(), context.getGroups(),
-                PrivilegeType.SELECT.name().toLowerCase(ENGLISH));
+        UserIdentity user = context.getCurrentUserIdentity();
+        Set<String> groups = context.getGroups();
+        String accessType = PrivilegeType.SELECT.name().toLowerCase(ENGLISH);
+        // The analyzer changes an Expr in place, so we keep the transformer text and parse it on every call.
+        Optional<Mask> mask = decide(context, RangerDecisionCache.Kind.MASK, resource, user, groups, accessType,
+                null, () -> evalMask(resource, user, groups, accessType));
+        if (mask.isEmpty()) {
+            return null;
+        }
+        String transformer = mask.get().transformer();
+        if (StringUtils.isNotEmpty(transformer)) {
+            transformer = transformer.replace("{col}", column.getName())
+                    .replace("{type}", column.getType().toSql());
+        }
+
+        return SqlParser.parseSqlToExpr(transformer, context.getSessionVariable().getSqlMode());
+    }
+
+    private Optional<Mask> evalMask(RangerAccessResourceImpl resource, UserIdentity user, Set<String> groups,
+                                    String accessType) {
+        RangerStarRocksAccessRequest request =
+                RangerStarRocksAccessRequest.createAccessRequest(resource, user, groups, accessType);
 
         RangerAccessResult result = rangerPlugin.evalDataMaskPolicies(request, null);
         if (result != null && result.isMaskEnabled()) {
@@ -134,38 +159,42 @@ public abstract class RangerAccessController extends ExternalAccessController im
                 transformer = Objects.requireNonNullElse(maskedValue, "NULL");
             }
 
-            if (StringUtils.isNotEmpty(transformer)) {
-                transformer = transformer.replace("{col}", column.getName())
-                        .replace("{type}", column.getType().toSql());
-            }
-
-            return SqlParser.parseSqlToExpr(transformer, context.getSessionVariable().getSqlMode());
+            return Optional.of(new Mask(transformer));
         }
 
-        return null;
+        return Optional.empty();
     }
 
     protected Expr getRowAccessExpression(RangerAccessResourceImpl resource, ConnectContext context) {
-        RangerStarRocksAccessRequest request = RangerStarRocksAccessRequest.createAccessRequest(
-                resource, context.getCurrentUserIdentity(), context.getGroups(),
-                PrivilegeType.SELECT.name().toLowerCase(ENGLISH));
-        RangerAccessResult result = rangerPlugin.evalRowFilterPolicies(request, null);
-        if (result != null && result.isRowFilterEnabled()) {
-            return SqlParser.parseSqlToExpr(result.getFilterExpr(), context.getSessionVariable().getSqlMode());
-        } else {
-            return null;
-        }
+        UserIdentity user = context.getCurrentUserIdentity();
+        Set<String> groups = context.getGroups();
+        String accessType = PrivilegeType.SELECT.name().toLowerCase(ENGLISH);
+        // The analyzer changes an Expr in place, so we keep the filter text and parse it on every call.
+        Optional<String> filter = decide(context, RangerDecisionCache.Kind.ROW_FILTER, resource, user, groups,
+                accessType, null, () -> {
+                    RangerStarRocksAccessRequest request =
+                            RangerStarRocksAccessRequest.createAccessRequest(resource, user, groups, accessType);
+                    RangerAccessResult result = rangerPlugin.evalRowFilterPolicies(request, null);
+                    if (result != null && result.isRowFilterEnabled()) {
+                        return Optional.of(result.getFilterExpr());
+                    } else {
+                        return Optional.empty();
+                    }
+                });
+        return filter.map(expr -> SqlParser.parseSqlToExpr(expr, context.getSessionVariable().getSqlMode()))
+                .orElse(null);
     }
 
-    protected void hasPermission(RangerAccessResourceImpl resource, UserIdentity user, Set<String> groups,
+    protected void hasPermission(RangerAccessResourceImpl resource, ConnectContext context,
                                  PrivilegeType privilegeType)
             throws AccessDeniedException {
-        hasPermission(resource, user, groups, privilegeType, EnumSet.noneOf(ColumnAccessKind.class));
+        hasPermission(resource, context, privilegeType, EnumSet.noneOf(ColumnAccessKind.class));
     }
 
-    protected void hasPermission(RangerAccessResourceImpl resource, UserIdentity user, Set<String> groups,
+    protected void hasPermission(RangerAccessResourceImpl resource, ConnectContext context,
                                  PrivilegeType privilegeType, EnumSet<ColumnAccessKind> usage)
             throws AccessDeniedException {
+        UserIdentity user = context.getCurrentUserIdentity();
         // root user bypasses Ranger authorization entirely
         if (UserIdentity.ROOT.equals(user)) {
             return;
@@ -177,11 +206,26 @@ public abstract class RangerAccessController extends ExternalAccessController im
             accessType = convertToAccessType(privilegeType);
         }
 
-        RangerStarRocksAccessRequest request =
-                RangerStarRocksAccessRequest.createAccessRequest(resource, user, groups, accessType, usage);
-        RangerAccessResult result = rangerPlugin.isAccessAllowed(request);
-        if (result == null || !result.getIsAllowed()) {
+        Set<String> groups = context.getGroups();
+        boolean allowed = decide(context, RangerDecisionCache.Kind.ACCESS, resource, user, groups, accessType, usage,
+                () -> {
+                    RangerStarRocksAccessRequest request = RangerStarRocksAccessRequest.createAccessRequest(
+                            resource, user, groups, accessType, usage);
+                    RangerAccessResult result = rangerPlugin.isAccessAllowed(request);
+                    return result != null && result.getIsAllowed();
+                });
+        if (!allowed) {
             throw new AccessDeniedException();
         }
+    }
+
+    // Every Ranger decision of this controller goes through here, so the statement asks Ranger
+    // each question once. The key is built from the same values as the request.
+    private <T> T decide(ConnectContext context, RangerDecisionCache.Kind kind, RangerAccessResourceImpl resource,
+                         UserIdentity user, Set<String> groups, String accessType, EnumSet<ColumnAccessKind> usage,
+                         Supplier<T> evaluate) {
+        RangerDecisionCache.Key key =
+                RangerDecisionCache.keyOf(this, kind, resource, user, groups, accessType, usage);
+        return context.getRangerDecisionCache().get(key, evaluate);
     }
 }

@@ -49,6 +49,7 @@ import com.starrocks.authorization.ObjectType;
 import com.starrocks.authorization.PrivilegeBuiltinConstants;
 import com.starrocks.authorization.PrivilegeException;
 import com.starrocks.authorization.PrivilegeType;
+import com.starrocks.authorization.ranger.RangerDecisionCache;
 import com.starrocks.catalog.UserIdentity;
 import com.starrocks.cluster.ClusterNamespace;
 import com.starrocks.common.DdlException;
@@ -118,6 +119,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static com.starrocks.common.util.Util.normalizeName;
 
@@ -143,6 +145,10 @@ public class ConnectContext {
     // nodes for processing or be processed repeatedly, but each execution instance will have
     // the same queryId
     protected UUID queryId;
+
+    // Ranger answers of the current statement. setQueryId drops them, so a statement never
+    // sees the answers of the statement before it.
+    private final AtomicReference<RangerDecisionCache> rangerDecisionCache = new AtomicReference<>();
 
     // A request will be executed multiple times because of retry or redirect.
     // This id is used to distinguish between different execution instances
@@ -976,6 +982,13 @@ public class ConnectContext {
 
     public void setQueryId(UUID queryId) {
         this.queryId = queryId;
+        rangerDecisionCache.set(null);
+    }
+
+    public RangerDecisionCache getRangerDecisionCache() {
+        RangerDecisionCache cache = rangerDecisionCache.get();
+        return cache != null ? cache
+                : rangerDecisionCache.updateAndGet(current -> current != null ? current : new RangerDecisionCache());
     }
 
     public UUID getLastQueryId() {

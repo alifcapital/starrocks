@@ -47,8 +47,7 @@ public class RangerStarRocksAccessController extends RangerAccessController {
             throws AccessDeniedException {
         hasPermission(
                 RangerStarRocksResource.builder().setSystem().build(),
-                context.getCurrentUserIdentity(),
-                context.getGroups(),
+                context,
                 privilegeType);
     }
 
@@ -57,8 +56,7 @@ public class RangerStarRocksAccessController extends RangerAccessController {
                                 PrivilegeType privilegeType) throws AccessDeniedException {
         hasPermission(
                 RangerStarRocksResource.builder().setUser(impersonateUser.getUser()).build(),
-                context.getCurrentUserIdentity(),
-                context.getGroups(),
+                context,
                 privilegeType);
     }
 
@@ -67,8 +65,7 @@ public class RangerStarRocksAccessController extends RangerAccessController {
             throws AccessDeniedException {
         hasPermission(
                 RangerStarRocksResource.builder().setCatalog(catalogName).build(),
-                context.getCurrentUserIdentity(),
-                context.getGroups(),
+                context,
                 privilegeType);
     }
 
@@ -77,8 +74,7 @@ public class RangerStarRocksAccessController extends RangerAccessController {
             throws AccessDeniedException {
         hasPermission(
                 RangerStarRocksResource.builder().setCatalog(catalogName).build(),
-                context.getCurrentUserIdentity(),
-                context.getGroups(),
+                context,
                 PrivilegeType.ANY);
     }
 
@@ -87,8 +83,7 @@ public class RangerStarRocksAccessController extends RangerAccessController {
                               PrivilegeType privilegeType) throws AccessDeniedException {
         hasPermission(
                 RangerStarRocksResource.builder().setCatalog(catalogName).setDatabase(db).build(),
-                context.getCurrentUserIdentity(),
-                context.getGroups(),
+                context,
                 privilegeType);
     }
 
@@ -97,8 +92,7 @@ public class RangerStarRocksAccessController extends RangerAccessController {
             throws AccessDeniedException {
         hasPermission(
                 RangerStarRocksResource.builder().setCatalog(catalogName).setDatabase(db).build(),
-                context.getCurrentUserIdentity(),
-                context.getGroups(),
+                context,
                 PrivilegeType.ANY);
     }
 
@@ -113,8 +107,7 @@ public class RangerStarRocksAccessController extends RangerAccessController {
                         .setDatabase(tableName.getDb())
                         .setTable(tableName.getTbl())
                         .build(),
-                context.getCurrentUserIdentity(),
-                context.getGroups(),
+                context,
                 privilegeType);
     }
 
@@ -129,8 +122,7 @@ public class RangerStarRocksAccessController extends RangerAccessController {
                         .setDatabase(tableName.getDb())
                         .setTable(tableName.getTbl())
                         .build(),
-                context.getCurrentUserIdentity(),
-                context.getGroups(),
+                context,
                 PrivilegeType.ANY);
     }
 
@@ -150,8 +142,7 @@ public class RangerStarRocksAccessController extends RangerAccessController {
                                 .setDatabase(database.getFullName())
                                 .setTable(table.getName())
                                 .build(),
-                        context.getCurrentUserIdentity(),
-                        context.getGroups(),
+                        context,
                         PrivilegeType.ANY);
             } catch (AccessDeniedException e) {
                 continue;
@@ -177,8 +168,7 @@ public class RangerStarRocksAccessController extends RangerAccessController {
                         .setTable(tableName.getTbl())
                         .setColumn(column)
                         .build(),
-                context.getCurrentUserIdentity(),
-                context.getGroups(), privilegeType, usage);
+                context, privilegeType, usage);
     }
 
     @Override
@@ -190,8 +180,7 @@ public class RangerStarRocksAccessController extends RangerAccessController {
                         .setDatabase(tableName.getDb())
                         .setView(tableName.getTbl())
                         .build(),
-                context.getCurrentUserIdentity(),
-                context.getGroups(),
+                context,
                 privilegeType);
     }
 
@@ -204,8 +193,7 @@ public class RangerStarRocksAccessController extends RangerAccessController {
                         .setDatabase(tableName.getDb())
                         .setView(tableName.getTbl())
                         .build(),
-                context.getCurrentUserIdentity(),
-                context.getGroups(),
+                context,
                 PrivilegeType.ANY);
     }
 
@@ -224,8 +212,7 @@ public class RangerStarRocksAccessController extends RangerAccessController {
                                 .setDatabase(database.getFullName())
                                 .setView(table.getName())
                                 .build(),
-                        context.getCurrentUserIdentity(),
-                        context.getGroups(),
+                        context,
                         PrivilegeType.ANY);
             } catch (AccessDeniedException e) {
                 continue;
@@ -244,8 +231,7 @@ public class RangerStarRocksAccessController extends RangerAccessController {
                         .setDatabase(tableName.getDb())
                         .setMaterializedView(tableName.getTbl())
                         .build(),
-                context.getCurrentUserIdentity(),
-                context.getGroups(),
+                context,
                 privilegeType);
     }
 
@@ -258,8 +244,7 @@ public class RangerStarRocksAccessController extends RangerAccessController {
                         .setDatabase(tableName.getDb())
                         .setMaterializedView(tableName.getTbl())
                         .build(),
-                context.getCurrentUserIdentity(),
-                context.getGroups(),
+                context,
                 PrivilegeType.ANY);
     }
 
@@ -279,8 +264,7 @@ public class RangerStarRocksAccessController extends RangerAccessController {
                                 .setDatabase(database.getFullName())
                                 .setMaterializedView(table.getName())
                                 .build(),
-                        context.getCurrentUserIdentity(),
-                        context.getGroups(),
+                        context,
                         PrivilegeType.ANY);
             } catch (AccessDeniedException e) {
                 continue;
@@ -299,8 +283,7 @@ public class RangerStarRocksAccessController extends RangerAccessController {
                         .setDatabase(database.getFullName())
                         .setFunction(function.getSignature())
                         .build(),
-                context.getCurrentUserIdentity(),
-                context.getGroups(),
+                context,
                 privilegeType);
     }
 
@@ -313,8 +296,7 @@ public class RangerStarRocksAccessController extends RangerAccessController {
                         .setDatabase(database)
                         .setFunction(function.getSignature())
                         .build(),
-                context.getCurrentUserIdentity(),
-                context.getGroups(),
+                context,
                 PrivilegeType.ANY);
     }
 
@@ -333,8 +315,7 @@ public class RangerStarRocksAccessController extends RangerAccessController {
                                 .setDatabase(database.getFullName())
                                 .setFunction(function.getSignature())
                                 .build(),
-                        context.getCurrentUserIdentity(),
-                        context.getGroups(),
+                        context,
                         PrivilegeType.ANY);
             } catch (AccessDeniedException e) {
                 continue;
@@ -351,8 +332,7 @@ public class RangerStarRocksAccessController extends RangerAccessController {
                 RangerStarRocksResource.builder()
                         .setGlobalFunction(function.getSignature())
                         .build(),
-                context.getCurrentUserIdentity(),
-                context.getGroups(),
+                context,
                 privilegeType);
     }
 
@@ -363,8 +343,7 @@ public class RangerStarRocksAccessController extends RangerAccessController {
                 RangerStarRocksResource.builder()
                         .setGlobalFunction(function.getSignature())
                         .build(),
-                context.getCurrentUserIdentity(),
-                context.getGroups(),
+                context,
                 PrivilegeType.ANY);
     }
 
@@ -398,8 +377,7 @@ public class RangerStarRocksAccessController extends RangerAccessController {
                 RangerStarRocksResource.builder()
                         .setResource(name)
                         .build(),
-                context.getCurrentUserIdentity(),
-                context.getGroups(),
+                context,
                 privilegeType);
     }
 
@@ -409,8 +387,7 @@ public class RangerStarRocksAccessController extends RangerAccessController {
                 RangerStarRocksResource.builder()
                         .setResource(name)
                         .build(),
-                context.getCurrentUserIdentity(),
-                context.getGroups(),
+                context,
                 PrivilegeType.ANY);
     }
 
@@ -421,8 +398,7 @@ public class RangerStarRocksAccessController extends RangerAccessController {
                 RangerStarRocksResource.builder()
                         .setResourceGroup(name)
                         .build(),
-                context.getCurrentUserIdentity(),
-                context.getGroups(),
+                context,
                 privilegeType);
     }
 
@@ -438,8 +414,7 @@ public class RangerStarRocksAccessController extends RangerAccessController {
                         .setDatabase(name.getDbName())
                         .setPipe(name.getPipeName())
                         .build(),
-                context.getCurrentUserIdentity(),
-                context.getGroups(),
+                context,
                 privilegeType);
     }
 
@@ -452,8 +427,7 @@ public class RangerStarRocksAccessController extends RangerAccessController {
                         .setDatabase(pipeName.getDbName())
                         .setPipe(pipeName.getPipeName())
                         .build(),
-                context.getCurrentUserIdentity(),
-                context.getGroups(),
+                context,
                 PrivilegeType.ANY);
     }
 
@@ -464,8 +438,7 @@ public class RangerStarRocksAccessController extends RangerAccessController {
                 RangerStarRocksResource.builder()
                         .setStorageVolume(storageVolume)
                         .build(),
-                context.getCurrentUserIdentity(),
-                context.getGroups(),
+                context,
                 privilegeType);
     }
 
@@ -476,8 +449,7 @@ public class RangerStarRocksAccessController extends RangerAccessController {
                 RangerStarRocksResource.builder()
                         .setStorageVolume(storageVolume)
                         .build(),
-                context.getCurrentUserIdentity(),
-                context.getGroups(),
+                context,
                 PrivilegeType.ANY);
     }
 
@@ -520,8 +492,7 @@ public class RangerStarRocksAccessController extends RangerAccessController {
                 RangerStarRocksResource.builder()
                         .setWarehouse(name)
                         .build(),
-                context.getCurrentUserIdentity(),
-                context.getGroups(),
+                context,
                 privilegeType);
     }
 
@@ -531,8 +502,7 @@ public class RangerStarRocksAccessController extends RangerAccessController {
                 RangerStarRocksResource.builder()
                         .setWarehouse(name)
                         .build(),
-                context.getCurrentUserIdentity(),
-                context.getGroups(),
+                context,
                 PrivilegeType.ANY);
     }
 }

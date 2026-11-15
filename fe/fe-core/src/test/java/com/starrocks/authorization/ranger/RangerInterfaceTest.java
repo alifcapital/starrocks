@@ -30,6 +30,7 @@ import com.starrocks.catalog.TableName;
 import com.starrocks.catalog.UserIdentity;
 import com.starrocks.catalog.View;
 import com.starrocks.common.ErrorReportException;
+import com.starrocks.common.util.UUIDUtil;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.analyzer.Analyzer;
@@ -127,6 +128,13 @@ public class RangerInterfaceTest {
         ((View) secMvTbl).setSecurity(true);
     }
 
+    private static ConnectContext contextOf(UserIdentity user) {
+        ConnectContext context = new ConnectContext();
+        context.setCurrentUserIdentity(user);
+        context.setGroups(Set.of());
+        return context;
+    }
+
     @Test
     public void testMaskingNull() {
         new MockUp<RangerBasePlugin>() {
@@ -204,6 +212,8 @@ public class RangerInterfaceTest {
             }
         };
 
+        // The FE reuses a Ranger answer inside one statement, so the changed policy is read in a new one.
+        connectContext.setQueryId(UUIDUtil.genUUID());
         e = rangerStarRocksAccessController.getColumnMaskingPolicy(connectContext, tableName, columns);
         Assertions.assertTrue(new ArrayList<>(e.values()).get(0) instanceof ArithmeticExpr);
     }
@@ -244,7 +254,8 @@ public class RangerInterfaceTest {
 
         try {
             rangerStarRocksAccessController.hasPermission(
-                    RangerStarRocksResource.builder().setSystem().build(), UserIdentity.ROOT, Set.of(), PrivilegeType.OPERATE);
+                    RangerStarRocksResource.builder().setSystem().build(), contextOf(UserIdentity.ROOT),
+                    PrivilegeType.OPERATE);
         } catch (Exception e) {
             Assertions.fail();
         }
@@ -261,7 +272,7 @@ public class RangerInterfaceTest {
 
         Assertions.assertThrows(AccessDeniedException.class, () -> rangerStarRocksAccessController.hasPermission(
                 RangerStarRocksResource.builder().setSystem().build(),
-                new UserIdentity("alice", "%"), Set.of(), PrivilegeType.OPERATE));
+                contextOf(new UserIdentity("alice", "%")), PrivilegeType.OPERATE));
     }
 
     @Test
@@ -282,23 +293,23 @@ public class RangerInterfaceTest {
         // root user must bypass Ranger even when Ranger denies everything
         Assertions.assertDoesNotThrow(() -> controller.hasPermission(
                 RangerStarRocksResource.builder().setSystem().build(),
-                UserIdentity.ROOT, Set.of(), PrivilegeType.OPERATE));
+                contextOf(UserIdentity.ROOT), PrivilegeType.OPERATE));
         Assertions.assertDoesNotThrow(() -> controller.hasPermission(
                 RangerStarRocksResource.builder().setCatalog("hive_catalog").build(),
-                UserIdentity.ROOT, Set.of(), PrivilegeType.USAGE));
+                contextOf(UserIdentity.ROOT), PrivilegeType.USAGE));
         Assertions.assertDoesNotThrow(() -> controller.hasPermission(
                 RangerStarRocksResource.builder().setCatalog("default_catalog").setDatabase("db1").build(),
-                UserIdentity.ROOT, Set.of(), PrivilegeType.CREATE_TABLE));
+                contextOf(UserIdentity.ROOT), PrivilegeType.CREATE_TABLE));
         Assertions.assertDoesNotThrow(() -> controller.hasPermission(
                 RangerStarRocksResource.builder()
                         .setCatalog("default_catalog").setDatabase("db1").setTable("t1").build(),
-                UserIdentity.ROOT, Set.of(), PrivilegeType.SELECT));
+                contextOf(UserIdentity.ROOT), PrivilegeType.SELECT));
 
         // non-root user must still go through Ranger and be denied
         UserIdentity normalUser = new UserIdentity("alice", "%");
         Assertions.assertThrows(AccessDeniedException.class, () -> controller.hasPermission(
                 RangerStarRocksResource.builder().setSystem().build(),
-                normalUser, Set.of(), PrivilegeType.OPERATE));
+                contextOf(normalUser), PrivilegeType.OPERATE));
     }
 
     @Test
@@ -613,6 +624,8 @@ public class RangerInterfaceTest {
                     "insert into files(\"path\" = \"hdfs://127.0.0.1:9000/files/\", \"format\" = \"parquet\", "
                             + "\"compression\" = \"uncompressed\") select v4 from db.t1")) {
                 requests.clear();
+                // Every statement gets a new query id, so it asks Ranger again.
+                ctx.setQueryId(UUIDUtil.genUUID());
                 StatementBase stmt = SqlParser.parse(sql, ctx.getSessionVariable().getSqlMode()).get(0);
                 Analyzer.analyze(stmt, ctx);
                 Assertions.assertDoesNotThrow(() -> Authorizer.check(stmt, ctx), sql);
@@ -621,6 +634,7 @@ public class RangerInterfaceTest {
             }
 
             requests.clear();
+            ctx.setQueryId(UUIDUtil.genUUID());
             StatementBase insert = SqlParser.parse("insert into db.t1 select v4, v5, v6 from db.t1",
                     ctx.getSessionVariable().getSqlMode()).get(0);
             Analyzer.analyze(insert, ctx);

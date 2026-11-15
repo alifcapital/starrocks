@@ -38,8 +38,7 @@ public class RangerHiveAccessController extends RangerAccessController {
         hasPermission(RangerHiveResource.builder()
                         .setDatabase(db)
                         .build(),
-                context.getCurrentUserIdentity(),
-                context.getGroups(),
+                context,
                 privilegeType);
     }
 
@@ -49,8 +48,7 @@ public class RangerHiveAccessController extends RangerAccessController {
         hasPermission(RangerHiveResource.builder()
                         .setDatabase(db)
                         .build(),
-                context.getCurrentUserIdentity(),
-                context.getGroups(),
+                context,
                 PrivilegeType.ANY);
     }
 
@@ -61,8 +59,7 @@ public class RangerHiveAccessController extends RangerAccessController {
                         .setDatabase(tableName.getDb())
                         .setTable(tableName.getTbl())
                         .build(),
-                context.getCurrentUserIdentity(),
-                context.getGroups(),
+                context,
                 privilegeType);
     }
 
@@ -73,8 +70,7 @@ public class RangerHiveAccessController extends RangerAccessController {
                         .setDatabase(tableName.getDb())
                         .setTable(tableName.getTbl())
                         .build(),
-                context.getCurrentUserIdentity(),
-                context.getGroups(),
+                context,
                 PrivilegeType.ANY);
     }
 
@@ -86,8 +82,7 @@ public class RangerHiveAccessController extends RangerAccessController {
                         .setTable(tableName.getTbl())
                         .setColumn(column)
                         .build(),
-                context.getCurrentUserIdentity(),
-                context.getGroups(),
+                context,
                 privilegeType);
     }
 
