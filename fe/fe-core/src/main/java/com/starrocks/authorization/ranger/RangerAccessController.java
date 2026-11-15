@@ -23,6 +23,7 @@ import com.starrocks.catalog.UserIdentity;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.sql.ast.expression.Expr;
 import com.starrocks.sql.parser.SqlParser;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang.StringUtils;
 import org.apache.ranger.audit.provider.AuditProviderFactory;
 import org.apache.ranger.authorization.hadoop.config.RangerPluginConfig;
@@ -36,6 +37,7 @@ import org.apache.ranger.plugin.service.RangerBasePlugin;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.lang.ref.WeakReference;
 import java.util.EnumSet;
 import java.util.Objects;
 import java.util.Optional;
@@ -59,7 +61,7 @@ public abstract class RangerAccessController extends ExternalAccessController im
 
     public RangerAccessController(String serviceType, String serviceName) {
         RangerPluginConfig rangerPluginContext = buildRangerPluginContext(serviceType, serviceName);
-        rangerPlugin = new RangerBasePlugin(rangerPluginContext);
+        rangerPlugin = new Plugin(rangerPluginContext);
         if (!isCheckpointThread()) {
             // Audit first, so a broken audit config disables only audit; init() then skips it.
             initAuditIfNeeded(rangerPlugin);
@@ -112,6 +114,63 @@ public abstract class RangerAccessController extends ExternalAccessController im
 
     public RangerBasePlugin getRangerPlugin() {
         return rangerPlugin;
+    }
+
+    // RangerBasePlugin keeps its policy engine protected. We need it to read the tag policies.
+    private static class Plugin extends RangerBasePlugin {
+        Plugin(RangerPluginConfig config) {
+            super(config);
+        }
+
+        RangerPolicyEngine currentPolicyEngine() {
+            return getPolicyEngine();
+        }
+    }
+
+    // The answer of tagPolicyMayAllow for one policy engine and policy version.
+    private record TagAllowCheck(WeakReference<RangerPolicyEngine> engine, long policyVersion, boolean mayAllow) {
+    }
+
+    private volatile TagAllowCheck tagAllowCheck;
+
+    /**
+     * Whether a tag policy of this service can allow an access check: an enabled access policy with
+     * an allow item. Without one, tag policies can only deny, mask or filter rows.
+     * <p>
+     * We want to read the tag policies once per policy version, not per check. Ranger Admin raises
+     * the policy version of the service when a tag policy changes, and a refresh either builds a new
+     * engine or updates the version of the old one. So the answer is kept for one engine and version.
+     */
+    protected boolean tagPolicyMayAllow() {
+        try {
+            RangerPolicyEngine engine =
+                    rangerPlugin instanceof Plugin plugin ? plugin.currentPolicyEngine() : null;
+            if (engine == null) {
+                return true;
+            }
+            long policyVersion = engine.getPolicyVersion();
+            TagAllowCheck check = tagAllowCheck;
+            if (check != null && check.engine().get() == engine && check.policyVersion() == policyVersion) {
+                return check.mayAllow();
+            }
+            boolean mayAllow = false;
+            for (RangerPolicy policy : engine.getTagPolicies()) {
+                // The engine keeps only the access types of this service in a tag policy, so an item
+                // that allows only another service is already gone.
+                boolean isAccessPolicy = policy.getPolicyType() == null
+                        || policy.getPolicyType() == RangerPolicy.POLICY_TYPE_ACCESS;
+                if (!Boolean.FALSE.equals(policy.getIsEnabled()) && isAccessPolicy
+                        && CollectionUtils.isNotEmpty(policy.getPolicyItems())) {
+                    mayAllow = true;
+                    break;
+                }
+            }
+            tagAllowCheck = new TagAllowCheck(new WeakReference<>(engine), policyVersion, mayAllow);
+            return mayAllow;
+        } catch (RuntimeException e) {
+            // We cannot tell, so we answer as if a tag policy could allow.
+            return true;
+        }
     }
 
     // The transformer of a mask, before the column name and type are put into it. It can be null.
@@ -194,10 +253,24 @@ public abstract class RangerAccessController extends ExternalAccessController im
     protected void hasPermission(RangerAccessResourceImpl resource, ConnectContext context,
                                  PrivilegeType privilegeType, EnumSet<ColumnAccessKind> usage)
             throws AccessDeniedException {
+        if (!decideAccess(resource, context, privilegeType, usage).allowed()) {
+            throw new AccessDeniedException();
+        }
+    }
+
+    /**
+     * The answer of Ranger to one access check. decidedByPolicy is false when no policy set the
+     * answer: the check is denied only because nothing allows it.
+     */
+    protected record AccessDecision(boolean allowed, boolean decidedByPolicy) {
+    }
+
+    protected AccessDecision decideAccess(RangerAccessResourceImpl resource, ConnectContext context,
+                                          PrivilegeType privilegeType, EnumSet<ColumnAccessKind> usage) {
         UserIdentity user = context.getCurrentUserIdentity();
         // root user bypasses Ranger authorization entirely
         if (UserIdentity.ROOT.equals(user)) {
-            return;
+            return new AccessDecision(true, false);
         }
         String accessType;
         if (privilegeType.equals(PrivilegeType.ANY)) {
@@ -207,16 +280,16 @@ public abstract class RangerAccessController extends ExternalAccessController im
         }
 
         Set<String> groups = context.getGroups();
-        boolean allowed = decide(context, RangerDecisionCache.Kind.ACCESS, resource, user, groups, accessType, usage,
-                () -> {
-                    RangerStarRocksAccessRequest request = RangerStarRocksAccessRequest.createAccessRequest(
-                            resource, user, groups, accessType, usage);
-                    RangerAccessResult result = rangerPlugin.isAccessAllowed(request);
-                    return result != null && result.getIsAllowed();
-                });
-        if (!allowed) {
-            throw new AccessDeniedException();
-        }
+        return decide(context, RangerDecisionCache.Kind.ACCESS, resource, user, groups, accessType, usage, () -> {
+            RangerStarRocksAccessRequest request = RangerStarRocksAccessRequest.createAccessRequest(
+                    resource, user, groups, accessType, usage);
+            RangerAccessResult result = rangerPlugin.isAccessAllowed(request);
+            if (result == null) {
+                return new AccessDecision(false, false);
+            }
+            // A result keeps policyId -1 unless a policy set the answer.
+            return new AccessDecision(result.getIsAllowed(), result.getPolicyId() != -1);
+        });
     }
 
     // Every Ranger decision of this controller goes through here, so the statement asks Ranger

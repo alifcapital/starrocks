@@ -23,8 +23,8 @@ import com.starrocks.sql.analyzer.Authorizer;
 import com.starrocks.sql.ast.StatementBase;
 import com.starrocks.sql.plan.ConnectorPlanTestBase;
 import com.starrocks.utframe.UtFrameUtils;
+import mockit.Capturing;
 import mockit.Expectations;
-import mockit.Mocked;
 import org.apache.ranger.plugin.service.RangerBasePlugin;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assertions;
@@ -52,8 +52,9 @@ public class AlterCatalogTest {
         UtFrameUtils.tearDownForPersisTest();
     }
 
+    // RangerAccessController builds a subclass of RangerBasePlugin, so the mock must capture subclasses.
     @Test
-    public void testAlter(@Mocked RangerBasePlugin rangerPlugin) throws Exception {
+    public void testAlter(@Capturing RangerBasePlugin rangerPlugin) throws Exception {
 
         new Expectations() {
             {
@@ -93,7 +94,7 @@ public class AlterCatalogTest {
     }
 
     @Test
-    public void testReplay(@Mocked RangerBasePlugin rangerPlugin) throws Exception {
+    public void testReplay(@Capturing RangerBasePlugin rangerPlugin) throws Exception {
         new Expectations() {
             {
                 rangerPlugin.init();

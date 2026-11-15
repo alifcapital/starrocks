@@ -14,6 +14,7 @@
 
 package com.starrocks.authorization;
 
+import com.google.common.collect.ImmutableList;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.Function;
@@ -21,8 +22,11 @@ import com.starrocks.catalog.Table;
 import com.starrocks.catalog.TableName;
 import com.starrocks.catalog.UserIdentity;
 import com.starrocks.qe.ConnectContext;
+import com.starrocks.server.CatalogMgr;
+import com.starrocks.sql.analyzer.Authorizer;
 import com.starrocks.sql.ast.expression.Expr;
 import com.starrocks.sql.ast.pipe.PipeName;
+import org.apache.commons.collections4.ListUtils;
 
 import java.util.EnumSet;
 import java.util.List;
@@ -144,6 +148,48 @@ public interface AccessController {
     default void checkAnyActionOnGlobalFunction(ConnectContext context, Function function)
             throws AccessDeniedException {
         throw new AccessDeniedException();
+    }
+
+    /**
+     * Check whether current user has any privilege action on the db or objects(table/view/mv) in the db.
+     * Currently, it's used by `show databases` or `use database`.
+     */
+    default void checkAnyActionOnOrInDb(ConnectContext context, String catalogName, String db)
+            throws AccessDeniedException {
+        checkAnyActionOnOrInDbOneByOne(this, context, catalogName, db);
+    }
+
+    /**
+     * Asks about the database and then about the objects in it, until one check allows. A controller
+     * that can answer in fewer steps still uses this when its own answer may differ.
+     */
+    static void checkAnyActionOnOrInDbOneByOne(AccessController controller, ConnectContext context,
+                                               String catalogName, String db) throws AccessDeniedException {
+        List<Authorizer.AccessControlChecker> basicCheckers = ImmutableList.of(
+                () -> controller.checkAnyActionOnDb(context, catalogName, db),
+                () -> controller.checkAnyActionOnAnyTable(context, catalogName, db)
+        );
+        List<Authorizer.AccessControlChecker> extraCheckers = ImmutableList.of(
+                () -> controller.checkAnyActionOnAnyView(context, db),
+                () -> controller.checkAnyActionOnAnyMaterializedView(context, db),
+                () -> controller.checkAnyActionOnAnyFunction(context, db),
+                () -> controller.checkAnyActionOnPipe(context, new PipeName("*", "*"))
+        );
+        List<Authorizer.AccessControlChecker> appliedCheckers = CatalogMgr.isInternalCatalog(catalogName) ?
+                ListUtils.union(basicCheckers, extraCheckers) : basicCheckers;
+
+        AccessDeniedException lastExcepton = null;
+        for (Authorizer.AccessControlChecker checker : appliedCheckers) {
+            try {
+                checker.check();
+                return;
+            } catch (AccessDeniedException e) {
+                lastExcepton = e;
+            }
+        }
+        if (lastExcepton != null) {
+            throw lastExcepton;
+        }
     }
 
     /**

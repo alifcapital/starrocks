@@ -15,6 +15,7 @@
 package com.starrocks.authorization.ranger.starrocks;
 
 import com.google.common.collect.Maps;
+import com.starrocks.authorization.AccessController;
 import com.starrocks.authorization.AccessDeniedException;
 import com.starrocks.authorization.ColumnAccessKind;
 import com.starrocks.authorization.PrivilegeType;
@@ -27,13 +28,18 @@ import com.starrocks.catalog.Table;
 import com.starrocks.catalog.TableName;
 import com.starrocks.catalog.UserIdentity;
 import com.starrocks.qe.ConnectContext;
+import com.starrocks.server.CatalogMgr;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.ast.expression.Expr;
 import com.starrocks.sql.ast.pipe.PipeName;
+import org.apache.ranger.plugin.policyengine.RangerAccessResourceImpl;
+import org.apache.ranger.plugin.policyengine.RangerSecurityZoneMatcher;
+import org.apache.ranger.plugin.service.RangerAuthContext;
 
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static java.util.Locale.ENGLISH;
 
@@ -94,6 +100,66 @@ public class RangerStarRocksAccessController extends RangerAccessController {
                 RangerStarRocksResource.builder().setCatalog(catalogName).setDatabase(db).build(),
                 context,
                 PrivilegeType.ANY);
+    }
+
+    /**
+     * We want to answer this check with few Ranger requests: system tables run it for every row.
+     * For an ANY request on a database, Ranger also matches the policies of the tables, views,
+     * materialized views, functions and pipes in it. So one request on the database usually gives
+     * the answer of all the object checks.
+     * <p>
+     * It can deny where an object check allows. A policy that denies all access types on the whole
+     * database denies the database request, but it does not match the request for a table in it, so
+     * an allow policy on that table still allows the table. So when a policy set the deny, we ask
+     * about each object as before. When no policy set it, we expect the object checks to deny too:
+     * a policy that allows an object in the database also allows the ANY request on the database.
+     * Then only the check of all pipes is left, because it asks about database "*", not this one.
+     * <p>
+     * The tests compare this with the object checks for many policy shapes, without security zones
+     * and with tag policies that cannot allow. A zone changes which policies a request sees, and a
+     * tag policy that allows can allow an object without matching the database request. So we ask
+     * about each object when one of them may apply.
+     */
+    @Override
+    public void checkAnyActionOnOrInDb(ConnectContext context, String catalogName, String db)
+            throws AccessDeniedException {
+        RangerAccessResourceImpl database =
+                RangerStarRocksResource.builder().setCatalog(catalogName).setDatabase(db).build();
+        AccessDecision decision =
+                decideAccess(database, context, PrivilegeType.ANY, EnumSet.noneOf(ColumnAccessKind.class));
+        if (decision.allowed()) {
+            return;
+        }
+        if (decision.decidedByPolicy() || mayUseZonesOrTags(database)) {
+            AccessController.checkAnyActionOnOrInDbOneByOne(this, context, catalogName, db);
+            return;
+        }
+        if (CatalogMgr.isInternalCatalog(catalogName)) {
+            checkAnyActionOnPipe(context, new PipeName("*", "*"));
+            return;
+        }
+        throw new AccessDeniedException();
+    }
+
+    // The one-step answer only turns "no policy set the answer" into a deny, so a tag policy matters
+    // here only if it can allow. Deny, masking and row filter tag policies cannot. The tag answer is
+    // kept per policy version, and the zone lookup returns at once when the service has no zones.
+    private boolean mayUseZonesOrTags(RangerAccessResourceImpl database) {
+        try {
+            if (tagPolicyMayAllow()) {
+                return true;
+            }
+            RangerAuthContext authContext = rangerPlugin.getCurrentRangerAuthContext();
+            RangerSecurityZoneMatcher zoneMatcher = authContext == null ? null : authContext.getZoneMatcher();
+            if (zoneMatcher == null) {
+                return true;
+            }
+            Set<String> zones = zoneMatcher.getZonesForResourceAndChildren(database);
+            return zones != null && !zones.isEmpty();
+        } catch (RuntimeException e) {
+            // We cannot tell, so we take the path that does not depend on the answer.
+            return true;
+        }
     }
 
     @Override

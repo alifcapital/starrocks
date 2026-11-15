@@ -17,10 +17,8 @@ package com.starrocks.sql.analyzer;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
 import com.google.common.base.Suppliers;
-import com.google.common.collect.ImmutableList;
 import com.starrocks.authentication.AuthenticationMgr;
 import com.starrocks.authorization.AccessControlProvider;
-import com.starrocks.authorization.AccessController;
 import com.starrocks.authorization.AccessDeniedException;
 import com.starrocks.authorization.ColumnAccessKind;
 import com.starrocks.authorization.ObjectType;
@@ -52,7 +50,6 @@ import com.starrocks.sql.ast.expression.StringLiteral;
 import com.starrocks.sql.ast.pipe.PipeName;
 import com.starrocks.thrift.TFunctionBinaryType;
 import com.starrocks.warehouse.Warehouse;
-import org.apache.commons.collections4.ListUtils;
 
 import java.util.ArrayList;
 import java.util.EnumSet;
@@ -375,33 +372,7 @@ public class Authorizer {
     public static void checkAnyActionOnOrInDb(ConnectContext context, String catalogName, String db)
             throws AccessDeniedException {
         Preconditions.checkNotNull(db, "db should not null");
-        AccessController controller = getInstance().getAccessControlOrDefault(catalogName);
-
-        List<AccessControlChecker> basicCheckers = ImmutableList.of(
-                () -> controller.checkAnyActionOnDb(context, catalogName, db),
-                () -> controller.checkAnyActionOnAnyTable(context, catalogName, db)
-        );
-        List<AccessControlChecker> extraCheckers = ImmutableList.of(
-                () -> controller.checkAnyActionOnAnyView(context, db),
-                () -> controller.checkAnyActionOnAnyMaterializedView(context, db),
-                () -> controller.checkAnyActionOnAnyFunction(context, db),
-                () -> controller.checkAnyActionOnPipe(context, new PipeName("*", "*"))
-        );
-        List<AccessControlChecker> appliedCheckers = CatalogMgr.isInternalCatalog(catalogName) ?
-                ListUtils.union(basicCheckers, extraCheckers) : basicCheckers;
-
-        AccessDeniedException lastExcepton = null;
-        for (AccessControlChecker checker : appliedCheckers) {
-            try {
-                checker.check();
-                return;
-            } catch (AccessDeniedException e) {
-                lastExcepton = e;
-            }
-        }
-        if (lastExcepton != null) {
-            throw lastExcepton;
-        }
+        getInstance().getAccessControlOrDefault(catalogName).checkAnyActionOnOrInDb(context, catalogName, db);
     }
 
     public static void checkResourceAction(ConnectContext context, String name,
