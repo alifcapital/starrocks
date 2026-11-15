@@ -896,7 +896,7 @@ public class InformationSchemaDataSourceTest extends StarRocksTestBase {
         {
             params.setDb("test_db");
             params.setType(TTableType.SCHEMA_TABLE);
-            TListTableStatusResult result = ViewsSystemTable.query(params, connectContext);
+            TListTableStatusResult result = ViewsSystemTable.query(params);
             Assertions.assertEquals(2, result.getTables().size());
             Set<String> tableNames = result.getTables().stream()
                     .map(TTableStatus::getName)
@@ -916,7 +916,7 @@ public class InformationSchemaDataSourceTest extends StarRocksTestBase {
         {
             params.setDb("test_db");
             params.setType(TTableType.VIEW);
-            TListTableStatusResult result = ViewsSystemTable.query(params, connectContext);
+            TListTableStatusResult result = ViewsSystemTable.query(params);
             Assertions.assertEquals(1, result.getTables().size());
             TTableStatus tableStatus = result.getTables().get(0);
             Assertions.assertEquals("test_view1", tableStatus.getName());
@@ -931,7 +931,7 @@ public class InformationSchemaDataSourceTest extends StarRocksTestBase {
         {
             params.setDb("test_db1");
             params.setType(TTableType.VIEW);
-            TListTableStatusResult result = ViewsSystemTable.query(params, connectContext);
+            TListTableStatusResult result = ViewsSystemTable.query(params);
             Assertions.assertEquals(0, result.getTables().size(),
                     "Should return empty result for non-existing db");
         }
@@ -1005,7 +1005,7 @@ public class InformationSchemaDataSourceTest extends StarRocksTestBase {
         params.setCurrent_user_ident(UserIdentityUtils.toThrift(connectContext.getCurrentUserIdentity()));
         params.setDb("test_views_lock_db");
         params.setType(TTableType.VIEW);
-        TListTableStatusResult result = ViewsSystemTable.query(params, connectContext);
+        TListTableStatusResult result = ViewsSystemTable.query(params);
         Assertions.assertEquals(1, result.getTables().size());
         Assertions.assertEquals("lock_view1", result.getTables().get(0).getName());
 
@@ -1013,18 +1013,18 @@ public class InformationSchemaDataSourceTest extends StarRocksTestBase {
         // cannot make the emitted row disagree with the filter that selected it. Guard that the
         // reordering did not change what the filters actually accept.
         params.setPattern("lock_view%");
-        result = ViewsSystemTable.query(params, connectContext);
+        result = ViewsSystemTable.query(params);
         Assertions.assertEquals(1, result.getTables().size());
         Assertions.assertEquals("lock_view1", result.getTables().get(0).getName());
 
         params.setPattern("no_such_view%");
-        Assertions.assertEquals(0, ViewsSystemTable.query(params, connectContext).getTables().size());
+        Assertions.assertEquals(0, ViewsSystemTable.query(params).getTables().size());
 
         params.unsetPattern();
         params.setTable_name("lock_view1");
-        Assertions.assertEquals(1, ViewsSystemTable.query(params, connectContext).getTables().size());
+        Assertions.assertEquals(1, ViewsSystemTable.query(params).getTables().size());
         params.setTable_name("lock_view_missing");
-        Assertions.assertEquals(0, ViewsSystemTable.query(params, connectContext).getTables().size());
+        Assertions.assertEquals(0, ViewsSystemTable.query(params).getTables().size());
     }
 
     @Test

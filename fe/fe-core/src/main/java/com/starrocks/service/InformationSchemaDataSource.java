@@ -230,7 +230,9 @@ public class InformationSchemaDataSource {
             ConnectContext context = new ConnectContext();
             context.setCurrentUserIdentity(authContext.getCurrentUserIdentity());
             context.setCurrentRoleIds(authContext.getCurrentRoleIds());
-            context.setGroups(new HashSet<>(authContext.getGroups()));
+            if (authContext.getGroups() != null) {
+                context.setGroups(new HashSet<>(authContext.getGroups()));
+            }
             return context;
         }
     }

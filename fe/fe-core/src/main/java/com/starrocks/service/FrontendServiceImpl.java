@@ -580,29 +580,28 @@ public class FrontendServiceImpl implements FrontendService.Iface {
 
     @Override
     public TListTableStatusResult listTableStatus(TGetTablesParams params) throws TException {
-        ConnectContext context = new ConnectContext();
-        return ViewsSystemTable.query(params, context);
+        return ViewsSystemTable.query(params);
     }
 
     @Override
     public TListMaterializedViewStatusResult listMaterializedViewStatus(TGetTablesParams params) throws TException {
         LOG.debug("get list table request: {}", params);
-        ConnectContext context = new ConnectContext();
         // When this is served for a BE schema scan (the non-FE-evaluated information_schema.materialized_views
         // path, e.g. a LIKE predicate), the BE forwards the outer query's query_timeout. Install the context
         // as thread-local and stamp its start time so SimpleExecutor.outerRemainingQueryTimeoutS() bounds the
         // internal task_run_history read by query_timeout instead of statistic_collect_query_timeout.
         if (params.isSetQuery_timeout() && params.getQuery_timeout() > 0) {
+            ConnectContext context = new ConnectContext();
             context.getSessionVariable().setQueryTimeoutS((int) params.getQuery_timeout());
             context.setStartTime();
             context.setThreadLocalInfo();
             try {
-                return MaterializedViewsSystemTable.query(params, context);
+                return MaterializedViewsSystemTable.query(params);
             } finally {
                 ConnectContext.remove();
             }
         }
-        return MaterializedViewsSystemTable.query(params, context);
+        return MaterializedViewsSystemTable.query(params);
     }
 
     @Override

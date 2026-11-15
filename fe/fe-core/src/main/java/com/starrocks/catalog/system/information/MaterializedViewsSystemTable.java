@@ -170,7 +170,7 @@ public class MaterializedViewsSystemTable extends SystemTable {
         }
 
         try {
-            TListMaterializedViewStatusResult result = query(params, context);
+            TListMaterializedViewStatusResult result = query(params);
             return result.getMaterialized_views().stream().map(this::infoToScalar).collect(Collectors.toList());
         } catch (Exception e) {
             // Propagate query_timeout (see ShowMaterializedViewStatus.listMaterializedViewStatus): when the
@@ -223,8 +223,7 @@ public class MaterializedViewsSystemTable extends SystemTable {
         return result;
     }
 
-    public static TListMaterializedViewStatusResult query(TGetTablesParams params,
-                                                          ConnectContext context) throws TException {
+    public static TListMaterializedViewStatusResult query(TGetTablesParams params) throws TException {
         LOG.debug("get list table request: {}", params);
         PatternMatcher matcher = null;
         boolean caseSensitive = CaseSensibility.TABLE.getCaseSensibility();
@@ -234,6 +233,9 @@ public class MaterializedViewsSystemTable extends SystemTable {
 
         // database privs should be checked in analysis phrase
         long limit = params.isSetLimit() ? params.getLimit() : -1;
+        // The FE evaluation of materialized_views calls this on the thread of the query. The checks here must
+        // not change the roles or the groups of that session, so they run on a context of their own.
+        ConnectContext context = new ConnectContext();
         if (params.isSetCurrent_user_ident()) {
             UserIdentityUtils.setAuthInfoFromThrift(context, params.getCurrent_user_ident());
         } else {

@@ -150,7 +150,7 @@ public class ViewsSystemTable extends SystemTable {
         }
 
         try {
-            return queryImpl(params, context)
+            return queryImpl(params)
                     .stream()
                     .map(t -> infoToScalar(this, t))
                     .collect(Collectors.toList());
@@ -221,16 +221,14 @@ public class ViewsSystemTable extends SystemTable {
         return result;
     }
 
-    public static TListTableStatusResult query(TGetTablesParams params,
-                                               ConnectContext context) throws TException {
+    public static TListTableStatusResult query(TGetTablesParams params) throws TException {
         TListTableStatusResult result = new TListTableStatusResult();
-        List<GetViewResult> views = queryImpl(params, context);
+        List<GetViewResult> views = queryImpl(params);
         result.setTables(views.stream().map(GetViewResult::status).collect(Collectors.toList()));
         return result;
     }
 
-    private static List<GetViewResult> queryImpl(TGetTablesParams params,
-                                                 ConnectContext context) throws TException {
+    private static List<GetViewResult> queryImpl(TGetTablesParams params) throws TException {
         LOG.debug("get list table request: {}", params);
         PatternMatcher matcher = null;
         boolean caseSensitive = CaseSensibility.TABLE.getCaseSensibility();
@@ -241,6 +239,9 @@ public class ViewsSystemTable extends SystemTable {
                 throw new TException("Pattern is in bad format " + params.getPattern());
             }
         }
+        // The FE evaluation of views calls this on the thread of the query. The checks here must not change
+        // the roles or the groups of that session, so they run on a context of their own.
+        ConnectContext context = new ConnectContext();
         if (params.isSetCurrent_user_ident()) {
             UserIdentityUtils.setAuthInfoFromThrift(context, params.getCurrent_user_ident());
         } else {

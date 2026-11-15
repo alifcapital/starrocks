@@ -20,7 +20,9 @@ import com.starrocks.authorization.PrivilegeType;
 import com.starrocks.catalog.InternalCatalog;
 import com.starrocks.catalog.UserIdentity;
 import com.starrocks.catalog.system.SystemTable;
+import com.starrocks.catalog.system.information.MaterializedViewsSystemTable;
 import com.starrocks.catalog.system.information.TaskRunsSystemTable;
+import com.starrocks.catalog.system.information.ViewsSystemTable;
 import com.starrocks.planner.PlanNodeId;
 import com.starrocks.planner.SchemaScanNode;
 import com.starrocks.planner.TupleDescriptor;
@@ -32,6 +34,8 @@ import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.WarehouseManager;
 import com.starrocks.service.InformationSchemaDataSource;
 import com.starrocks.sql.analyzer.Authorizer;
+import com.starrocks.sql.optimizer.operator.scalar.ConstantOperator;
+import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
 import com.starrocks.thrift.TAuthInfo;
 import com.starrocks.thrift.TGetTablesInfoRequest;
 import com.starrocks.thrift.TGetTasksParams;
@@ -70,6 +74,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 public class UserIdentityUtilsTest {
     private static final String DB = "user_ident_utils_db";
     private static final String GROUP = "uiu_group";
+    private static final String EVAL_DB = "user_ident_utils_eval_db";
 
     private static long openRoleId;
     private static long secretRoleId;
@@ -92,6 +97,22 @@ public class UserIdentityUtilsTest {
         starRocksAssert.ddl("CREATE USER uiu_native");
         starRocksAssert.ddl("GRANT uiu_open_role TO USER uiu_native");
         starRocksAssert.ddl("GRANT uiu_secret_role TO EXTERNAL GROUP " + GROUP);
+
+        // Views and materialized views the user may see only through the group, and ones it may not see.
+        starRocksAssert.withDatabase(EVAL_DB).useDatabase(EVAL_DB)
+                .withTable("CREATE TABLE t_group (k INT) DUPLICATE KEY(k) "
+                        + "DISTRIBUTED BY HASH(k) BUCKETS 1 PROPERTIES ('replication_num' = '1')")
+                .withTable("CREATE TABLE t_hidden (k INT) DUPLICATE KEY(k) "
+                        + "DISTRIBUTED BY HASH(k) BUCKETS 1 PROPERTIES ('replication_num' = '1')")
+                .withView("CREATE VIEW v_group AS SELECT * FROM t_group")
+                .withView("CREATE VIEW v_hidden AS SELECT * FROM t_hidden")
+                .withMaterializedView("CREATE MATERIALIZED VIEW mv_group REFRESH MANUAL AS SELECT * FROM t_group")
+                .withMaterializedView("CREATE MATERIALIZED VIEW mv_hidden REFRESH MANUAL AS SELECT * FROM t_hidden");
+        starRocksAssert.ddl("CREATE ROLE uiu_group_role");
+        starRocksAssert.ddl("GRANT SELECT ON TABLE " + EVAL_DB + ".t_group TO ROLE uiu_group_role");
+        starRocksAssert.ddl("GRANT SELECT ON VIEW " + EVAL_DB + ".v_group TO ROLE uiu_group_role");
+        starRocksAssert.ddl("GRANT SELECT ON MATERIALIZED VIEW " + EVAL_DB + ".mv_group TO ROLE uiu_group_role");
+        starRocksAssert.ddl("GRANT uiu_group_role TO EXTERNAL GROUP " + GROUP);
         openRoleId = GlobalStateMgr.getCurrentState().getAuthorizationMgr().getRoleIdByNameAllowNull("uiu_open_role");
         secretRoleId =
                 GlobalStateMgr.getCurrentState().getAuthorizationMgr().getRoleIdByNameAllowNull("uiu_secret_role");
@@ -169,6 +190,26 @@ public class UserIdentityUtilsTest {
         } finally {
             Authorizer.getInstance().setAccessControl(InternalCatalog.DEFAULT_INTERNAL_CATALOG_NAME, original);
         }
+    }
+
+    // A session as login builds it: the roles of the user and the roles of its groups.
+    private static ConnectContext loggedInSession(UserIdentity user, Set<String> groups) {
+        ConnectContext context = new ConnectContext();
+        context.setCurrentUserIdentity(user);
+        context.setGroups(new HashSet<>(groups));
+        context.setCurrentRoleIds(user, groups);
+        return context;
+    }
+
+    private static Set<String> tableNames(SystemTable table, List<List<ScalarOperator>> rows) {
+        int nameIndex = -1;
+        for (int i = 0; i < table.getBaseSchema().size(); i++) {
+            if (table.getBaseSchema().get(i).getName().equalsIgnoreCase("TABLE_NAME")) {
+                nameIndex = i;
+            }
+        }
+        final int index = nameIndex;
+        return rows.stream().map(row -> ((ConstantOperator) row.get(index)).getVarchar()).collect(Collectors.toSet());
     }
 
     private static void mockOneTaskRun() {
@@ -349,5 +390,43 @@ public class UserIdentityUtilsTest {
         assertEquals("uiu_native", userIdent.getUsername());
         assertEquals(List.of(openRoleId), userIdent.getCurrent_role_ids().getRole_id_list());
         assertEquals(List.of(GROUP), userIdent.getGroups());
+    }
+
+    @Test
+    public void testViewsEvaluationKeepsSession() throws Exception {
+        // information_schema.views evaluated in the FE: the checks run for the session, and the session
+        // keeps the roles it got through its groups.
+        UserIdentity user = new UserIdentity("uiu_native", "%");
+        ConnectContext session = loggedInSession(user, Set.of(GROUP));
+        long groupRoleId =
+                GlobalStateMgr.getCurrentState().getAuthorizationMgr().getRoleIdByNameAllowNull("uiu_group_role");
+        Set<Long> rolesBefore = new HashSet<>(session.getCurrentRoleIds());
+        assertTrue(rolesBefore.contains(groupRoleId));
+
+        SystemTable views = ViewsSystemTable.create(InternalCatalog.DEFAULT_INTERNAL_CATALOG_NAME);
+        Set<String> names = inSession(session, () -> tableNames(views, views.evaluate(null)));
+
+        assertTrue(names.contains("v_group"));
+        assertFalse(names.contains("v_hidden"));
+        assertEquals(rolesBefore, session.getCurrentRoleIds());
+        assertEquals(Set.of(GROUP), session.getGroups());
+        assertEquals(user, session.getCurrentUserIdentity());
+    }
+
+    @Test
+    public void testMaterializedViewsEvaluationKeepsSession() throws Exception {
+        // information_schema.materialized_views evaluated in the FE, as for views.
+        UserIdentity user = new UserIdentity("uiu_native", "%");
+        ConnectContext session = loggedInSession(user, Set.of(GROUP));
+        Set<Long> rolesBefore = new HashSet<>(session.getCurrentRoleIds());
+
+        SystemTable mvs = MaterializedViewsSystemTable.create();
+        Set<String> names = inSession(session, () -> tableNames(mvs, mvs.evaluate(null)));
+
+        assertTrue(names.contains("mv_group"));
+        assertFalse(names.contains("mv_hidden"));
+        assertEquals(rolesBefore, session.getCurrentRoleIds());
+        assertEquals(Set.of(GROUP), session.getGroups());
+        assertEquals(user, session.getCurrentUserIdentity());
     }
 }
