@@ -211,6 +211,7 @@ public class IcebergMetadataRefreshFooterPrefetcherTest {
                         Assertions.assertEquals("iceberg", ctx.getCurrentCatalog());
                         Assertions.assertEquals("footer_test_wh", ctx.getCurrentWarehouseName());
                         Assertions.assertTrue(sv.isCacheSelectFooterOnly());
+                        Assertions.assertFalse(sv.isEnableInsertSelectExternalAutoRefresh());
                         Assertions.assertNotSame(caller.getSessionVariable(), sv);
                         calls.incrementAndGet();
                         return null;
@@ -223,6 +224,7 @@ public class IcebergMetadataRefreshFooterPrefetcherTest {
             queue.removeFirst().run();
             Assertions.assertEquals(1, calls.get());
             Assertions.assertFalse(caller.getSessionVariable().isCacheSelectFooterOnly());
+            Assertions.assertTrue(caller.getSessionVariable().isEnableInsertSelectExternalAutoRefresh());
             Assertions.assertTrue(queue.isEmpty());
         }
     }

@@ -211,6 +211,10 @@ public class IcebergMetadataRefreshFooterPrefetcher {
         // keeps only the files added after it. Like cache_select_footer_only, this variable is set only
         // here and read only by FE planning.
         clonedSv.setCacheSelectFooterBaseSnapshotId(baseSnapshotId);
+        // The CACHE SELECT runs as an INSERT into the black hole table, and an INSERT reloads the tables it reads.
+        // The refresh that started this warmup has just put the new table into the cache, so we read that table
+        // and do not load it again.
+        clonedSv.setEnableInsertSelectExternalAutoRefresh(false);
         // Stamp the warehouse name onto the cloned session var directly. We must NOT call
         // ctx.setCurrentWarehouse(): that helper replaces sessionVariable with a fresh default,
         // discarding cacheSelectFooterOnly and every caller setting we just cloned.
