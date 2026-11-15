@@ -19,6 +19,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -238,8 +239,17 @@ public class TransactionGraph {
         return result;
     }
 
+    // The publish daemon asks every database for these transactions every few milliseconds, and most
+    // databases have none, so we answer an empty graph without allocating and fill the list without a stream.
     public List<Long> getTxnsWithoutDependency() {
-        return nodesWithoutIns.stream().map(n -> n.txnId).collect(Collectors.toList());
+        if (nodesWithoutIns.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<Long> result = new ArrayList<>(nodesWithoutIns.size());
+        for (Node n : nodesWithoutIns) {
+            result.add(n.txnId);
+        }
+        return result;
     }
 
     // The size of ins of node with txnId must be zero
