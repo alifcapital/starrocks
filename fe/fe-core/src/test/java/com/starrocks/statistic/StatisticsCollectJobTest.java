@@ -29,8 +29,10 @@ import com.starrocks.common.jmockit.Deencapsulation;
 import com.starrocks.connector.PartitionInfo;
 import com.starrocks.connector.partitiontraits.DefaultTraits;
 import com.starrocks.connector.statistics.ConnectorTableColumnStats;
+import com.starrocks.persist.gson.GsonUtils;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.server.MetadataMgr;
 import com.starrocks.sql.optimizer.statistics.CachedStatisticStorage;
 import com.starrocks.sql.optimizer.statistics.ColumnStatistic;
 import com.starrocks.sql.plan.ConnectorPlanTestBase;
@@ -59,8 +61,10 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -364,6 +368,208 @@ public class StatisticsCollectJobTest extends PlanTestNoneDBBase {
             Config.statistic_auto_analyze_start_time = oldStart;
             Config.statistic_auto_analyze_end_time = oldEnd;
         }
+    }
+
+    @Test
+    public void testStaggeredExternalJobLoadsOnlyTablesThatMayBeDue() {
+        String oldStart = Config.statistic_auto_analyze_start_time;
+        String oldEnd = Config.statistic_auto_analyze_end_time;
+        List<String> names = GlobalStateMgr.getCurrentState().getMetadataMgr()
+                .listTableNames(connectContext, "hive0", "partitioned_db");
+        Map<String, String> uuids = new HashMap<>();
+        for (String name : names) {
+            Table table = GlobalStateMgr.getCurrentState().getMetadataMgr()
+                    .getTable(connectContext, "hive0", "partitioned_db", name);
+            if (table != null) {
+                uuids.put(name, table.getUUID());
+            }
+        }
+        Assertions.assertTrue(uuids.size() > 2);
+        Set<String> all = names.stream().map(name -> "partitioned_db." + name).collect(Collectors.toSet());
+        // A listed name without a table is loaded on every pass, as nothing is known about it.
+        Set<String> missing = names.stream().filter(name -> !uuids.containsKey(name))
+                .map(name -> "partitioned_db." + name).collect(Collectors.toSet());
+        String newTable = uuids.keySet().stream().sorted().findFirst().orElseThrow();
+
+        LocalDateTime[] now = {LocalDateTime.of(2026, 9, 25, 12, 0)};
+        new MockUp<AutoStatisticsSchedule>() {
+            @Mock
+            public LocalDateTime now() {
+                return now[0];
+            }
+        };
+        Map<AnalyzeMgr.StatsMetaKey, ExternalBasicStatsMeta> metas = new HashMap<>();
+        for (String name : names) {
+            metas.put(new AnalyzeMgr.StatsMetaKey("hive0", "partitioned_db", name),
+                    new ExternalBasicStatsMeta("hive0", "partitioned_db", name, null,
+                            StatsConstants.AnalyzeType.FULL, LocalDateTime.now(), Maps.newHashMap()));
+        }
+        ExternalAnalyzeJob[] job = {null};
+        new MockUp<AnalyzeMgr>() {
+            @Mock
+            public void updateAnalyzeJobWithLog(AnalyzeJob analyzeJob) {
+            }
+
+            @Mock
+            public Map<AnalyzeMgr.StatsMetaKey, ExternalBasicStatsMeta> getExternalBasicStatsMetaMap() {
+                return metas;
+            }
+
+            @Mock
+            public List<ExternalAnalyzeJob> getAllExternalAnalyzeJobList() {
+                return List.of(job[0]);
+            }
+        };
+        List<String> loads = new ArrayList<>();
+        Set<String> notFound = new HashSet<>();
+        Set<String> hidden = new HashSet<>();
+        new MockUp<MetadataMgr>() {
+            @Mock
+            public List<String> listTableNames(Invocation invocation, ConnectContext context, String catalogName,
+                                               String dbName) {
+                List<String> listed = invocation.proceed(context, catalogName, dbName);
+                return listed.stream().filter(name -> !hidden.contains(name)).toList();
+            }
+
+            @Mock
+            public Table getTable(Invocation invocation, ConnectContext context, String catalogName, String dbName,
+                                  String tblName) {
+                loads.add(dbName + "." + tblName);
+                Table table = invocation.proceed(context, catalogName, dbName, tblName);
+                if (table == null) {
+                    notFound.add(dbName + "." + tblName);
+                }
+                return table;
+            }
+        };
+        try {
+            Config.enable_statistic_auto_collect_staggered_schedule = true;
+            Config.statistic_auto_analyze_start_time = "01:00:00";
+            Config.statistic_auto_analyze_end_time = "05:00:00";
+            Map<String, String> properties = new HashMap<>();
+            properties.put(StatsConstants.STATISTIC_AUTO_COLLECT_INTERVAL, "604800");
+            job[0] = new ExternalAnalyzeJob("hive0", "partitioned_db", null, null, null,
+                    StatsConstants.AnalyzeType.FULL, StatsConstants.ScheduleType.SCHEDULE, properties,
+                    StatsConstants.ScheduleStatus.PENDING, LocalDateTime.MIN);
+            job[0].setId(301);
+
+            // The first pass of a new schedule loads every table; a table listed later is loaded when it appears.
+            hidden.add(newTable);
+            Set<String> expected = new HashSet<>(all);
+            expected.remove("partitioned_db." + newTable);
+            Assertions.assertEquals(expected, loadedOnPass(job[0], loads));
+            hidden.clear();
+            Assertions.assertEquals(union(missing, "partitioned_db." + newTable), loadedOnPass(job[0], loads));
+            // Tables whose slot is ahead are not loaded.
+            Assertions.assertEquals(missing, loadedOnPass(job[0], loads));
+
+            // A table without statistics needs its initial collection, so it is loaded.
+            String initial = uuids.keySet().stream().sorted().skip(1).findFirst().orElseThrow();
+            AnalyzeMgr.StatsMetaKey initialKey = new AnalyzeMgr.StatsMetaKey("hive0", "partitioned_db", initial);
+            ExternalBasicStatsMeta initialMeta = metas.remove(initialKey);
+            Assertions.assertEquals(union(missing, "partitioned_db." + initial), loadedOnPass(job[0], loads));
+            metas.put(initialKey, initialMeta);
+            Assertions.assertEquals(missing, loadedOnPass(job[0], loads));
+
+            // A changed explicit interval reschedules every table.
+            properties.put(StatsConstants.STATISTIC_AUTO_COLLECT_INTERVAL, "86400");
+            Assertions.assertEquals(all, loadedOnPass(job[0], loads));
+            Assertions.assertEquals(missing, loadedOnPass(job[0], loads));
+            properties.put(StatsConstants.STATISTIC_AUTO_COLLECT_INTERVAL, "604800");
+            Assertions.assertEquals(all, loadedOnPass(job[0], loads));
+            Assertions.assertEquals(missing, loadedOnPass(job[0], loads));
+
+            // A changed window reschedules every table.
+            Config.statistic_auto_analyze_start_time = "00:30:00";
+            Assertions.assertEquals(all, loadedOnPass(job[0], loads));
+            Assertions.assertEquals(missing, loadedOnPass(job[0], loads));
+            Config.statistic_auto_analyze_start_time = "01:00:00";
+            Assertions.assertEquals(all, loadedOnPass(job[0], loads));
+            Assertions.assertEquals(missing, loadedOnPass(job[0], loads));
+
+            // The collector forgets loaded tables on a pass with changed settings, so that pass loads every table.
+            new StatisticAutoCollector().forgetLoadedExternalTables();
+            Assertions.assertEquals(all, loadedOnPass(job[0], loads));
+            Assertions.assertEquals(missing, loadedOnPass(job[0], loads));
+
+            // A replayed job has a new schedule object: its first pass loads every table and keeps the slots.
+            Map<String, LocalDateTime> slots = new HashMap<>();
+            uuids.forEach((name, uuid) -> slots.put(name, job[0].getCollectSchedule().getNext(
+                    "301:partitioned_db:" + uuid)));
+            job[0] = (ExternalAnalyzeJob) GsonUtils.GSON.fromJson(
+                    GsonUtils.GSON.toJson(job[0], AnalyzeJob.class), AnalyzeJob.class);
+            Assertions.assertEquals(all, loadedOnPass(job[0], loads));
+            Assertions.assertEquals(missing, loadedOnPass(job[0], loads));
+            uuids.forEach((name, uuid) -> Assertions.assertEquals(slots.get(name),
+                    job[0].getCollectSchedule().getNext("301:partitioned_db:" + uuid)));
+
+            // When the earliest slot comes, only the tables due by then are loaded, and they are collected.
+            now[0] = slots.values().stream().min(Comparator.naturalOrder()).orElseThrow();
+            Set<String> due = new HashSet<>(missing);
+            slots.forEach((name, slot) -> {
+                if (!slot.isAfter(now[0])) {
+                    due.add("partitioned_db." + name);
+                }
+            });
+            loads.clear();
+            List<StatisticsCollectJob> collected = job[0].instantiateJobs();
+            Assertions.assertEquals(due, new HashSet<>(loads));
+            Assertions.assertFalse(collected.isEmpty());
+            for (StatisticsCollectJob statsJob : collected) {
+                Assertions.assertTrue(due.contains("partitioned_db." + statsJob.getTable().getName()));
+            }
+
+            // Without the staggered schedule every pass loads every table.
+            now[0] = LocalDateTime.of(2026, 9, 25, 12, 0);
+            Config.enable_statistic_auto_collect_staggered_schedule = false;
+            Assertions.assertEquals(all, loadedOnPass(job[0], loads));
+            Assertions.assertEquals(all, loadedOnPass(job[0], loads));
+            Config.enable_statistic_auto_collect_staggered_schedule = true;
+            Assertions.assertEquals(all, loadedOnPass(job[0], loads));
+            Assertions.assertEquals(missing, loadedOnPass(job[0], loads));
+
+            // A job on one table skips loading it the same way.
+            ExternalAnalyzeJob tableJob = new ExternalAnalyzeJob("hive0", "partitioned_db", newTable, null, null,
+                    StatsConstants.AnalyzeType.FULL, StatsConstants.ScheduleType.SCHEDULE, properties,
+                    StatsConstants.ScheduleStatus.PENDING, LocalDateTime.MIN);
+            tableJob.setId(302);
+            Assertions.assertEquals(Set.of("partitioned_db." + newTable), loadedOnPass(tableJob, loads));
+            Assertions.assertEquals(Set.of(), loadedOnPass(tableJob, loads));
+
+            // A job on all databases skips loading every known table with statistics.
+            for (String dbName : GlobalStateMgr.getCurrentState().getMetadataMgr().listDbNames(connectContext, "hive0")) {
+                for (String name : GlobalStateMgr.getCurrentState().getMetadataMgr()
+                        .listTableNames(connectContext, "hive0", dbName)) {
+                    metas.putIfAbsent(new AnalyzeMgr.StatsMetaKey("hive0", dbName, name),
+                            new ExternalBasicStatsMeta("hive0", dbName, name, null,
+                                    StatsConstants.AnalyzeType.FULL, LocalDateTime.now(), Maps.newHashMap()));
+                }
+            }
+            ExternalAnalyzeJob catalogJob = new ExternalAnalyzeJob("hive0", null, null, null, null,
+                    StatsConstants.AnalyzeType.FULL, StatsConstants.ScheduleType.SCHEDULE, properties,
+                    StatsConstants.ScheduleStatus.PENDING, LocalDateTime.MIN);
+            catalogJob.setId(303);
+            notFound.clear();
+            Set<String> catalogTables = loadedOnPass(catalogJob, loads);
+            Assertions.assertTrue(catalogTables.containsAll(all));
+            Set<String> catalogMissing = new HashSet<>(notFound);
+            Assertions.assertEquals(catalogMissing, loadedOnPass(catalogJob, loads));
+        } finally {
+            Config.statistic_auto_analyze_start_time = oldStart;
+            Config.statistic_auto_analyze_end_time = oldEnd;
+        }
+    }
+
+    private static Set<String> loadedOnPass(ExternalAnalyzeJob job, List<String> loads) {
+        loads.clear();
+        job.instantiateJobs();
+        return new HashSet<>(loads);
+    }
+
+    private static Set<String> union(Set<String> names, String name) {
+        Set<String> result = new HashSet<>(names);
+        result.add(name);
+        return result;
     }
 
     @Test

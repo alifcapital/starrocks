@@ -50,6 +50,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Consumer;
+import java.util.function.LongPredicate;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -187,13 +188,16 @@ public class StatisticsCollectJobFactory {
                 List<String> tableNames = GlobalStateMgr.getCurrentState().getMetadataMgr().
                         listTableNames(context, externalAnalyzeJob.getCatalogName(), dbName);
                 for (String tableName : tableNames) {
+                    if (waitingWithoutLoading(externalAnalyzeJob, dbName, tableName)) {
+                        continue;
+                    }
                     Table table = GlobalStateMgr.getCurrentState().getMetadataMgr().
                             getTable(context, externalAnalyzeJob.getCatalogName(), dbName, tableName);
                     if (null == table) {
                         continue;
                     }
 
-                    createExternalAnalyzeJob(statsJobs, externalAnalyzeJob, db, table, null);
+                    createExternalAnalyzeJob(statsJobs, externalAnalyzeJob, db, dbName, tableName, table, null);
                 }
             }
         } else if (externalAnalyzeJob.isAnalyzeAllTable()) {
@@ -206,13 +210,17 @@ public class StatisticsCollectJobFactory {
             List<String> tableNames = GlobalStateMgr.getCurrentState().getMetadataMgr().
                     listTableNames(context, externalAnalyzeJob.getCatalogName(), externalAnalyzeJob.getDbName());
             for (String tableName : tableNames) {
+                if (waitingWithoutLoading(externalAnalyzeJob, externalAnalyzeJob.getDbName(), tableName)) {
+                    continue;
+                }
                 Table table = GlobalStateMgr.getCurrentState().getMetadataMgr().
                         getTable(context, externalAnalyzeJob.getCatalogName(), externalAnalyzeJob.getDbName(), tableName);
                 if (null == table) {
                     continue;
                 }
 
-                createExternalAnalyzeJob(statsJobs, externalAnalyzeJob, db, table, null);
+                createExternalAnalyzeJob(statsJobs, externalAnalyzeJob, db, externalAnalyzeJob.getDbName(), tableName,
+                        table, null);
             }
         } else {
             Database db = GlobalStateMgr.getCurrentState().getMetadataMgr().
@@ -221,14 +229,18 @@ public class StatisticsCollectJobFactory {
                 return Collections.emptyList();
             }
 
-            Table table = GlobalStateMgr.getCurrentState().getMetadataMgr().
-                    getTable(context, externalAnalyzeJob.getCatalogName(), externalAnalyzeJob.getDbName(),
-                            externalAnalyzeJob.getTableName());
-            if (null == table) {
-                return Collections.emptyList();
-            }
+            if (!waitingWithoutLoading(externalAnalyzeJob, externalAnalyzeJob.getDbName(),
+                    externalAnalyzeJob.getTableName())) {
+                Table table = GlobalStateMgr.getCurrentState().getMetadataMgr().
+                        getTable(context, externalAnalyzeJob.getCatalogName(), externalAnalyzeJob.getDbName(),
+                                externalAnalyzeJob.getTableName());
+                if (null == table) {
+                    return Collections.emptyList();
+                }
 
-            createExternalAnalyzeJob(statsJobs, externalAnalyzeJob, db, table, externalAnalyzeJob.getColumns());
+                createExternalAnalyzeJob(statsJobs, externalAnalyzeJob, db, externalAnalyzeJob.getDbName(),
+                        externalAnalyzeJob.getTableName(), table, externalAnalyzeJob.getColumns());
+            }
         }
 
         statsJobs.sort(new StatisticsCollectJob.ComparatorWithPriority());
@@ -337,12 +349,18 @@ public class StatisticsCollectJobFactory {
     }
 
     private static void createExternalAnalyzeJob(List<StatisticsCollectJob> allTableJobMap, ExternalAnalyzeJob job,
-                                                 Database db, Table table, List<String> columnNames) {
+                                                 Database db, String listedDb, String listedTable, Table table,
+                                                 List<String> columnNames) {
         if (table == null) {
             return;
         }
         List<String> columns = CollectionUtils.isEmpty(columnNames) ? StatisticUtils.getCollectibleColumns(table) : columnNames;
         long interval = staggered(job) ? externalInterval(table, job.getProperties(), columns) : 0;
+        if (staggered(job) && interval > 0) {
+            // withSchedule calls due() for this table, so the next pass can check this table by its names.
+            job.getCollectSchedule().rememberLoaded(listedDb, listedTable, new AutoStatisticsSchedule.LoadedTable(
+                    scheduleKey(job, db, table), db.getFullName(), table.getName()));
+        }
         withSchedule(allTableJobMap, job, db, table, interval,
                 scheduled -> createExternalAnalyzeJobImpl(allTableJobMap, job, db, table, columnNames, scheduled));
     }
@@ -715,7 +733,7 @@ public class StatisticsCollectJobFactory {
             build.accept(false);
             return;
         }
-        String key = job.getId() + ":" + db.getFullName() + ":" + table.getUUID();
+        String key = scheduleKey(job, db, table);
         AutoStatisticsSchedule.Attempt attempt = job.getCollectSchedule().due(key, interval,
                 AutoStatisticsSchedule.now(), AutoStatisticsSchedule.Window.current(),
                 needsInitialCollection(job, db, table));
@@ -733,6 +751,52 @@ public class StatisticsCollectJobFactory {
                 jobs.get(i).setCollectScheduleAttempt(attempt);
             }
         }
+    }
+
+    private static String scheduleKey(AnalyzeJob job, Database db, Table table) {
+        return job.getId() + ":" + db.getFullName() + ":" + table.getUUID();
+    }
+
+    /**
+     * Loading an external table can read remote metadata, and on most passes the table is not due. We skip the
+     * load only when the table, as the last load saw it, would get no attempt from due() and its entry would stay
+     * as it is. In any other case, or on any error, we load the table and decide as usual.
+     */
+    private static boolean waitingWithoutLoading(ExternalAnalyzeJob job, String listedDb, String listedTable) {
+        if (!staggered(job)) {
+            return false;
+        }
+        try {
+            AutoStatisticsSchedule schedule = job.getCollectSchedule();
+            AutoStatisticsSchedule.LoadedTable loaded = schedule.getLoaded(listedDb, listedTable);
+            if (loaded == null) {
+                return false;
+            }
+            // Same check as needsInitialCollection(), with the names the loaded table reported.
+            if (!GlobalStateMgr.getCurrentState().getAnalyzeMgr().getExternalBasicStatsMetaMap().containsKey(
+                    new AnalyzeMgr.StatsMetaKey(job.getCatalogName(), loaded.db(), loaded.table()))) {
+                return false;
+            }
+            return schedule.waiting(loaded.key(), externalIntervals(job.getProperties()),
+                    AutoStatisticsSchedule.now(), AutoStatisticsSchedule.Window.current());
+        } catch (RuntimeException e) {
+            LOG.warn("[ExternalStats] cannot check the schedule of {}.{} by name, loading the table", listedDb,
+                    listedTable, e);
+            return false;
+        }
+    }
+
+    // The intervals externalInterval() can return without the table. Without an explicit interval it depends on
+    // the row count, which needs the table, so we accept both configured intervals: a table that crosses
+    // statistic_auto_collect_small_table_rows gets its new interval when its slot comes.
+    private static LongPredicate externalIntervals(Map<String, String> properties) {
+        if (properties.containsKey(STATISTIC_AUTO_COLLECT_INTERVAL)) {
+            long explicit = Long.parseLong(properties.get(STATISTIC_AUTO_COLLECT_INTERVAL));
+            return interval -> interval == explicit;
+        }
+        long small = Config.statistic_auto_collect_small_table_interval;
+        long large = Config.statistic_auto_collect_large_table_interval;
+        return interval -> interval == small || interval == large;
     }
 
     private static boolean needsInitialCollection(AnalyzeJob job, Database db, Table table) {

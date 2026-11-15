@@ -105,6 +105,9 @@ public class StatisticAutoCollector extends FrontendDaemon {
 
         prepareDefaultJob();
 
+        if (initializeSchedule) {
+            forgetLoadedExternalTables();
+        }
         runJobs();
         initializedScheduleSettings = scheduleSettings;
         initializedJobProperties = jobProperties;
@@ -121,6 +124,15 @@ public class StatisticAutoCollector extends FrontendDaemon {
             result.put(job.getId(), Map.copyOf(job.getProperties()));
         }
         return result;
+    }
+
+    // A changed setting can give a table another interval in a way the check by table names does not see, for
+    // example a new statistic_auto_collect_small_table_rows. We want such a pass to load every external table and
+    // let due() reschedule it, so we drop what the schedules know about loaded tables.
+    void forgetLoadedExternalTables() {
+        for (ExternalAnalyzeJob job : GlobalStateMgr.getCurrentState().getAnalyzeMgr().getAllExternalAnalyzeJobList()) {
+            job.getCollectSchedule().forgetLoaded();
+        }
     }
 
     @VisibleForTesting

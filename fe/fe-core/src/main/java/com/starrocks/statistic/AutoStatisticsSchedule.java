@@ -25,10 +25,13 @@ import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.function.LongPredicate;
 
 /** Per-table calendar slots, persisted with the owning analyze job. */
 public class AutoStatisticsSchedule {
@@ -40,6 +43,17 @@ public class AutoStatisticsSchedule {
     // Replayed jobs resume future slots, but never execute the entire missed backlog on promotion.
     private transient Set<String> activated = new HashSet<>();
     private transient boolean dirty;
+    // Loading an external table can read remote metadata, and most tables are not due on a given pass.
+    // We want to tell that from the listed names alone, so we keep, for each listed name, what the last
+    // load of that table gave. We do not persist it: after a restart every table is loaded once more.
+    private transient Map<ListedName, LoadedTable> loadedTables = new HashMap<>();
+
+    private record ListedName(String db, String table) {
+    }
+
+    /** The schedule key of a loaded table and the names the loaded table reports. */
+    record LoadedTable(String key, String db, String table) {
+    }
 
     private static class Entry {
         @SerializedName("next")
@@ -62,6 +76,31 @@ public class AutoStatisticsSchedule {
 
     synchronized void deactivate() {
         activated.clear();
+        loadedTables.clear();
+    }
+
+    synchronized void rememberLoaded(String listedDb, String listedTable, LoadedTable table) {
+        loadedTables.put(new ListedName(listedDb, listedTable), table);
+    }
+
+    synchronized LoadedTable getLoaded(String listedDb, String listedTable) {
+        return loadedTables.get(new ListedName(listedDb, listedTable));
+    }
+
+    synchronized void forgetLoaded() {
+        loadedTables.clear();
+    }
+
+    /**
+     * We skip loading a table only when due(key, interval, now, window, false) would return null and leave
+     * the entry as it is, so this checks the same conditions: the key was already visited in this FE, the
+     * entry has the current window and an accepted interval, and its slot is still ahead.
+     */
+    synchronized boolean waiting(String key, LongPredicate acceptsInterval, LocalDateTime now, Window window) {
+        Entry entry = tables.get(key);
+        return entry != null && activated.contains(key) && window.length > 0
+                && window.signature.equals(entry.window) && entry.interval > 0
+                && acceptsInterval.test(entry.interval) && entry.next != null && entry.next.isAfter(now);
     }
 
     synchronized boolean takeDirty() {

@@ -34,10 +34,12 @@ public class StatisticAutoCollectorTest {
         long oldInterval = Config.statistic_auto_collect_large_table_interval;
         long[] jobInterval = {604800};
         int[] passes = {0};
+        int[] forgets = {0};
+        boolean[] inWindow = {false};
         new MockUp<StatisticAutoCollector>() {
             @Mock
             public boolean checkoutAnalyzeTime() {
-                return false;
+                return inWindow[0];
             }
         };
         new MockUp<StatisticUtils>() {
@@ -64,6 +66,11 @@ public class StatisticAutoCollectorTest {
 
             @Override
             public void prepareDefaultJob() {
+            }
+
+            @Override
+            void forgetLoadedExternalTables() {
+                forgets[0]++;
             }
 
             @Override
@@ -97,6 +104,13 @@ public class StatisticAutoCollectorTest {
             Assertions.assertEquals(5, passes[0]);
             collector.runAfterCatalogReady();
             Assertions.assertEquals(5, passes[0]);
+            // Every pass that seeds the schedule loads every external table again.
+            Assertions.assertEquals(5, forgets[0]);
+            // A pass in the window with unchanged settings keeps what the schedules know about loaded tables.
+            inWindow[0] = true;
+            collector.runAfterCatalogReady();
+            Assertions.assertEquals(6, passes[0]);
+            Assertions.assertEquals(5, forgets[0]);
         } finally {
             FeConstants.runningUnitTest = oldUnitTest;
             Config.enable_statistic_collect = oldCollect;

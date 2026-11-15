@@ -25,6 +25,7 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.function.LongPredicate;
 
 public class AutoStatisticsScheduleTest {
     private static final long WEEK = 7 * 86400;
@@ -172,6 +173,50 @@ public class AutoStatisticsScheduleTest {
         LocalDateTime resumed = now.plusWeeks(3);
         Assertions.assertNull(schedule.due("table", WEEK, resumed, evening));
         Assertions.assertTrue(schedule.getNext("table").isAfter(resumed));
+    }
+
+    @Test
+    public void waitingHoldsOnlyWhenDueLeavesTheEntryAsItIs() {
+        LocalDateTime now = LocalDateTime.of(2026, 9, 25, 12, 0);
+        LongPredicate week = interval -> interval == WEEK;
+        AutoStatisticsSchedule schedule = new AutoStatisticsSchedule();
+        // A key that due() has not visited in this FE needs due().
+        Assertions.assertFalse(schedule.waiting("table", week, now, NIGHT));
+        schedule.due("table", WEEK, now, NIGHT);
+        LocalDateTime next = schedule.getNext("table");
+        Assertions.assertTrue(schedule.waiting("table", week, now, NIGHT));
+        Assertions.assertNull(schedule.due("table", WEEK, now, NIGHT));
+        Assertions.assertEquals(next, schedule.getNext("table"));
+
+        // Another interval, another window or a slot that has come need due().
+        Assertions.assertFalse(schedule.waiting("table", interval -> interval == 86400, now, NIGHT));
+        Assertions.assertFalse(schedule.waiting("table", week, now,
+                new AutoStatisticsSchedule.Window(20 * 3600, 3600, "UTC")));
+        Assertions.assertFalse(schedule.waiting("table", week, next, NIGHT));
+        Assertions.assertNotNull(schedule.due("table", WEEK, next, NIGHT));
+
+        // A replayed or deactivated schedule needs due() to visit the key again.
+        AutoStatisticsSchedule replayed = GsonUtils.GSON.fromJson(
+                GsonUtils.GSON.toJson(schedule), AutoStatisticsSchedule.class);
+        Assertions.assertFalse(replayed.waiting("table", week, now, NIGHT));
+        schedule.deactivate();
+        Assertions.assertFalse(schedule.waiting("table", week, now, NIGHT));
+    }
+
+    @Test
+    public void loadedTablesAreKeptByListedNamesAndNotPersisted() {
+        AutoStatisticsSchedule schedule = new AutoStatisticsSchedule();
+        AutoStatisticsSchedule.LoadedTable loaded = new AutoStatisticsSchedule.LoadedTable("7:db:uuid", "db", "Orders");
+        schedule.rememberLoaded("db", "orders", loaded);
+        Assertions.assertEquals(loaded, schedule.getLoaded("db", "orders"));
+        Assertions.assertNull(schedule.getLoaded("db", "Orders"));
+        Assertions.assertNull(GsonUtils.GSON.fromJson(GsonUtils.GSON.toJson(schedule), AutoStatisticsSchedule.class)
+                .getLoaded("db", "orders"));
+        schedule.forgetLoaded();
+        Assertions.assertNull(schedule.getLoaded("db", "orders"));
+        schedule.rememberLoaded("db", "orders", loaded);
+        schedule.deactivate();
+        Assertions.assertNull(schedule.getLoaded("db", "orders"));
     }
 
     @Test
