@@ -19,6 +19,8 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import com.starrocks.connector.PlanMode;
 import com.starrocks.connector.iceberg.StarRocksIcebergTableScanContext;
 import com.starrocks.connector.iceberg.TestTables;
+import org.apache.avro.generic.IndexedRecord;
+import org.apache.iceberg.avro.AvroSchemaUtil;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.types.Types;
@@ -30,7 +32,9 @@ import org.mockito.Mockito;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -74,6 +78,30 @@ public class StarRocksIcebergPartitionsTableTest {
             cells.add(value instanceof StructLike ? encode((StructLike) value) : String.valueOf(value));
         }
         return cells.toString();
+    }
+
+    // Entries built for cached files of one spec must share one Avro schema, and that schema must be the one
+    // GenericManifestEntry(Types.StructType) builds for the spec.
+    private void assertCachedEntriesShareSchemaPerSpec(StarRocksIcebergTableScan scan, Table table) throws Exception {
+        Map<Integer, org.apache.avro.Schema> schemaBySpec = new HashMap<>();
+        Map<Integer, Integer> entriesBySpec = new HashMap<>();
+        for (ManifestFile manifest : table.currentSnapshot().allManifests(table.io())) {
+            try (CloseableIterable<ManifestEntry<?>> entries = scan.partitionEntries(manifest)) {
+                for (ManifestEntry<?> entry : entries) {
+                    int specId = entry.file().specId();
+                    org.apache.avro.Schema schema = ((IndexedRecord) entry).getSchema();
+                    Assertions.assertSame(schemaBySpec.computeIfAbsent(specId, id -> schema), schema);
+                    entriesBySpec.merge(specId, 1, Integer::sum);
+                }
+            }
+        }
+        Assertions.assertFalse(schemaBySpec.isEmpty());
+        Assertions.assertTrue(entriesBySpec.values().stream().anyMatch(count -> count > 1));
+        schemaBySpec.forEach((specId, schema) -> Assertions.assertEquals(
+                AvroSchemaUtil.convert(
+                        ManifestEntry.getSchema(table.specs().get(specId).partitionType()).asStruct(),
+                        "manifest_entry"),
+                schema));
     }
 
     @Test
@@ -125,6 +153,7 @@ public class StarRocksIcebergPartitionsTableTest {
                         .when(io).newInputFile(manifest.path());
             }
             Assertions.assertEquals(expected, rows(scan.newPartitionScan().useSnapshot(currentSnapshot)));
+            assertCachedEntriesShareSchemaPerSpec(scan, table);
             try (CloseableIterable<FileScanTask> tasks = scan.useSnapshot(currentSnapshot).planFiles()) {
                 long records = 0;
                 for (FileScanTask task : tasks) {

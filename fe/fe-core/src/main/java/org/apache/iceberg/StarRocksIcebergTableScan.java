@@ -34,6 +34,7 @@ import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.system.ComputeNode;
 import com.starrocks.thrift.TResultSinkType;
+import org.apache.iceberg.avro.AvroSchemaUtil;
 import org.apache.iceberg.exceptions.ValidationException;
 import org.apache.iceberg.expressions.Evaluator;
 import org.apache.iceberg.expressions.Expression;
@@ -83,6 +84,7 @@ public class StarRocksIcebergTableScan
     private final Map<Integer, ResidualEvaluator> residualCache;
     private final Map<Integer, Evaluator> partitionEvaluatorCache;
     private final Map<Integer, InclusiveMetricsEvaluator> inclusiveMetricsEvaluatorCache;
+    private final Map<Integer, org.apache.avro.Schema> partitionEntrySchemaCache = new ConcurrentHashMap<>();
     private final String schemaString;
     private DeleteFileIndex deleteFileIndex;
     private boolean dataFileCacheWithMetrics;
@@ -616,9 +618,15 @@ public class StarRocksIcebergTableScan
         return CloseableIterable.transform(reader.liveEntries(), entry -> entry.copyWithoutStats());
     }
 
+    // We fear that building the Avro schema of a manifest entry for every cached file makes the PARTITIONS
+    // load allocate a schema per file, so the schema is built once per partition spec and shared by the
+    // entries. An entry holds the file it wraps and is buffered by the readers, so each file gets its own entry.
     private <F extends ContentFile<F>> ManifestEntry<F> cachedPartitionEntry(F file, Long entrySnapshotId) {
-        return new GenericManifestEntry<F>(ManifestEntry.getSchema(
-                table().specs().get(file.specId()).partitionType()).asStruct())
+        org.apache.avro.Schema entrySchema = partitionEntrySchemaCache.computeIfAbsent(file.specId(),
+                specId -> AvroSchemaUtil.convert(
+                        ManifestEntry.getSchema(table().specs().get(specId).partitionType()).asStruct(),
+                        "manifest_entry"));
+        return new GenericManifestEntry<F>(entrySchema)
                 .wrapExisting(entrySnapshotId, file.dataSequenceNumber(), file.fileSequenceNumber(), file);
     }
 
