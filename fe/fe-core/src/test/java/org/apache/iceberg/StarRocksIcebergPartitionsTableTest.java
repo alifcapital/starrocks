@@ -187,12 +187,19 @@ public class StarRocksIcebergPartitionsTableTest {
             Mockito.doCallRealMethod().when(io).newInputFile(Mockito.anyString());
             data.invalidateAll();
             deletes.invalidateAll();
-            context.setOnlyReadCache(true);
-            StarRocksIcebergTableScan readOnly = new StarRocksIcebergTableScan(
+            context.getMetaFileCacheMap().clear();
+            // Every scan that reads a manifest from storage keeps it, and registers it under the table so that the
+            // catalog drops it together with the table.
+            StarRocksIcebergTableScan again = new StarRocksIcebergTableScan(
                     table, table.schema(), TableScanContext.empty(), context);
-            Assertions.assertEquals(afterExpiry, rows(readOnly.newPartitionScan().useSnapshot(currentSnapshot)));
-            Assertions.assertTrue(data.asMap().isEmpty());
-            Assertions.assertTrue(deletes.asMap().isEmpty());
+            Assertions.assertEquals(afterExpiry, rows(again.newPartitionScan().useSnapshot(currentSnapshot)));
+            Set<String> registered = context.getMetaFileCacheMap().get(
+                    new com.starrocks.connector.iceberg.CachingIcebergCatalog.IcebergTableName("db", "tbl"));
+            for (ManifestFile manifest : table.currentSnapshot().allManifests(io)) {
+                Assertions.assertNotNull(manifest.content() == ManifestContent.DATA
+                        ? data.getIfPresent(manifest.path()) : deletes.getIfPresent(manifest.path()));
+                Assertions.assertTrue(registered.contains(manifest.path()));
+            }
         }
     }
 }

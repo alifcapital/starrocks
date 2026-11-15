@@ -90,7 +90,6 @@ public class StarRocksIcebergTableScan
     private boolean dataFileCacheWithMetrics;
     private boolean enableCacheDataFileIdentifierColumnMetrics;
     private final StarRocksIcebergTableScanContext scanContext;
-    private final boolean onlyReadCache;
     private final int localParallelism;
     private final long localPlanningMaxSlotSize;
     private ConnectContext connectContext;
@@ -138,7 +137,6 @@ public class StarRocksIcebergTableScan
         this.metaFileCacheMap = scanContext.getMetaFileCacheMap();
         this.dataFileCacheWithMetrics = scanContext.isDataFileCacheWithMetrics();
         this.enableCacheDataFileIdentifierColumnMetrics = scanContext.isEnableCacheDataFileIdentifierColumnMetrics();
-        this.onlyReadCache = scanContext.isOnlyReadCache();
         this.localParallelism = scanContext.getLocalParallelism();
         this.localPlanningMaxSlotSize = scanContext.getLocalPlanningMaxSlotSize();
     }
@@ -395,11 +393,9 @@ public class StarRocksIcebergTableScan
                     dataManifestWithCache.add(new Pair(manifestFile, dataFiles));
                 }
             } else {
-                if (!onlyReadCache) {
-                    dataFileCache.asMap().putIfAbsent(manifestFile.path(), ConcurrentHashMap.newKeySet());
-                    metaFileCacheMap.computeIfAbsent(icebergTableName,
-                            t -> ConcurrentHashMap.newKeySet()).add(manifestFile.path());
-                }
+                dataFileCache.asMap().putIfAbsent(manifestFile.path(), ConcurrentHashMap.newKeySet());
+                metaFileCacheMap.computeIfAbsent(icebergTableName,
+                        t -> ConcurrentHashMap.newKeySet()).add(manifestFile.path());
                 dataManifestWithoutCache.add(manifestFile);
             }
         }
@@ -469,7 +465,7 @@ public class StarRocksIcebergTableScan
                         .specsById(scanSpecsById)
                         .scanMetrics(scanMetrics())
                         .ignoreDeleted()
-                        .withDataFileCache(onlyReadCache ? null : dataFileCache)
+                        .withDataFileCache(dataFileCache)
                         .preparedDeleteFileIndex(deleteFileIndex)
                         .identifierFieldIds(getIdentifierFieldIds())
                         .cacheWithMetrics(dataFileCacheWithMetrics);
@@ -589,14 +585,14 @@ public class StarRocksIcebergTableScan
                 return CloseableIterable.transform(CloseableIterable.withNoopClose(files),
                         file -> cachedPartitionEntry(file, ((DataFileWrapper) file).entrySnapshotId()));
             }
-            if (dataFileCache != null && !onlyReadCache) {
+            if (dataFileCache != null) {
                 dataFileCache.asMap().putIfAbsent(manifest.path(), ConcurrentHashMap.newKeySet());
                 metaFileCacheMap.computeIfAbsent(icebergTableName,
                         key -> ConcurrentHashMap.newKeySet()).add(manifest.path());
             }
             ManifestReader<DataFile> reader = ManifestFiles.read(manifest, io(), table().specs())
                     .select(BaseScan.scanColumns(manifest.content()))
-                    .dataFileCache(onlyReadCache ? null : dataFileCache)
+                    .dataFileCache(dataFileCache)
                     .cacheWithMetrics(dataFileCacheWithMetrics)
                     .identifierFieldIds(statsKeepColumnIds(table(), tableSchema()));
             return CloseableIterable.transform(reader.liveEntries(), entry -> entry.copyWithoutStats());
@@ -607,14 +603,14 @@ public class StarRocksIcebergTableScan
             return CloseableIterable.transform(CloseableIterable.withNoopClose(files),
                     file -> cachedPartitionEntry(file, ((DeleteFileWrapper) file).entrySnapshotId()));
         }
-        if (deleteFileCache != null && !onlyReadCache) {
+        if (deleteFileCache != null) {
             deleteFileCache.asMap().putIfAbsent(manifest.path(), ConcurrentHashMap.newKeySet());
             metaFileCacheMap.computeIfAbsent(icebergTableName,
                     key -> ConcurrentHashMap.newKeySet()).add(manifest.path());
         }
         ManifestReader<DeleteFile> reader = ManifestFiles.readDeleteManifest(manifest, io(), table().specs())
                 .select(ManifestReader.ALL_COLUMNS)
-                .deleteFileCache(onlyReadCache ? null : deleteFileCache);
+                .deleteFileCache(deleteFileCache);
         return CloseableIterable.transform(reader.liveEntries(), entry -> entry.copyWithoutStats());
     }
 

@@ -297,8 +297,8 @@ public class CachingIcebergCatalog implements IcebergCatalog {
 
         try {
             // Metadata-only callers (including MV validation) must share table cache misses too.
-            // They keep the table cached (recordRead) but do not mark it active or populate file
-            // caches: recordScanAccess and getTableScan honor onlyReadIcebergCache independently.
+            // They keep the table cached (recordRead) but do not mark it active: recordScanAccess
+            // honors onlyReadIcebergCache independently.
             // Serialize a cache-miss load with refresh. A slow old load must not overwrite
             // a newer table published by refresh while that load was in flight.
             synchronized (tableRefreshLock(dbName, tableName)) {
@@ -960,7 +960,6 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         scanContext.setDataFileCacheWithMetrics(icebergProperties.isIcebergManifestCacheWithColumnStatistics());
         scanContext.setEnableCacheDataFileIdentifierColumnMetrics(
                 icebergProperties.enableCacheDataFileIdentifierColumnStatistics());
-        scanContext.setOnlyReadCache(shouldOnlyReadCache(scanContext.getConnectContext()));
         return delegate.getTableScan(table, scanContext);
     }
 
@@ -1006,7 +1005,8 @@ public class CachingIcebergCatalog implements IcebergCatalog {
         return found;
     }
 
-    // Suppress scan activity and file-cache population, while allowing table metadata to be reused.
+    // INSERT, MV refresh and statistics read a table without making it active, so their scans warm nothing.
+    // The manifests they read still go into the file caches: a cached manifest is dropped with its table.
     private boolean shouldOnlyReadCache(ConnectContext context) {
         return context != null && context.isOnlyReadIcebergCache();
     }

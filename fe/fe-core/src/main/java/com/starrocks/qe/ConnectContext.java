@@ -277,7 +277,8 @@ public class ConnectContext {
 
     private final Map<String, PrepareStmtContext> preparedStmtCtxs = Maps.newHashMap();
 
-    // Control whether to read Iceberg caches without populating/updating them for the current execution.
+    // Set for INSERT, MV refresh and statistics: a read of an Iceberg table here does not make the table active,
+    // so the catalog does not warm it. Manifests read from storage still go into the Iceberg file caches.
     private boolean onlyReadIcebergCache = false;
 
     private UUID sessionId;

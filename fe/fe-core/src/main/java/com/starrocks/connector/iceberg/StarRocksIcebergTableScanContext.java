@@ -34,7 +34,6 @@ public class StarRocksIcebergTableScanContext {
     private Cache<String, Set<DataFile>> dataFileCache;
     private Cache<String, Set<DeleteFile>> deleteFileCache;
     private Map<IcebergTableName, Set<String>> metaFileCacheMap;
-    private boolean onlyReadCache;
     private int localParallelism;
     private long localPlanningMaxSlotSize;
     private boolean enableCacheDataFileIdentifierColumnMetrics;
@@ -106,14 +105,6 @@ public class StarRocksIcebergTableScanContext {
 
     public void setMetaFileCacheMap(Map<IcebergTableName, Set<String>> metaFileCacheMap) {
         this.metaFileCacheMap = metaFileCacheMap;
-    }
-
-    public boolean isOnlyReadCache() {
-        return onlyReadCache;
-    }
-
-    public void setOnlyReadCache(boolean onlyReadCache) {
-        this.onlyReadCache = onlyReadCache;
     }
 
     public PlanMode getPlanMode() {

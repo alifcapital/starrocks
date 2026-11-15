@@ -1162,11 +1162,14 @@ public class IcebergMetadata implements ConnectorMetadata {
 
         IcebergPredicateSearchKey key = IcebergPredicateSearchKey.of(dbName, tableName, params);
 
-        // Bounded-cost statistics scan (design 2.4): the split cache key ignores the scan caps, so we must
-        // neither read it (a cached full split list would defeat early stop) nor write it (a truncated list
-        // must never leak into an ordinary query and corrupt its result). Plan a fresh, budget-limited list.
+        // A statistics scan with a scan budget reads only the first files up to the caps. The split cache key
+        // ignores the caps, so a list planned under a budget is never written to it: a truncated list must never
+        // reach an ordinary query. A full list this query has planned already costs nothing to read, so the
+        // budget takes its first files from it; otherwise we plan a budget-limited list that stops early.
         if (params.hasScanBudget()) {
-            List<FileScanTask> boundedTasks = planIcebergScanTasks(key, table, ConnectContext.get(), true);
+            List<FileScanTask> planned = splitTasks.get(splitTasksKey(dbName, tableName, params));
+            List<FileScanTask> boundedTasks = planned != null ? applyScanBudget(planned, params)
+                    : planIcebergScanTasks(key, table, ConnectContext.get(), true);
             return boundedTasks.stream().map(IcebergRemoteFileInfo::new).collect(Collectors.toList());
         }
 
@@ -1581,6 +1584,21 @@ public class IcebergMetadata implements ConnectorMetadata {
         return icebergScanTasks;
     }
 
+    // The files of a planned list that a budgeted scan reads: the same caps as a budget-limited planning,
+    // applied to a list that is already in memory.
+    private List<FileScanTask> applyScanBudget(List<FileScanTask> planned, GetRemoteFilesParams params) {
+        List<FileScanTask> result = new ArrayList<>();
+        try (CloseableIterator<FileScanTask> iterator =
+                     maybeApplyScanBudget(CloseableIterator.withClose(planned.iterator()), params)) {
+            while (iterator.hasNext()) {
+                result.add(iterator.next());
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        return result;
+    }
+
     // Wraps a lazy file-scan-task iterator with the bounded-cost statistics-scan budget (design 2.2/2.4).
     // Returns the delegate untouched when there is no active budget, so ordinary reads are unaffected.
     private CloseableIterator<FileScanTask> maybeApplyScanBudget(CloseableIterator<FileScanTask> delegate,
@@ -1676,10 +1694,12 @@ public class IcebergMetadata implements ConnectorMetadata {
         String tableName = table.getCatalogTableName();
         IcebergPredicateSearchKey predicateSearchKey = splitTasksKey(dbName, tableName, params);
         RemoteFileInfoSource baseSource;
-        // Bounded-cost statistics scan (design 2.4): never read a cached split list (it may be a full,
-        // non-budgeted list) - always build a fresh, budget-limited source below.
-        if (!params.hasScanBudget() && splitTasks.containsKey(predicateSearchKey)) {
-            baseSource = buildRemoteInfoSource(splitTasks.get(predicateSearchKey), params);
+        // A full list this query has planned already gives a statistics scan with a scan budget its first files
+        // without planning again; without one, the source below plans and stops at the budget.
+        if (splitTasks.containsKey(predicateSearchKey)) {
+            List<FileScanTask> planned = splitTasks.get(predicateSearchKey);
+            baseSource = buildRemoteInfoSource(params.hasScanBudget() ? applyScanBudget(planned, params) : planned,
+                    params);
         } else {
             List<ScalarOperator> scalarOperators = Utils.extractConjuncts(params.getPredicate());
             // See collectTableStatisticsAndCacheIcebergSplit: keep cast-on-string-partition conjuncts out of the
