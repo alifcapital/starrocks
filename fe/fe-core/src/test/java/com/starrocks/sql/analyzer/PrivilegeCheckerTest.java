@@ -1989,12 +1989,19 @@ public class PrivilegeCheckerTest extends StarRocksTestBase {
         }
     }
 
+    private static ConnectContext contextOf(UserIdentity user) {
+        ConnectContext context = new ConnectContext();
+        context.setCurrentUserIdentity(user);
+        context.setCurrentRoleIds(user);
+        return context;
+    }
+
     @Test
     public void testCheckPrivForCurrUserInTabletCtx() throws Exception {
         // test db not exist
         TabletSchedCtx tabletSchedCtx = new TabletSchedCtx(TabletSchedCtx.Type.REPAIR,
                 1, 2, 3, 4, 1000, System.currentTimeMillis());
-        boolean result = tabletSchedCtx.checkPrivForCurrUser(testUser);
+        boolean result = tabletSchedCtx.checkPrivForCurrUser(contextOf(testUser));
         Assertions.assertTrue(result);
 
         // test user null
@@ -2014,18 +2021,18 @@ public class PrivilegeCheckerTest extends StarRocksTestBase {
         Table table = GlobalStateMgr.getCurrentState().getLocalMetastore().getTable(db.getFullName(), "tbl1");
         tabletSchedCtx = new TabletSchedCtx(TabletSchedCtx.Type.REPAIR,
                 db.getId(), table.getId(), 3, 4, 1000, System.currentTimeMillis());
-        result = tabletSchedCtx.checkPrivForCurrUser(testUser);
+        result = tabletSchedCtx.checkPrivForCurrUser(contextOf(testUser));
         Assertions.assertTrue(result);
         grantRevokeSqlAsRoot("revoke OPERATE on SYSTEM from test");
 
         // test user has ANY privilege
         grantRevokeSqlAsRoot("grant SELECT on TABLE db1.tbl1 to test");
-        result = tabletSchedCtx.checkPrivForCurrUser(testUser);
+        result = tabletSchedCtx.checkPrivForCurrUser(contextOf(testUser));
         Assertions.assertTrue(result);
         grantRevokeSqlAsRoot("revoke SELECT on TABLE db1.tbl1 from test");
 
         // test user has no privilege
-        result = tabletSchedCtx.checkPrivForCurrUser(testUser);
+        result = tabletSchedCtx.checkPrivForCurrUser(contextOf(testUser));
         Assertions.assertFalse(result);
     }
 

@@ -61,7 +61,6 @@ import com.starrocks.catalog.Replica.ReplicaState;
 import com.starrocks.catalog.Table;
 import com.starrocks.catalog.Tablet;
 import com.starrocks.catalog.TabletMeta;
-import com.starrocks.catalog.UserIdentity;
 import com.starrocks.clone.BalanceStat.BalanceType;
 import com.starrocks.clone.SchedException.Status;
 import com.starrocks.clone.TabletSchedCtx.Priority;
@@ -76,6 +75,7 @@ import com.starrocks.common.util.concurrent.lock.Locker;
 import com.starrocks.common.util.concurrent.lock.YieldableLock;
 import com.starrocks.leader.ReportHandler;
 import com.starrocks.persist.ReplicaPersistInfo;
+import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.LocalMetastore;
 import com.starrocks.system.Backend;
@@ -2277,9 +2277,10 @@ public class TabletScheduler extends FrontendDaemon {
         String state = request.isSetState() ? request.state : null;
         long limit = request.isSetLimit() ? request.limit : -1;
         List<TabletSchedCtx> tabletCtxs;
-        UserIdentity currentUser = null;
+        ConnectContext currentContext = null;
         if (request.isSetCurrent_user_ident()) {
-            currentUser = UserIdentityUtils.fromThrift(request.current_user_ident);
+            currentContext = new ConnectContext();
+            UserIdentityUtils.setAuthInfoFromThrift(currentContext, request.current_user_ident);
         }
         synchronized (this) {
             Stream<TabletSchedCtx> all;
@@ -2297,8 +2298,8 @@ public class TabletScheduler extends FrontendDaemon {
                     all = all.filter(t -> t.getState().name().equals(state));
                 }
             }
-            final UserIdentity finalUser = currentUser;
-            all = all.filter(t -> t.checkPrivForCurrUser(finalUser));
+            final ConnectContext finalContext = currentContext;
+            all = all.filter(t -> t.checkPrivForCurrUser(finalContext));
             if (type != null) {
                 all = all.filter(t -> t.getType().name().equals(type));
             }

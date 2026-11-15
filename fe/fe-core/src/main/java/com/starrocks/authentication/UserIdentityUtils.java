@@ -21,9 +21,11 @@ import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.thrift.TAuthInfo;
 import com.starrocks.thrift.TUserIdentity;
+import com.starrocks.thrift.TUserRoles;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -67,6 +69,25 @@ public class UserIdentityUtils {
         return tUserIdent;
     }
 
+    /**
+     * We want a privilege check on the other side of an RPC to see the session as it is here: the same user,
+     * the same active roles and the same groups. Ranger policies granted to a group and roles granted to a group
+     * only apply when the groups are there, so this carries all three. Use it wherever the identity stands for
+     * the authority of the session; use {@link #toThrift(UserIdentity)} where the identity only names a user.
+     */
+    public static TUserIdentity toThrift(ConnectContext context) {
+        TUserIdentity tUserIdent = toThrift(context.getCurrentUserIdentity());
+        if (context.getCurrentRoleIds() != null) {
+            TUserRoles userRoles = new TUserRoles();
+            userRoles.setRole_id_list(new ArrayList<>(context.getCurrentRoleIds()));
+            tUserIdent.setCurrent_role_ids(userRoles);
+        }
+        if (context.getGroups() != null) {
+            tUserIdent.setGroups(new ArrayList<>(context.getGroups()));
+        }
+        return tUserIdent;
+    }
+
     public static UserIdentity fromThrift(TUserIdentity tUserIdent) {
         return new UserIdentity(tUserIdent.getUsername(), tUserIdent.getHost(), tUserIdent.is_domain,
                 tUserIdent.is_ephemeral);
@@ -85,6 +106,14 @@ public class UserIdentityUtils {
     public static void setAuthInfoFromThrift(ConnectContext context, TUserIdentity tUserIdent) {
         UserIdentity userIdentity = UserIdentityUtils.fromThrift(tUserIdent);
         context.setCurrentUserIdentity(userIdentity);
+        // The groups are the groups of the sending session. We cannot check them the way the roles are checked
+        // below: the group providers resolve them at login, and asking LDAP again here would make every call
+        // wait on it and could give another answer than the session got. The sender is a FE or BE of this
+        // cluster, and we already take the user name and the roles of an ephemeral user from it as they are,
+        // so we take the groups the same way. When the field is not set the context keeps its own groups.
+        if (tUserIdent.isSetGroups()) {
+            context.setGroups(new HashSet<>(tUserIdent.getGroups()));
+        }
         if (tUserIdent.isSetCurrent_role_ids()) {
             List<Long> roleIdList = tUserIdent.current_role_ids.getRole_id_list();
             Set<Long> requestedRoleIds = roleIdList != null ? new HashSet<>(roleIdList) : new HashSet<>();
