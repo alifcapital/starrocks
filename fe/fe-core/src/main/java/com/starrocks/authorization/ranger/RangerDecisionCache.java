@@ -36,10 +36,13 @@ import java.util.function.Supplier;
  * audit event.
  * <p>
  * The key holds every input of the Ranger request that can change the answer. If we cannot copy an
- * input into the key, we do not cache the request. The access time is not in the key. Only
- * time-based policy conditions read it, and we keep an answer for at most
- * {@link Config#ranger_decision_cache_ttl_ms}. The same limit lets a context that runs for a long
- * time without a new statement see a Ranger policy refresh.
+ * input into the key, we do not cache the request. The rest of the answer comes from the data the
+ * plugin loads from Ranger Admin: policies, tags of resources, roles and users with their groups.
+ * Each of them has a version, so an answer is reused only while all four versions stay the same.
+ * <p>
+ * The access time is not in the key or in a version. A policy with a validity schedule or a time
+ * condition can change its answer at the same versions. While such a policy is loaded, we keep an
+ * answer for at most {@link Config#ranger_decision_cache_time_dependent_ttl_ms}.
  */
 public final class RangerDecisionCache {
     // A statement over a system table can ask about many different objects. We do not want one
@@ -60,7 +63,7 @@ public final class RangerDecisionCache {
                String user, String host, Set<String> groups, String accessType, Set<ColumnAccessKind> usage) {
     }
 
-    private record Entry(Object value, long createdNanos) {
+    private record Entry(Object value, RangerAccessController.DataVersions versions, long createdNanos) {
     }
 
     private final ConcurrentHashMap<Key, Entry> entries = new ConcurrentHashMap<>();
@@ -93,18 +96,32 @@ public final class RangerDecisionCache {
      */
     @SuppressWarnings("unchecked")
     <T> T get(Key key, Supplier<T> evaluate) {
-        long ttlMs = Config.ranger_decision_cache_ttl_ms;
-        if (key == null || ttlMs <= 0) {
+        if (key == null || !Config.enable_ranger_decision_cache) {
+            return evaluate.get();
+        }
+        // Read before the evaluation: if Ranger loads new data meanwhile, the entry has the old
+        // versions and the next call evaluates again.
+        RangerAccessController.DataVersions versions;
+        boolean timeDependent;
+        try {
+            versions = key.controller().dataVersions();
+            timeDependent = key.controller().hasTimeDependentPolicies();
+        } catch (RuntimeException e) {
+            return evaluate.get();
+        }
+        long maxAgeMs = Config.ranger_decision_cache_time_dependent_ttl_ms;
+        if (timeDependent && maxAgeMs <= 0) {
             return evaluate.get();
         }
         long now = System.nanoTime();
         Entry entry = entries.get(key);
-        if (entry != null && now - entry.createdNanos() < TimeUnit.MILLISECONDS.toNanos(ttlMs)) {
+        if (entry != null && entry.versions().equals(versions)
+                && (!timeDependent || now - entry.createdNanos() < TimeUnit.MILLISECONDS.toNanos(maxAgeMs))) {
             return (T) entry.value();
         }
         T value = evaluate.get();
         if (value != null && (entry != null || entries.size() < MAX_ENTRIES)) {
-            entries.put(key, new Entry(value, now));
+            entries.put(key, new Entry(value, versions, now));
         }
         return value;
     }

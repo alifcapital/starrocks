@@ -4436,16 +4436,25 @@ public class Config extends ConfigBase {
     public static boolean ranger_user_ugi = false;
 
     /**
-     * How long, in milliseconds, the FE reuses a Ranger answer.
+     * Whether the FE reuses Ranger answers inside one statement.
      * One statement often asks Ranger the same question many times, for example once per row of
      * a system table, and every evaluation writes a Ranger audit event. So the FE keeps each answer
      * on the connection context and evaluates and audits the same question once per statement.
-     * A new statement starts with no answers. A context that runs for a long time without a new
-     * statement keeps an answer at most this long, so it still sees a Ranger policy change.
-     * 0 turns the reuse off.
+     * A new statement starts with no answers. An answer is dropped when Ranger loads new policies,
+     * tags, roles or users.
      */
     @ConfField(mutable = true)
-    public static long ranger_decision_cache_ttl_ms = 5000;
+    public static boolean enable_ranger_decision_cache = true;
+
+    /**
+     * How long, in milliseconds, the FE reuses a Ranger answer while a loaded policy can change its
+     * answer with time: a policy with a validity schedule, or a condition other than ip-range, such
+     * as accessed-after-expiry of the EXPIRES_ON tag policy. Without such policies an answer is
+     * reused until the statement ends or Ranger loads new data. 0 turns the reuse off while such a
+     * policy is loaded.
+     */
+    @ConfField(mutable = true)
+    public static long ranger_decision_cache_time_dependent_ttl_ms = 5000;
 
     @ConfField(mutable = true)
     public static int catalog_metadata_cache_size = 500;

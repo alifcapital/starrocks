@@ -34,10 +34,13 @@ import mockit.MockUp;
 import org.apache.ranger.authorization.utils.JsonUtils;
 import org.apache.ranger.plugin.model.RangerPolicy;
 import org.apache.ranger.plugin.model.RangerServiceDef;
+import org.apache.ranger.plugin.model.RangerValiditySchedule;
 import org.apache.ranger.plugin.policyengine.RangerAccessRequest;
 import org.apache.ranger.plugin.policyengine.RangerAccessResult;
 import org.apache.ranger.plugin.policyengine.RangerAccessResultProcessor;
 import org.apache.ranger.plugin.service.RangerBasePlugin;
+import org.apache.ranger.plugin.store.EmbeddedServiceDefsUtil;
+import org.apache.ranger.plugin.util.RangerRoles;
 import org.apache.ranger.plugin.util.ServicePolicies;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
@@ -51,6 +54,7 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -73,13 +77,16 @@ public class RangerDecisionCacheTest {
     private static final AtomicInteger ROW_FILTER_EVALUATIONS = new AtomicInteger();
 
     private RangerServiceDef serviceDef;
-    private long savedTtlMs;
+    private boolean savedEnabled;
+    private long savedTimeDependentTtlMs;
     private long nextPolicyId = 1;
 
     @BeforeEach
     public void setUp() throws Exception {
-        savedTtlMs = Config.ranger_decision_cache_ttl_ms;
-        Config.ranger_decision_cache_ttl_ms = 5000;
+        savedEnabled = Config.enable_ranger_decision_cache;
+        savedTimeDependentTtlMs = Config.ranger_decision_cache_time_dependent_ttl_ms;
+        Config.enable_ranger_decision_cache = true;
+        Config.ranger_decision_cache_time_dependent_ttl_ms = 5000;
         ACCESS_EVALUATIONS.set(0);
         MASK_EVALUATIONS.set(0);
         ROW_FILTER_EVALUATIONS.set(0);
@@ -118,7 +125,8 @@ public class RangerDecisionCacheTest {
 
     @AfterEach
     public void tearDown() {
-        Config.ranger_decision_cache_ttl_ms = savedTtlMs;
+        Config.enable_ranger_decision_cache = savedEnabled;
+        Config.ranger_decision_cache_time_dependent_ttl_ms = savedTimeDependentTtlMs;
     }
 
     // alice may select t1 and all its columns, the group analysts may select t2. alice sees column c1
@@ -352,40 +360,111 @@ public class RangerDecisionCacheTest {
     }
 
     @Test
-    public void testPolicyChangeIsSeenInTheNextStatement() {
+    public void testNewPolicyVersionDropsTheAnswer() {
         RangerStarRocksAccessController controller = controllerWith(defaultPolicies());
         ConnectContext alice = contextOf("alice", Set.of());
         Assertions.assertDoesNotThrow(() -> controller.checkTableAction(alice, T1, PrivilegeType.SELECT));
 
         controller.getRangerPlugin().setPolicies(servicePolicies(bobOnlyPolicies(), 2L));
-        // The statement keeps the answer it already has.
+        // The same statement sees the new policies at once.
+        Assertions.assertThrows(AccessDeniedException.class,
+                () -> controller.checkTableAction(alice, T1, PrivilegeType.SELECT));
+        Assertions.assertEquals(2, ACCESS_EVALUATIONS.get());
+    }
+
+    @Test
+    public void testNewRolesVersionDropsTheAnswer() {
+        RangerStarRocksAccessController controller = controllerWith(defaultPolicies());
+        ConnectContext alice = contextOf("alice", Set.of());
+        Assertions.assertDoesNotThrow(() -> controller.checkTableAction(alice, T1, PrivilegeType.SELECT));
+
+        RangerRoles roles = new RangerRoles();
+        roles.setServiceName("starrocks");
+        roles.setRoleVersion(7L);
+        roles.setRangerRoles(new HashSet<>());
+        controller.getRangerPlugin().setRoles(roles);
+        Assertions.assertDoesNotThrow(() -> controller.checkTableAction(alice, T1, PrivilegeType.SELECT));
+        Assertions.assertEquals(2, ACCESS_EVALUATIONS.get());
+    }
+
+    @Test
+    public void testAnswerHasNoTimeLimitWithoutTimeDependentPolicies() throws Exception {
+        Config.ranger_decision_cache_time_dependent_ttl_ms = 1;
+        RangerStarRocksAccessController controller = controllerWith(defaultPolicies());
+        ConnectContext alice = contextOf("alice", Set.of());
+        Assertions.assertDoesNotThrow(() -> controller.checkTableAction(alice, T1, PrivilegeType.SELECT));
+        Thread.sleep(20);
         Assertions.assertDoesNotThrow(() -> controller.checkTableAction(alice, T1, PrivilegeType.SELECT));
         Assertions.assertEquals(1, ACCESS_EVALUATIONS.get());
-
-        alice.setQueryId(UUIDUtil.genUUID());
-        Assertions.assertThrows(AccessDeniedException.class,
-                () -> controller.checkTableAction(alice, T1, PrivilegeType.SELECT));
-        Assertions.assertEquals(2, ACCESS_EVALUATIONS.get());
     }
 
     @Test
-    public void testPolicyChangeIsSeenAfterTtl() throws Exception {
-        Config.ranger_decision_cache_ttl_ms = 1;
-        RangerStarRocksAccessController controller = controllerWith(defaultPolicies());
+    public void testValidityScheduleLimitsTheAnswerAge() throws Exception {
+        Config.ranger_decision_cache_time_dependent_ttl_ms = 1;
+        List<RangerPolicy> policies = new ArrayList<>(defaultPolicies());
+        RangerPolicy scheduled =
+                accessPolicy(Map.of("catalog", CATALOG, "database", "db1", "table", "t2"), "carol", null);
+        scheduled.setValiditySchedules(new ArrayList<>(List.of(
+                new RangerValiditySchedule("2020/01/01 00:00:00", "2999/01/01 00:00:00", null, null))));
+        policies.add(scheduled);
+        RangerStarRocksAccessController controller = controllerWith(policies);
+        assertAnswerIsKeptOnlyForTheTimeLimit(controller);
+    }
+
+    @Test
+    public void testTimeConditionOfTagPolicyLimitsTheAnswerAge() throws Exception {
+        Config.ranger_decision_cache_time_dependent_ttl_ms = 1;
+        ServicePolicies servicePolicies = servicePolicies(defaultPolicies(), 1L);
+        servicePolicies.setTagPolicies(expiresOnTagService());
+        RangerStarRocksAccessController controller = new RangerStarRocksAccessController();
+        controller.getRangerPlugin().setPolicies(servicePolicies);
+        assertAnswerIsKeptOnlyForTheTimeLimit(controller);
+    }
+
+    private void assertAnswerIsKeptOnlyForTheTimeLimit(RangerStarRocksAccessController controller) throws Exception {
         ConnectContext alice = contextOf("alice", Set.of());
         Assertions.assertDoesNotThrow(() -> controller.checkTableAction(alice, T1, PrivilegeType.SELECT));
-
-        controller.getRangerPlugin().setPolicies(servicePolicies(bobOnlyPolicies(), 2L));
         Thread.sleep(20);
-        // Same query id, but the answer is older than the TTL.
-        Assertions.assertThrows(AccessDeniedException.class,
-                () -> controller.checkTableAction(alice, T1, PrivilegeType.SELECT));
+        Assertions.assertDoesNotThrow(() -> controller.checkTableAction(alice, T1, PrivilegeType.SELECT));
+        Assertions.assertEquals(2, ACCESS_EVALUATIONS.get());
+
+        // A longer limit keeps the answer.
+        Config.ranger_decision_cache_time_dependent_ttl_ms = 60_000;
+        Assertions.assertDoesNotThrow(() -> controller.checkTableAction(alice, T1, PrivilegeType.SELECT));
         Assertions.assertEquals(2, ACCESS_EVALUATIONS.get());
     }
 
+    // The default tag policy of Ranger: deny access to data whose tag EXPIRES_ON has passed.
+    private static ServicePolicies.TagPolicies expiresOnTagService() throws Exception {
+        RangerPolicy policy = new RangerPolicy();
+        policy.setId(1000L);
+        policy.setName("EXPIRES_ON");
+        policy.setService("starrocks_tag");
+        policy.setIsEnabled(true);
+        Map<String, RangerPolicy.RangerPolicyResource> resources = new HashMap<>();
+        resources.put("tag", new RangerPolicy.RangerPolicyResource("EXPIRES_ON"));
+        policy.setResources(resources);
+        policy.setDenyPolicyItems(new ArrayList<>(List.of(new RangerPolicy.RangerPolicyItem(
+                new ArrayList<>(List.of(new RangerPolicy.RangerPolicyItemAccess("starrocks:select", true))), null,
+                new ArrayList<>(List.of("public")), null,
+                new ArrayList<>(List.of(new RangerPolicy.RangerPolicyItemCondition("accessed-after-expiry",
+                        new ArrayList<>(List.of("yes"))))), false))));
+
+        RangerServiceDef tagServiceDef = EmbeddedServiceDefsUtil.instance().getEmbeddedServiceDef("tag");
+        // The tag enricher downloads tags from Ranger Admin. No object here has a tag, so we leave it out.
+        tagServiceDef.setContextEnrichers(new ArrayList<>());
+        ServicePolicies.TagPolicies tags = new ServicePolicies.TagPolicies();
+        tags.setServiceName("starrocks_tag");
+        tags.setServiceId(2L);
+        tags.setPolicyVersion(1L);
+        tags.setServiceDef(tagServiceDef);
+        tags.setPolicies(new ArrayList<>(List.of(policy)));
+        return tags;
+    }
+
     @Test
-    public void testZeroTtlTurnsTheCacheOff() {
-        Config.ranger_decision_cache_ttl_ms = 0;
+    public void testDisabledCacheAsksRangerEveryTime() {
+        Config.enable_ranger_decision_cache = false;
         RangerStarRocksAccessController controller = controllerWith(defaultPolicies());
         ConnectContext alice = contextOf("alice", Set.of());
         for (int i = 0; i < 3; i++) {

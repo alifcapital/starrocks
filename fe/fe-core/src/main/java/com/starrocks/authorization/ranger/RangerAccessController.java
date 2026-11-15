@@ -34,11 +34,15 @@ import org.apache.ranger.plugin.policyengine.RangerAccessResourceImpl;
 import org.apache.ranger.plugin.policyengine.RangerAccessResult;
 import org.apache.ranger.plugin.policyengine.RangerPolicyEngine;
 import org.apache.ranger.plugin.service.RangerBasePlugin;
+import org.apache.ranger.plugin.util.RangerPolicyDeltaUtil;
+import org.apache.ranger.plugin.util.ServicePolicies;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.lang.ref.WeakReference;
+import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Properties;
@@ -116,8 +120,16 @@ public abstract class RangerAccessController extends ExternalAccessController im
         return rangerPlugin;
     }
 
-    // RangerBasePlugin keeps its policy engine protected. We need it to read the tag policies.
+    // RangerBasePlugin keeps its policy engine protected. We need it to read the tag policies. We
+    // also look at every set of policies the plugin loads, to know if an answer can change with time.
     private static class Plugin extends RangerBasePlugin {
+        // A condition that does not read the time. Any other condition may, for example
+        // accessed-after-expiry of a tag policy or a script condition.
+        private static final Set<String> TIME_INDEPENDENT_CONDITIONS = Set.of("ip-range");
+
+        // Until the plugin loads its first set of policies we know nothing, so we assume the worst.
+        private volatile boolean hasTimeDependentPolicies = true;
+
         Plugin(RangerPluginConfig config) {
             super(config);
         }
@@ -125,6 +137,91 @@ public abstract class RangerAccessController extends ExternalAccessController im
         RangerPolicyEngine currentPolicyEngine() {
             return getPolicyEngine();
         }
+
+        boolean hasTimeDependentPolicies() {
+            return hasTimeDependentPolicies;
+        }
+
+        @Override
+        public void setPolicies(ServicePolicies policies) {
+            // We read the policies before Ranger changes them while it loads them. A new true value
+            // is set before the new policies are used and a new false value after, so an answer that
+            // can change with time is never kept without a time limit.
+            Boolean timeDependent = timeDependenceOf(policies);
+            if (Boolean.TRUE.equals(timeDependent)) {
+                hasTimeDependentPolicies = true;
+            }
+            super.setPolicies(policies);
+            if (Boolean.FALSE.equals(timeDependent)) {
+                hasTimeDependentPolicies = false;
+            }
+        }
+
+        // Returns null when the plugin keeps the policies it has, so the current value stays.
+        private static Boolean timeDependenceOf(ServicePolicies policies) {
+            try {
+                Boolean hasDeltas = policies == null ? null : RangerPolicyDeltaUtil.hasPolicyDeltas(policies);
+                if (hasDeltas == null) {
+                    return null;
+                }
+                if (hasDeltas) {
+                    // A delta does not show the whole set of policies.
+                    return true;
+                }
+                List<RangerPolicy> all = new ArrayList<>();
+                addAll(all, policies.getPolicies());
+                if (policies.getSecurityZones() != null) {
+                    for (ServicePolicies.SecurityZoneInfo zone : policies.getSecurityZones().values()) {
+                        addAll(all, zone.getPolicies());
+                    }
+                }
+                if (policies.getTagPolicies() != null) {
+                    addAll(all, policies.getTagPolicies().getPolicies());
+                }
+                return all.stream().anyMatch(Plugin::isTimeDependent);
+            } catch (RuntimeException e) {
+                return true;
+            }
+        }
+
+        private static void addAll(List<RangerPolicy> all, List<RangerPolicy> policies) {
+            if (policies != null) {
+                all.addAll(policies);
+            }
+        }
+
+        private static boolean isTimeDependent(RangerPolicy policy) {
+            return CollectionUtils.isNotEmpty(policy.getValiditySchedules())
+                    || hasTimeDependentCondition(policy.getConditions())
+                    || hasTimeDependentItem(policy.getPolicyItems())
+                    || hasTimeDependentItem(policy.getDenyPolicyItems())
+                    || hasTimeDependentItem(policy.getAllowExceptions())
+                    || hasTimeDependentItem(policy.getDenyExceptions())
+                    || hasTimeDependentItem(policy.getDataMaskPolicyItems())
+                    || hasTimeDependentItem(policy.getRowFilterPolicyItems());
+        }
+
+        private static boolean hasTimeDependentItem(List<? extends RangerPolicy.RangerPolicyItem> items) {
+            return items != null && items.stream().anyMatch(item -> hasTimeDependentCondition(item.getConditions()));
+        }
+
+        private static boolean hasTimeDependentCondition(List<RangerPolicy.RangerPolicyItemCondition> conditions) {
+            return conditions != null && conditions.stream()
+                    .anyMatch(condition -> !TIME_INDEPENDENT_CONDITIONS.contains(condition.getType()));
+        }
+    }
+
+    /** The versions of the Ranger data an answer depends on. */
+    record DataVersions(long policies, long tags, long roles, long userStore) {
+    }
+
+    DataVersions dataVersions() {
+        return new DataVersions(rangerPlugin.getPoliciesVersion(), rangerPlugin.getTagsVersion(),
+                rangerPlugin.getRolesVersion(), rangerPlugin.getUserStoreVersion());
+    }
+
+    boolean hasTimeDependentPolicies() {
+        return !(rangerPlugin instanceof Plugin plugin) || plugin.hasTimeDependentPolicies();
     }
 
     // The answer of tagPolicyMayAllow for one policy engine and policy version.
