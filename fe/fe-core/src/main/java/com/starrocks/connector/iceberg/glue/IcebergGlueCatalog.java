@@ -29,18 +29,23 @@ import com.starrocks.qe.ConnectContext;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.iceberg.BaseMetastoreTableOperations;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.CatalogUtil;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.SortOrder;
 import org.apache.iceberg.Table;
+import org.apache.iceberg.aws.AwsClientFactories;
 import org.apache.iceberg.aws.AwsProperties;
 import org.apache.iceberg.aws.glue.GlueCatalog;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import software.amazon.awssdk.services.glue.GlueClient;
+import software.amazon.awssdk.services.glue.model.EntityNotFoundException;
+import software.amazon.awssdk.services.glue.model.GetTableRequest;
 
 import java.net.URI;
 import java.util.ArrayList;
@@ -57,6 +62,11 @@ public class IcebergGlueCatalog implements IcebergCatalog {
 
     private final Configuration conf;
     private final GlueCatalog delegate;
+    private final Map<String, String> catalogProperties;
+    private final AwsProperties awsProperties;
+    private final Object glueClientLock = new Object();
+    private volatile GlueClient glueClient;
+    private boolean shutDown;
 
     public IcebergGlueCatalog(String name, Configuration conf, Map<String, String> properties) {
         this.conf = conf;
@@ -67,6 +77,8 @@ public class IcebergGlueCatalog implements IcebergCatalog {
         copiedProperties.put(AwsProperties.CLIENT_FACTORY, IcebergAwsClientFactory.class.getName());
         copiedProperties.put(AwsProperties.GLUE_CATALOG_SKIP_NAME_VALIDATION, "true");
         delegate = (GlueCatalog) CatalogUtil.loadCatalog(GlueCatalog.class.getName(), name, copiedProperties, conf);
+        catalogProperties = copiedProperties;
+        awsProperties = new AwsProperties(copiedProperties);
     }
 
     @Override
@@ -77,6 +89,53 @@ public class IcebergGlueCatalog implements IcebergCatalog {
     @Override
     public Table getTable(ConnectContext context, String dbName, String tableName) throws StarRocksConnectorException {
         return delegate.loadTable(TableIdentifier.of(dbName, tableName));
+    }
+
+    // We want the same answer the wrapped GlueCatalog would get when it loads the table, so this makes the Glue
+    // request and the checks of GlueTableOperations.doRefresh. Name validation is skipped, so the Glue database
+    // and table names are the names given here. For a missing table or a table that is not an Iceberg table we
+    // return null, and the load of the table reports the error.
+    @Override
+    public String getCurrentMetadataLocation(String dbName, String tableName) {
+        GetTableRequest request = GetTableRequest.builder()
+                .catalogId(awsProperties.glueCatalogId())
+                .databaseName(dbName)
+                .name(tableName)
+                .build();
+        software.amazon.awssdk.services.glue.model.Table glueTable;
+        try {
+            glueTable = glueClient().getTable(request).table();
+        } catch (EntityNotFoundException e) {
+            return null;
+        }
+        if (glueTable == null) {
+            return null;
+        }
+        Map<String, String> parameters = glueTable.parameters();
+        String tableType = parameters.get(BaseMetastoreTableOperations.TABLE_TYPE_PROP);
+        if (tableType == null || !tableType.equalsIgnoreCase(BaseMetastoreTableOperations.ICEBERG_TABLE_TYPE_VALUE)) {
+            return null;
+        }
+        return parameters.get(BaseMetastoreTableOperations.METADATA_LOCATION_PROP);
+    }
+
+    // The client must use the credentials, region and endpoint of the client of the wrapped GlueCatalog, so it is
+    // built by the same client factory from the same properties. It is built once, on first use, so a catalog
+    // that never asks for a metadata location does not hold a second client.
+    private GlueClient glueClient() {
+        GlueClient client = glueClient;
+        if (client != null) {
+            return client;
+        }
+        synchronized (glueClientLock) {
+            if (shutDown) {
+                throw new IllegalStateException("Glue catalog is shut down");
+            }
+            if (glueClient == null) {
+                glueClient = AwsClientFactories.from(catalogProperties).glue();
+            }
+            return glueClient;
+        }
     }
 
     @Override
@@ -229,6 +288,19 @@ public class IcebergGlueCatalog implements IcebergCatalog {
 
     @Override
     public void shutdown() {
+        GlueClient client;
+        synchronized (glueClientLock) {
+            shutDown = true;
+            client = glueClient;
+            glueClient = null;
+        }
+        if (client != null) {
+            try {
+                client.close();
+            } catch (RuntimeException e) {
+                LOG.warn("Failed to close Glue client of catalog {}", delegate.name(), e);
+            }
+        }
         IcebergCatalog.closeWrappedCatalog(delegate);
     }
 }

@@ -173,6 +173,133 @@ public class CachingIcebergCatalogTest {
         }
     }
 
+    // When Glue reports the metadata location of the cached table, the refresh keeps the cached table without
+    // loading the table, and a statement that waited for that refresh reads from the cache.
+    @Test
+    public void testGlueRefreshWithUnchangedLocationSkipsLoad() {
+        IcebergCatalog delegate = Mockito.mock(IcebergCatalog.class);
+        Mockito.when(delegate.getIcebergCatalogType()).thenReturn(IcebergCatalogType.GLUE_CATALOG);
+        ExecutorService workers = Executors.newSingleThreadExecutor();
+        try {
+            CachingIcebergCatalog catalog = new CachingIcebergCatalog(
+                    CATALOG_NAME, delegate, DEFAULT_CATALOG_PROPERTIES, workers);
+            BaseTable oldTable = mockRefreshCandidate(1L, "old.json");
+            Cache<IcebergTableName, Table> tables = Deencapsulation.getField(catalog, "tables");
+            IcebergTableName key = new IcebergTableName("db", "tbl");
+            tables.put(key, oldTable);
+            Map<IcebergTableName, Long> access = Deencapsulation.getField(catalog, "tableLatestAccessTime");
+            access.put(key, System.currentTimeMillis());
+            Mockito.when(delegate.getCurrentMetadataLocation("db", "tbl")).thenReturn("old.json");
+            Mockito.when(delegate.getPartitions(Mockito.any(), Mockito.anyLong(), Mockito.any(), Mockito.any()))
+                    .thenReturn(Map.of());
+
+            catalog.refreshTableForRead("db", "tbl", new ConnectContext(), workers);
+
+            Mockito.verify(delegate, Mockito.never()).getTable(Mockito.any(), Mockito.any(), Mockito.any());
+            Assertions.assertSame(oldTable, tables.getIfPresent(key));
+            Map<IcebergTableName, Long> loads = Deencapsulation.getField(catalog, "tableMetadataLoads");
+            Assertions.assertEquals(1L, loads.get(key));
+            Map<IcebergTableName, Long> refreshed = Deencapsulation.getField(catalog, "tableLatestRefreshTime");
+            Assertions.assertNotNull(refreshed.get(key));
+            Mockito.verify(oldTable.currentSnapshot()).dataManifests(Mockito.any());
+        } finally {
+            workers.shutdownNow();
+        }
+    }
+
+    @Test
+    public void testGlueRefreshWithChangedLocationLoadsTable() {
+        IcebergCatalog delegate = Mockito.mock(IcebergCatalog.class);
+        Mockito.when(delegate.getIcebergCatalogType()).thenReturn(IcebergCatalogType.GLUE_CATALOG);
+        ExecutorService workers = Executors.newSingleThreadExecutor();
+        try {
+            CachingIcebergCatalog catalog = new CachingIcebergCatalog(
+                    CATALOG_NAME, delegate, DEFAULT_CATALOG_PROPERTIES, workers);
+            BaseTable oldTable = mockRefreshCandidate(1L, "old.json");
+            BaseTable candidate = mockRefreshCandidate(2L, "new.json");
+            Cache<IcebergTableName, Table> tables = Deencapsulation.getField(catalog, "tables");
+            IcebergTableName key = new IcebergTableName("db", "tbl");
+            tables.put(key, oldTable);
+            Mockito.when(delegate.getCurrentMetadataLocation("db", "tbl")).thenReturn("new.json");
+            Mockito.when(delegate.getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl"))).thenReturn(candidate);
+
+            catalog.refreshTable("db", "tbl", new ConnectContext(), workers);
+
+            Mockito.verify(delegate).getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl"));
+            Assertions.assertSame(candidate, tables.getIfPresent(key));
+            Map<IcebergTableName, Long> loads = Deencapsulation.getField(catalog, "tableMetadataLoads");
+            Assertions.assertEquals(1L, loads.get(key));
+        } finally {
+            workers.shutdownNow();
+        }
+    }
+
+    // A Glue catalog that cannot tell the metadata location, or fails to, must not fail the refresh: the refresh
+    // loads the table and compares the locations as for any other catalog.
+    @Test
+    public void testGlueRefreshLoadsTableWhenLocationIsUnknown() {
+        for (boolean probeThrows : List.of(false, true)) {
+            IcebergCatalog delegate = Mockito.mock(IcebergCatalog.class);
+            Mockito.when(delegate.getIcebergCatalogType()).thenReturn(IcebergCatalogType.GLUE_CATALOG);
+            if (probeThrows) {
+                Mockito.when(delegate.getCurrentMetadataLocation("db", "tbl"))
+                        .thenThrow(new RuntimeException("Glue unavailable"));
+            } else {
+                Mockito.when(delegate.getCurrentMetadataLocation("db", "tbl")).thenReturn(null);
+            }
+            ExecutorService workers = Executors.newSingleThreadExecutor();
+            try {
+                CachingIcebergCatalog catalog = new CachingIcebergCatalog(
+                        CATALOG_NAME, delegate, DEFAULT_CATALOG_PROPERTIES, workers);
+                BaseTable oldTable = mockRefreshCandidate(1L, "old.json");
+                BaseTable unchanged = mockRefreshCandidate(1L, "old.json");
+                Cache<IcebergTableName, Table> tables = Deencapsulation.getField(catalog, "tables");
+                IcebergTableName key = new IcebergTableName("db", "tbl");
+                tables.put(key, oldTable);
+                Mockito.when(delegate.getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl")))
+                        .thenReturn(unchanged);
+
+                catalog.refreshTable("db", "tbl", new ConnectContext(), workers);
+
+                Mockito.verify(delegate).getCurrentMetadataLocation("db", "tbl");
+                Mockito.verify(delegate).getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl"));
+                Assertions.assertSame(oldTable, tables.getIfPresent(key));
+                Map<IcebergTableName, Long> loads = Deencapsulation.getField(catalog, "tableMetadataLoads");
+                Assertions.assertEquals(1L, loads.get(key));
+            } finally {
+                workers.shutdownNow();
+            }
+        }
+    }
+
+    // A REST table carries vended credentials that a load renews, so a REST refresh loads the table even when
+    // the catalog could tell that the metadata location is the same.
+    @Test
+    public void testNonGlueRefreshDoesNotAskForLocation() {
+        IcebergCatalog delegate = Mockito.mock(IcebergCatalog.class);
+        Mockito.when(delegate.getIcebergCatalogType()).thenReturn(IcebergCatalogType.REST_CATALOG);
+        ExecutorService workers = Executors.newSingleThreadExecutor();
+        try {
+            CachingIcebergCatalog catalog = new CachingIcebergCatalog(
+                    CATALOG_NAME, delegate, DEFAULT_CATALOG_PROPERTIES, workers);
+            BaseTable oldTable = mockRefreshCandidate(1L, "old.json");
+            BaseTable reloaded = mockRefreshCandidate(1L, "old.json");
+            Cache<IcebergTableName, Table> tables = Deencapsulation.getField(catalog, "tables");
+            IcebergTableName key = new IcebergTableName("db", "tbl");
+            tables.put(key, oldTable);
+            Mockito.when(delegate.getCurrentMetadataLocation("db", "tbl")).thenReturn("old.json");
+            Mockito.when(delegate.getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl"))).thenReturn(reloaded);
+
+            catalog.refreshTable("db", "tbl", new ConnectContext(), workers);
+
+            Mockito.verify(delegate, Mockito.never()).getCurrentMetadataLocation(Mockito.any(), Mockito.any());
+            Mockito.verify(delegate).getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl"));
+            Assertions.assertSame(reloaded, tables.getIfPresent(key));
+        } finally {
+            workers.shutdownNow();
+        }
+    }
+
     // The footers of the files of the snapshot cached before a refresh are warm, so the footer warmup of the
     // refresh must be told that snapshot, whether the refresh moves to a new snapshot, keeps the snapshot with
     // new metadata, or finds a table that had none.

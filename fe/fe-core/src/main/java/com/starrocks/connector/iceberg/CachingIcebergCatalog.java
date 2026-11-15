@@ -577,6 +577,16 @@ public class CachingIcebergCatalog implements IcebergCatalog {
                 }
                 return;
             }
+            // Glue stores the metadata location of a table, so one Glue request tells whether the cached table is
+            // current, and the table is loaded only when it is not.
+            if (getIcebergCatalogType() == IcebergCatalogType.GLUE_CATALOG) {
+                String catalogLocation = catalogMetadataLocation(dbName, tableName);
+                if (catalogLocation != null && catalogLocation.equals(metadataLocation(currentTable))) {
+                    keepUnchangedTable(icebergTableName, currentTable, dbName, tableName, executorService, active);
+                    tableMetadataLoads.merge(icebergTableName, 1L, Long::sum);
+                    return;
+                }
+            }
             BaseTable updateTable = (BaseTable) delegate.getTable(ctx, dbName, tableName);
             if (updateTable == null) {
                 invalidateCache(icebergTableName);
@@ -620,19 +630,43 @@ public class CachingIcebergCatalog implements IcebergCatalog {
                 // Other catalogs retain the reload path, needed for REST vended credential renewal.
                 BaseTable retainedTable = getIcebergCatalogType() == IcebergCatalogType.GLUE_CATALOG
                         ? currentTable : updateTable;
-                if (active) {
-                    warmCurrentSnapshot(retainedTable, dbName, tableName, executorService);
-                }
-                // Caffeine weighs an entry only when it is written. Putting the same table again makes it weigh the
-                // table once more, so the manifest lists that reads loaded into its snapshots since the last put
-                // count in the cache budget from now on.
-                tables.put(icebergTableName, retainedTable);
-                updateDiscoverySchemaIfPresent(icebergTableName, retainedTable);
-                invalidateOldPartitionSnapshots(dbName, tableName, retainedTable.currentSnapshot());
-                tableLatestRefreshTime.put(icebergTableName, System.currentTimeMillis());
+                keepUnchangedTable(icebergTableName, retainedTable, dbName, tableName, executorService, active);
             }
             tableMetadataLoads.merge(icebergTableName, 1L, Long::sum);
         }
+    }
+
+    private void keepUnchangedTable(IcebergTableName icebergTableName, BaseTable retainedTable, String dbName,
+                                    String tableName, ExecutorService executorService, boolean active) {
+        if (active) {
+            warmCurrentSnapshot(retainedTable, dbName, tableName, executorService);
+        }
+        // Caffeine weighs an entry only when it is written. Putting the same table again makes it weigh the
+        // table once more, so the manifest lists that reads loaded into its snapshots since the last put
+        // count in the cache budget from now on.
+        tables.put(icebergTableName, retainedTable);
+        updateDiscoverySchemaIfPresent(icebergTableName, retainedTable);
+        invalidateOldPartitionSnapshots(dbName, tableName, retainedTable.currentSnapshot());
+        tableLatestRefreshTime.put(icebergTableName, System.currentTimeMillis());
+    }
+
+    // A failure to get the location must not fail the refresh, so on any failure the refresh loads the table.
+    // We expect such a failure to repeat on every refresh while it lasts, so the log has one line without the
+    // stack trace.
+    private String catalogMetadataLocation(String dbName, String tableName) {
+        try {
+            return delegate.getCurrentMetadataLocation(dbName, tableName);
+        } catch (Exception e) {
+            LOG.warn("Failed to get the metadata location of iceberg table {}.{} of catalog {} from the catalog, " +
+                    "load the table instead: {}", dbName, tableName, catalogName, e.toString());
+            return null;
+        }
+    }
+
+    private static String metadataLocation(BaseTable table) {
+        TableOperations ops = table.operations();
+        TableMetadata metadata = ops == null ? null : ops.current();
+        return metadata == null ? null : metadata.metadataFileLocation();
     }
 
     // The footer warmup is a CACHE SELECT that takes the table from the cache like a query does, so it

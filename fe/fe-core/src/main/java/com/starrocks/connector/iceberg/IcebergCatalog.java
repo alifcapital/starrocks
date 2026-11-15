@@ -149,6 +149,14 @@ public interface IcebergCatalog extends MemoryTrackable {
 
     Table getTable(ConnectContext context, String dbName, String tableName) throws StarRocksConnectorException;
 
+    // We expect most refreshes of a cached table to find its metadata unchanged, and loading the table reads and
+    // parses its metadata file. So a catalog that stores the location of that file returns it here, without
+    // reading the file, and the refresh compares it with the cached table first. Null means the catalog cannot
+    // tell the location without loading the table.
+    default String getCurrentMetadataLocation(String dbName, String tableName) {
+        return null;
+    }
+
     default boolean tableExists(ConnectContext context, String dbName, String tableName) throws StarRocksConnectorException {
         try {
             getTable(context, dbName, tableName);

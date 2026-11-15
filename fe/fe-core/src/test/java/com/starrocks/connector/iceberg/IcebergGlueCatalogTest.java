@@ -19,18 +19,30 @@ import com.google.common.collect.ImmutableList;
 import com.starrocks.common.ExceptionChecker;
 import com.starrocks.connector.exception.StarRocksConnectorException;
 import com.starrocks.connector.iceberg.glue.IcebergGlueCatalog;
+import com.starrocks.connector.share.iceberg.IcebergAwsClientFactory;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.utframe.UtFrameUtils;
 import mockit.Expectations;
 import mockit.Mocked;
 import mockit.Verifications;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.iceberg.BaseMetastoreTableOperations;
+import org.apache.iceberg.aws.AwsClientFactories;
+import org.apache.iceberg.aws.AwsClientFactory;
+import org.apache.iceberg.aws.AwsProperties;
 import org.apache.iceberg.aws.glue.GlueCatalog;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
+import software.amazon.awssdk.services.glue.GlueClient;
+import software.amazon.awssdk.services.glue.model.EntityNotFoundException;
+import software.amazon.awssdk.services.glue.model.GetTableRequest;
+import software.amazon.awssdk.services.glue.model.GetTableResponse;
 
 import java.io.IOException;
 import java.util.Arrays;
@@ -122,6 +134,60 @@ public class IcebergGlueCatalogTest {
         ExceptionChecker.expectThrowsWithMsg(StarRocksConnectorException.class,
                 "Failed to access database testdb",
                 () -> icebergGlueCatalog.dropDB(connectContext, "testdb"));
+    }
+
+    private static GetTableResponse glueTableResponse(String tableType, String metadataLocation) {
+        Map<String, String> parameters = new HashMap<>();
+        if (tableType != null) {
+            parameters.put(BaseMetastoreTableOperations.TABLE_TYPE_PROP, tableType);
+        }
+        parameters.put(BaseMetastoreTableOperations.METADATA_LOCATION_PROP, metadataLocation);
+        return GetTableResponse.builder()
+                .table(software.amazon.awssdk.services.glue.model.Table.builder().parameters(parameters).build())
+                .build();
+    }
+
+    // The metadata location comes from one Glue GetTable with the catalog id, database and table of the wrapped
+    // GlueCatalog, and only an Iceberg table that Glue has gives a location. The Glue client is built once.
+    @Test
+    public void testGetCurrentMetadataLocation(@Mocked GlueCatalog glueCatalog) {
+        GlueClient glueClient = Mockito.mock(GlueClient.class);
+        AwsClientFactory clientFactory = Mockito.mock(AwsClientFactory.class);
+        Mockito.when(clientFactory.glue()).thenReturn(glueClient);
+        Mockito.when(glueClient.getTable(Mockito.any(GetTableRequest.class))).thenReturn(
+                glueTableResponse("ICEBERG", "s3://bucket/db/tbl/metadata/00002.metadata.json"),
+                glueTableResponse("HIVE", "s3://bucket/db/tbl/metadata/00002.metadata.json"),
+                glueTableResponse(null, "s3://bucket/db/tbl/metadata/00002.metadata.json"))
+                .thenThrow(EntityNotFoundException.builder().message("missing").build());
+        Map<String, String> properties = new HashMap<>();
+        properties.put(AwsProperties.GLUE_CATALOG_ID, "123456789012");
+        try (MockedStatic<AwsClientFactories> factories = Mockito.mockStatic(AwsClientFactories.class)) {
+            factories.when(() -> AwsClientFactories.from(Mockito.anyMap())).thenReturn(clientFactory);
+            IcebergGlueCatalog catalog = new IcebergGlueCatalog("glue_native_catalog", new Configuration(), properties);
+
+            Assertions.assertEquals("s3://bucket/db/tbl/metadata/00002.metadata.json",
+                    catalog.getCurrentMetadataLocation("db", "tbl"));
+            Assertions.assertNull(catalog.getCurrentMetadataLocation("db", "tbl"));
+            Assertions.assertNull(catalog.getCurrentMetadataLocation("db", "tbl"));
+            Assertions.assertNull(catalog.getCurrentMetadataLocation("db", "tbl"));
+
+            ArgumentCaptor<GetTableRequest> requests = ArgumentCaptor.forClass(GetTableRequest.class);
+            Mockito.verify(glueClient, Mockito.times(4)).getTable(requests.capture());
+            GetTableRequest request = requests.getAllValues().get(0);
+            Assertions.assertEquals("123456789012", request.catalogId());
+            Assertions.assertEquals("db", request.databaseName());
+            Assertions.assertEquals("tbl", request.name());
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<Map<String, String>> clientProperties = ArgumentCaptor.forClass(Map.class);
+            factories.verify(() -> AwsClientFactories.from(clientProperties.capture()), Mockito.times(1));
+            Assertions.assertEquals(IcebergAwsClientFactory.class.getName(),
+                    clientProperties.getValue().get(AwsProperties.CLIENT_FACTORY));
+            Assertions.assertEquals("123456789012", clientProperties.getValue().get(AwsProperties.GLUE_CATALOG_ID));
+
+            catalog.shutdown();
+            Mockito.verify(glueClient).close();
+            Assertions.assertThrows(IllegalStateException.class, () -> catalog.getCurrentMetadataLocation("db", "tbl"));
+        }
     }
 
     // The connector shuts the catalog down when the catalog is dropped or replaced and when a checkpoint discards
