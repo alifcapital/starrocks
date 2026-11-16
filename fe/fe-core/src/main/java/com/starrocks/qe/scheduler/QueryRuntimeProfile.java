@@ -15,6 +15,7 @@
 package com.starrocks.qe.scheduler;
 
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
@@ -86,6 +87,12 @@ public class QueryRuntimeProfile {
 
     public static final String LOAD_CHANNEL_PROFILE_NAME = "LoadChannel";
 
+    private static final Set<String> INSTANCE_INFO_STRINGS_NOT_MERGED = ImmutableSet.of("Address", "InstanceId");
+    // Values of the whole query on one backend, which every instance on that backend reports. buildQueryProfile
+    // takes them per backend, so the merge of the instances leaves them out.
+    private static final Set<String> QUERY_LEVEL_INSTANCE_COUNTERS = ImmutableSet.of(
+            "QueryCumulativeCpuTime", "QueryPeakMemoryUsage", "QueryExecutionWallTime", "QuerySpillBytes");
+
     private final JobSpec jobSpec;
 
     private final ConnectContext connectContext;
@@ -114,6 +121,11 @@ public class QueryRuntimeProfile {
     private Supplier<RuntimeProfile> topProfileSupplier;
     private ExecPlan execPlan;
     private final AtomicLong lastRuntimeProfileUpdateTime = new AtomicLong(System.currentTimeMillis());
+    // Counts the publications of the running profile; a profile built at one count is served until the next one.
+    private final AtomicLong runningProfileVersion = new AtomicLong();
+    // The running profile published to ProfileManager, created by the first publish.
+    private ProfileManager.RunningProfile runningProfile;
+    private volatile boolean runningProfileNeedsMerge;
     // whether this profile is belong to short-circuit query
     private final boolean isShortCircuit;
 
@@ -315,18 +327,9 @@ public class QueryRuntimeProfile {
             profileAlreadyReported = true;
         }
 
-        // Update runtime profile when query is still in process.
-        //
-        // We need to export profile to ProfileManager before update this profile, because:
-        // Each fragment instance will report its state based on their on own timer, and basically, these
-        // timers are consistent. So we can assume that all the instances will report profile in a very short
-        // time range, if we choose to export the profile to profile manager after update this instance's profile,
-        // the whole profile may include the information from the previous report, except for the current instance,
-        // which leads to inconsistency.
-        //
-        // So the profile update strategy looks like this: During a short time interval, each instance will report
-        // its execState information. However, when receiving the information reported by the first instance of the
-        // current batch, the previous reported state will be synchronized to the profile manager.
+        // Publish the running profile once per report interval, on the first report of a batch: the instances
+        // report on their own timers, which are close, so their reports come in batches. The execution profile is
+        // built from the live profiles when someone reads it, at most once per interval.
         long now = System.currentTimeMillis();
         long lastTime = lastRuntimeProfileUpdateTime.get();
         Supplier<RuntimeProfile> topProfileSupplier = this.topProfileSupplier;
@@ -340,21 +343,49 @@ public class QueryRuntimeProfile {
                 // Interval * 0.95 * 1000 to allow a certain range of deviation
                 now - lastTime > (connectContext.getSessionVariable().getRuntimeProfileReportInterval() * 950L) &&
                 lastRuntimeProfileUpdateTime.compareAndSet(lastTime, now)) {
-            RuntimeProfile profile = topProfileSupplier.get();
-            profile.addChild(buildQueryProfile(connectContext.needMergeProfile() || jobSpec.isBrokerLoad()));
+            // The top-level profile reads the session of the query, so it is built here, on the report of the
+            // query, and not by a reader of the profile. The execution profile is built when one reads it.
+            RuntimeProfile topProfile = topProfileSupplier.get();
             ProfilingExecPlan profilingPlan = plan.getProfilingPlan();
-            saveRunningProfile(profilingPlan, profile);
-            LOG.debug("update profile, profilingPlan: {}, profile: {}", profilingPlan, profile);
+            saveRunningProfile(profilingPlan, topProfile, connectContext.needMergeProfile() || jobSpec.isBrokerLoad());
+            LOG.debug("update profile, profilingPlan: {}", profilingPlan);
         }
     }
 
-    public synchronized void saveRunningProfile(ProfilingExecPlan profilingPlan, RuntimeProfile profile) {
+    // topProfile is the top-level profile of the query without the execution profile; needMerge tells how the
+    // execution profile is built.
+    synchronized void saveRunningProfile(ProfilingExecPlan profilingPlan, RuntimeProfile topProfile,
+                                         boolean needMerge) {
         // topProfileSupplier may be null when the query is finished.
         // And here to make sure that runtime profile won't overwrite the final profile
         if (topProfileSupplier == null) {
             return;
         }
-        ProfileManager.getInstance().pushProfile(profilingPlan, profile);
+        runningProfileNeedsMerge = needMerge;
+        runningProfileVersion.incrementAndGet();
+        if (runningProfile == null) {
+            runningProfile = new ProfileManager.RunningProfile(new ProfileManager.RunningProfileSource() {
+                @Override
+                public long version() {
+                    return runningProfileVersion.get();
+                }
+
+                @Override
+                public RuntimeProfile buildExecutionProfile() {
+                    return buildQueryProfile(runningProfileNeedsMerge);
+                }
+            });
+        }
+        ProfileManager.getInstance().pushRunningProfile(profilingPlan, topProfile, runningProfile);
+    }
+
+    // Called when the query is unregistered. A DML publishes its final profile after that, and some queries
+    // publish none, so the running profile is built and dropped from the live profiles later, unless a final
+    // profile replaces it first.
+    public synchronized void finishRunningProfile() {
+        if (runningProfile != null) {
+            runningProfile.scheduleDetach();
+        }
     }
 
     public void finalizeProfile() {
@@ -448,32 +479,30 @@ public class QueryRuntimeProfile {
                     missingInstanceIds.add(instanceProfile.getInfoString("InstanceId"));
                 }
 
-                // Get query level peak memory usage, cpu cost, wall time
+                // Get query level peak memory usage, cpu cost, wall time. They are left out of the merge below
+                // and not removed from the instance profile: it is the live profile, and a later build of the
+                // profile, the final one among them, reads them again.
                 String beAddress = instanceProfile.getInfoString("Address");
-                Counter toBeRemove = instanceProfile.getCounter("QueryCumulativeCpuTime");
-                if (toBeRemove != null) {
-                    cpuTimeEachBE.merge(beAddress, toBeRemove.getValue(), Long::max);
+                Counter queryLevelCounter = instanceProfile.getCounter("QueryCumulativeCpuTime");
+                if (queryLevelCounter != null) {
+                    cpuTimeEachBE.merge(beAddress, queryLevelCounter.getValue(), Long::max);
                 }
-                instanceProfile.removeCounter("QueryCumulativeCpuTime");
 
-                toBeRemove = instanceProfile.getCounter("QueryPeakMemoryUsage");
-                if (toBeRemove != null) {
-                    maxQueryPeakMemoryUsage = Math.max(maxQueryPeakMemoryUsage, toBeRemove.getValue());
-                    peakMemoryEachBE.merge(beAddress, toBeRemove.getValue(), Long::max);
+                queryLevelCounter = instanceProfile.getCounter("QueryPeakMemoryUsage");
+                if (queryLevelCounter != null) {
+                    maxQueryPeakMemoryUsage = Math.max(maxQueryPeakMemoryUsage, queryLevelCounter.getValue());
+                    peakMemoryEachBE.merge(beAddress, queryLevelCounter.getValue(), Long::max);
                 }
-                instanceProfile.removeCounter("QueryPeakMemoryUsage");
 
-                toBeRemove = instanceProfile.getCounter("QueryExecutionWallTime");
-                if (toBeRemove != null) {
-                    maxQueryExecutionWallTime = Math.max(maxQueryExecutionWallTime, toBeRemove.getValue());
+                queryLevelCounter = instanceProfile.getCounter("QueryExecutionWallTime");
+                if (queryLevelCounter != null) {
+                    maxQueryExecutionWallTime = Math.max(maxQueryExecutionWallTime, queryLevelCounter.getValue());
                 }
-                instanceProfile.removeCounter("QueryExecutionWallTime");
 
-                toBeRemove = instanceProfile.getCounter("QuerySpillBytes");
-                if (toBeRemove != null) {
-                    spillBytesEachBE.merge(beAddress, toBeRemove.getValue(), Long::max);
+                queryLevelCounter = instanceProfile.getCounter("QuerySpillBytes");
+                if (queryLevelCounter != null) {
+                    spillBytesEachBE.merge(beAddress, queryLevelCounter.getValue(), Long::max);
                 }
-                instanceProfile.removeCounter("QuerySpillBytes");
             }
             newFragmentProfile.addInfoString("BackendAddresses", String.join(",", backendAddresses));
             newFragmentProfile.addInfoString("InstanceIds", String.join(",", instanceIds));
@@ -487,8 +516,8 @@ public class QueryRuntimeProfile {
             Counter counter = newFragmentProfile.addCounter("InstanceNum", TUnit.UNIT, null);
             counter.setValue(instanceProfiles.size());
 
-            RuntimeProfile mergedInstanceProfile =
-                    RuntimeProfile.mergeIsomorphicProfiles(instanceProfiles, Sets.newHashSet("Address", "InstanceId"));
+            RuntimeProfile mergedInstanceProfile = RuntimeProfile.mergeIsomorphicProfiles(instanceProfiles,
+                    INSTANCE_INFO_STRINGS_NOT_MERGED, QUERY_LEVEL_INSTANCE_COUNTERS, true);
             Preconditions.checkState(mergedInstanceProfile != null);
 
             newFragmentProfile.copyAllInfoStringsFrom(mergedInstanceProfile, null);
@@ -659,7 +688,8 @@ public class QueryRuntimeProfile {
         mergedProfile.addInfoString("BackendAddresses", hosts);
 
         RuntimeProfile mergedChannelProfile =
-                RuntimeProfile.mergeIsomorphicProfiles(channelProfiles, Collections.emptySet());
+                RuntimeProfile.mergeIsomorphicProfiles(channelProfiles, Collections.emptySet(), Collections.emptySet(),
+                        true);
         if (mergedChannelProfile == null) {
             if (LOG.isDebugEnabled()) {
                 StringBuilder builder = new StringBuilder();

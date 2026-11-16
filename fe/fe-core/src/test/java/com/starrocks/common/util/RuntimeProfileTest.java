@@ -421,8 +421,8 @@ public class RuntimeProfileTest {
         Assertions.assertNotNull(mergedMaxOfTime1);
         Assertions.assertEquals(100000000L, mergedMinOfTime1.getValue());
         Assertions.assertEquals(5000000000L, mergedMaxOfTime1.getValue());
-        Assertions.assertEquals(100000000L, mergedTime1.getMinValue().get().longValue());
-        Assertions.assertEquals(5000000000L, mergedTime1.getMaxValue().get().longValue());
+        Assertions.assertEquals(100000000L, mergedTime1.getMinValue());
+        Assertions.assertEquals(5000000000L, mergedTime1.getMaxValue());
 
         Counter mergedCount1 = mergedProfile.getCounter("count1");
         Assertions.assertEquals(21, mergedCount1.getValue());
@@ -432,8 +432,8 @@ public class RuntimeProfileTest {
         Assertions.assertNotNull(mergedMaxOfCount1);
         Assertions.assertEquals(1, mergedMinOfCount1.getValue());
         Assertions.assertEquals(6, mergedMaxOfCount1.getValue());
-        Assertions.assertEquals(1, mergedCount1.getMinValue().get().longValue());
-        Assertions.assertEquals(6, mergedCount1.getMaxValue().get().longValue());
+        Assertions.assertEquals(1, mergedCount1.getMinValue());
+        Assertions.assertEquals(6, mergedCount1.getMaxValue());
     }
 
     @Test
@@ -854,8 +854,8 @@ public class RuntimeProfileTest {
             RuntimeProfile profile1 = new RuntimeProfile("profile");
             profile1.update(tree);
             Counter c1 = profile1.getCounter("counter1");
-            Assertions.assertEquals(1L, c1.getMinValue().get().longValue());
-            Assertions.assertEquals(11L, c1.getMaxValue().get().longValue());
+            Assertions.assertEquals(1L, c1.getMinValue());
+            Assertions.assertEquals(11L, c1.getMaxValue());
         }
     }
 
@@ -885,19 +885,19 @@ public class RuntimeProfileTest {
 
         baseProfile.update(updateTree);
         Assertions.assertEquals(6, baseC1.getValue());
-        Assertions.assertFalse(baseC1.getMinValue().isPresent());
-        Assertions.assertFalse(baseC1.getMaxValue().isPresent());
+        Assertions.assertFalse(baseC1.hasMinValue());
+        Assertions.assertFalse(baseC1.hasMaxValue());
         Assertions.assertEquals(8, baseC2.getValue());
-        Assertions.assertTrue(baseC2.getMinValue().isPresent());
-        Assertions.assertEquals(4, baseC2.getMinValue().get().longValue());
-        Assertions.assertTrue(baseC2.getMaxValue().isPresent());
-        Assertions.assertEquals(12, baseC2.getMaxValue().get().longValue());
+        Assertions.assertTrue(baseC2.hasMinValue());
+        Assertions.assertEquals(4, baseC2.getMinValue());
+        Assertions.assertTrue(baseC2.hasMaxValue());
+        Assertions.assertEquals(12, baseC2.getMaxValue());
         Counter baseC3 = baseProfile.getCounter("counter3");
         Assertions.assertNotNull(baseC3);
         Assertions.assertEquals(10, baseC3.getValue());
-        Assertions.assertTrue(baseC3.getMinValue().isPresent());
-        Assertions.assertEquals(5, baseC3.getMinValue().get().longValue());
-        Assertions.assertTrue(baseC3.getMaxValue().isPresent());
-        Assertions.assertEquals(15, baseC3.getMaxValue().get().longValue());
+        Assertions.assertTrue(baseC3.hasMinValue());
+        Assertions.assertEquals(5, baseC3.getMinValue());
+        Assertions.assertTrue(baseC3.hasMaxValue());
+        Assertions.assertEquals(15, baseC3.getMaxValue());
     }
 }

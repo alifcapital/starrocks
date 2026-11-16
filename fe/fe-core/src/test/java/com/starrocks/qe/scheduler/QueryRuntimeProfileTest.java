@@ -16,6 +16,7 @@ package com.starrocks.qe.scheduler;
 
 import com.starrocks.common.util.Counter;
 import com.starrocks.common.util.ProfileKeyDictionary;
+import com.starrocks.common.util.ProfileManager;
 import com.starrocks.common.util.RuntimeProfile;
 import com.starrocks.common.util.UUIDUtil;
 import com.starrocks.qe.ConnectContext;
@@ -33,6 +34,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.Optional;
+import java.util.function.Supplier;
 
 public class QueryRuntimeProfileTest {
 
@@ -204,6 +206,74 @@ public class QueryRuntimeProfileTest {
         Assertions.assertEquals(3000,
                 queryProfile.getCounter(ProfileKeyDictionary.QUERY_PEAK_MEMORY_USAGE_PER_NODE).getValue());
         Assertions.assertEquals(3500, queryProfile.getCounter(ProfileKeyDictionary.QUERY_SUM_MEMORY_USAGE).getValue());
+    }
+
+    // The build reads the query-level counters of the instances and leaves them in the live instance profiles, so
+    // every build, the final one among them, sees them.
+    @Test
+    public void testBuildQueryProfileKeepsTheInstanceProfiles() {
+        QueryRuntimeProfile profile = new QueryRuntimeProfile(connectContext, jobSpec, false);
+        profile.initFragmentProfiles(1);
+        RuntimeProfile fragment0 = profile.getFragmentProfiles().get(0);
+        RuntimeProfile instance1 = withQueryCounters(buildInstanceProfile("inst-1", "10.0.0.1:9060"), 10, 100, 1000);
+        RuntimeProfile instance2 = withQueryCounters(buildInstanceProfile("inst-2", "10.0.0.2:9060"), 20, 200, 2000);
+        fragment0.addChild(instance1);
+        fragment0.addChild(instance2);
+
+        for (int i = 0; i < 2; i++) {
+            RuntimeProfile queryProfile = profile.buildQueryProfile(true);
+            Assertions.assertEquals(30,
+                    queryProfile.getCounter(ProfileKeyDictionary.QUERY_CUMULATIVE_CPU_TIME).getValue());
+            Assertions.assertEquals(300, queryProfile.getCounter(ProfileKeyDictionary.QUERY_SPILL_BYTES).getValue());
+            Assertions.assertEquals(3000,
+                    queryProfile.getCounter(ProfileKeyDictionary.QUERY_SUM_MEMORY_USAGE).getValue());
+            RuntimeProfile mergedFragment = queryProfile.getChild("Fragment 0");
+            Assertions.assertNull(mergedFragment.getCounter(ProfileKeyDictionary.QUERY_CUMULATIVE_CPU_TIME));
+            Assertions.assertNull(mergedFragment.getCounter("QueryPeakMemoryUsage"));
+        }
+        Assertions.assertEquals(10, instance1.getCounter(ProfileKeyDictionary.QUERY_CUMULATIVE_CPU_TIME).getValue());
+        Assertions.assertEquals(2000, instance2.getCounter("QueryPeakMemoryUsage").getValue());
+    }
+
+    // The running profile is published without the execution profile and built when it is read, merged as the
+    // final profile is. The end of the query does not build it at once: a DML publishes its final profile later.
+    @Test
+    public void testRunningProfileIsBuiltWhenRead() {
+        QueryRuntimeProfile profile = new QueryRuntimeProfile(connectContext, jobSpec, false);
+        profile.initFragmentProfiles(1);
+        RuntimeProfile instance = withQueryCounters(buildInstanceProfile("inst-1", "10.0.0.1:9060"), 10, 100, 1000);
+        profile.getFragmentProfiles().get(0).addChild(instance);
+        String queryId = "running-query-" + UUIDUtil.genUUID();
+        Supplier<RuntimeProfile> topProfile = () -> {
+            RuntimeProfile top = new RuntimeProfile("Query");
+            RuntimeProfile summary = new RuntimeProfile("Summary");
+            summary.addInfoString(ProfileManager.QUERY_ID, queryId);
+            summary.addInfoString(ProfileManager.QUERY_TYPE, "Query");
+            top.addChild(summary);
+            return top;
+        };
+        profile.setTopProfileSupplier(topProfile);
+        profile.saveRunningProfile(null, topProfile.get(), true);
+
+        String running = ProfileManager.getInstance().getProfile(queryId);
+        Assertions.assertTrue(running.contains("Fragment 0:"), running);
+        // the query-level value merged per backend, as in the final profile
+        Assertions.assertTrue(running.contains("   - QueryCumulativeCpuTime: 10ns"), running);
+        Assertions.assertTrue(running.contains("InstanceNum: 1"), running);
+
+        // the same interval serves the same profile; the next one is built from the live profiles
+        instance.getCounter(ProfileKeyDictionary.QUERY_CUMULATIVE_CPU_TIME).setValue(99);
+        Assertions.assertEquals(running, ProfileManager.getInstance().getProfile(queryId));
+        profile.saveRunningProfile(null, topProfile.get(), true);
+        Assertions.assertTrue(ProfileManager.getInstance().getProfile(queryId)
+                .contains("   - QueryCumulativeCpuTime: 99ns"));
+
+        profile.finishRunningProfile();
+        instance.getCounter(ProfileKeyDictionary.QUERY_CUMULATIVE_CPU_TIME).setValue(7);
+        profile.saveRunningProfile(null, topProfile.get(), true);
+        Assertions.assertTrue(ProfileManager.getInstance().getProfile(queryId)
+                .contains("   - QueryCumulativeCpuTime: 7ns"));
+        ProfileManager.getInstance().removeProfile(queryId);
     }
 
     private static RuntimeProfile withQueryCounters(RuntimeProfile instance, long cpuTime, long spillBytes,

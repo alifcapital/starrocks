@@ -41,8 +41,11 @@ import com.google.common.collect.Maps;
 import com.google.gson.Gson;
 import com.starrocks.common.Config;
 import com.starrocks.common.FeConstants;
+import com.starrocks.common.Pair;
+import com.starrocks.common.ThreadPoolManager;
 import com.starrocks.memory.MemoryTrackable;
 import com.starrocks.memory.estimate.Estimator;
+import com.starrocks.memory.estimate.IgnoreMemoryTrack;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.QueryDetail;
 import org.apache.logging.log4j.LogManager;
@@ -59,6 +62,8 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock.ReadLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock.WriteLock;
@@ -106,9 +111,125 @@ public class ProfileManager implements MemoryTrackable {
                     START_TIME, END_TIME, TOTAL_TIME, QUERY_STATE, WAREHOUSE_CNGROUP, SQL_DIALECT));
 
     /**
+     * The source of the profile of a running query: the live profiles of its instances, which the backends update
+     * with every report.
+     */
+    public interface RunningProfileSource {
+        // Grows once per runtime_profile_report_interval of the query, when the query publishes its running profile.
+        // A profile built at one version is served until the next one.
+        long version();
+
+        // The execution part of the profile, built from the live profiles at the time of the call.
+        RuntimeProfile buildExecutionProfile();
+    }
+
+    /**
+     * The profile of a running query. Merging and formatting the whole profile of a long query on every report
+     * interval is the largest allocation of the frontend, while it is read only when someone asks for it, a user
+     * or SHOW PROC '/current_queries' for the progress. So it is built when it is read: the header of the last
+     * report interval with the execution profile merged from the live profiles at that moment. It is built at most
+     * once per report interval, as before, and kept compressed until the next one.
+     *
+     * At the end of a query the live profiles must not stay in the cache. A final profile replaces this one; when
+     * none comes, {@link #scheduleDetach} builds it once and drops the live profiles.
+     */
+    public static final class RunningProfile {
+        // The final profile of a DML is published after the query is unregistered and its instances have
+        // reported, within the profile timeout of the session. We wait longer than that before we build a profile
+        // that no final profile has replaced.
+        private static final long DETACH_DELAY_SECONDS = 60;
+        private static final ScheduledThreadPoolExecutor DETACHER =
+                ThreadPoolManager.newDaemonScheduledThreadPool(1, "running-profile-detacher", false);
+
+        // The live profiles of the query, owned by its coordinator.
+        @IgnoreMemoryTrack
+        private RunningProfileSource source;
+        // The top-level profile (Summary first) built for the last report interval; never changed after it is set.
+        // A report sets it without the lock, so a report does not wait for a reader that builds the profile.
+        @IgnoreMemoryTrack
+        private volatile RuntimeProfile topProfile;
+        private long builtVersion = -1;
+        private byte[] builtContent;
+        // A final profile has replaced this one in ProfileManager, or it was removed from it.
+        private volatile boolean replaced;
+
+        public RunningProfile(RunningProfileSource source) {
+            this.source = source;
+        }
+
+        void setTopProfile(RuntimeProfile topProfile) {
+            this.topProfile = topProfile;
+        }
+
+        // The whole profile parsed from its text. Readers such as ExplainAnalyzer change the profile they get, so
+        // they get a copy and never the live profiles.
+        RuntimeProfile parseProfile() {
+            String profileString = profileString();
+            return profileString == null ? null : RuntimeProfileParser.parseFrom(profileString);
+        }
+
+        // The formatted profile; null only when the profile could not be built or compressed.
+        synchronized String profileString() {
+            if (source == null) {
+                return decompress(builtContent);
+            }
+            long version = source.version();
+            if (builtContent != null && version == builtVersion) {
+                return decompress(builtContent);
+            }
+            String profileString;
+            try {
+                profileString = generateProfileString(buildFromSource());
+            } catch (RuntimeException e) {
+                // A failed build leaves the last profile to the readers.
+                LOG.warn("Failed to build the running profile", e);
+                return decompress(builtContent);
+            }
+            builtContent = compress(profileString);
+            builtVersion = version;
+            return profileString;
+        }
+
+        public void scheduleDetach() {
+            DETACHER.schedule(this::detach, DETACH_DELAY_SECONDS, TimeUnit.SECONDS);
+        }
+
+        // Builds the profile once more if it is out of date and drops the live profiles. A profile that was
+        // replaced or removed is not built: nobody finds it in ProfileManager any more, and a reader that took it
+        // before still reads the live profiles.
+        synchronized void detach() {
+            if (source == null || replaced) {
+                return;
+            }
+            profileString();
+            source = null;
+            topProfile = null;
+        }
+
+        void markReplaced() {
+            replaced = true;
+        }
+
+        // The children of the top profile are shared with the previous builds, which only read them.
+        private RuntimeProfile buildFromSource() {
+            RuntimeProfile top = topProfile;
+            RuntimeProfile whole = new RuntimeProfile(top.getName());
+            whole.copyAllInfoStringsFrom(top, null);
+            whole.copyAllCountersFrom(top);
+            whole.getCounterTotalTime().setValue(top.getCounterTotalTime().getValue());
+            for (Pair<RuntimeProfile, Boolean> child : top.getChildList()) {
+                whole.addChild(child.first);
+            }
+            whole.addChild(source.buildExecutionProfile());
+            return whole;
+        }
+    }
+
+    /**
      * One cached profile. An element is built completely by {@link #createElement} and {@link #pushProfile}
-     * before it is published into the map, and is never modified afterwards. Readers rely on that: they take a
-     * snapshot of the map under the read lock and then read the elements without it.
+     * before it is published into the map, and its fields are never modified afterwards. Readers rely on that:
+     * they take a snapshot of the map under the read lock and then read the elements without it. The element of a
+     * running query holds a {@link RunningProfile}, which builds the content when it is read.
      */
     public static class ProfileElement {
         public Map<String, String> infoStrings = Maps.newHashMap();
@@ -116,6 +237,7 @@ public class ProfileManager implements MemoryTrackable {
         public long endTimeMs = -1;
         private byte[] profileContent;
         public ProfilingExecPlan plan;
+        private RunningProfile running;
 
         void setProfileContent(byte[] content) {
             this.profileContent = content;
@@ -126,16 +248,10 @@ public class ProfileManager implements MemoryTrackable {
          * for programmatic analysis (e.g. via {@code ExplainAnalyzer}).
          */
         public RuntimeProfile getRuntimeProfile() {
-            if (profileContent == null) {
-                return null;
+            if (running != null) {
+                return running.parseProfile();
             }
-            try {
-                return RuntimeProfileParser.parseFrom(
-                        CompressionUtils.gzipDecompressString(profileContent));
-            } catch (IOException e) {
-                LOG.warn("Failed to deserialize profile: {}", e.getMessage());
-                return null;
-            }
+            return parse(profileContent);
         }
 
         /**
@@ -143,15 +259,10 @@ public class ProfileManager implements MemoryTrackable {
          * {@link Config#profile_info_format}.
          */
         public String getProfileString() {
-            if (profileContent == null) {
-                return null;
+            if (running != null) {
+                return running.profileString();
             }
-            try {
-                return CompressionUtils.gzipDecompressString(profileContent);
-            } catch (IOException e) {
-                LOG.warn("Failed to deserialize profile: {}", e.getMessage());
-                return null;
-            }
+            return decompress(profileContent);
         }
 
         /** Formats {@code profile} per the current {@link Config#profile_info_format}. */
@@ -207,22 +318,49 @@ public class ProfileManager implements MemoryTrackable {
     }
 
     public ProfileElement createElement(RuntimeProfile summaryProfile, String profileString) {
+        ProfileElement element = createHeaderElement(summaryProfile);
+        element.profileContent = compress(profileString);
+        return element;
+    }
+
+    private static ProfileElement createHeaderElement(RuntimeProfile summaryProfile) {
         ProfileElement element = new ProfileElement();
         for (String header : PROFILE_HEADERS) {
             element.infoStrings.put(header, summaryProfile.getInfoString(header));
         }
         element.startTimeMs = parseTimeStringToEpochMs(summaryProfile.getInfoString(START_TIME));
         element.endTimeMs = parseTimeStringToEpochMs(summaryProfile.getInfoString(END_TIME));
-        try {
-            element.profileContent = CompressionUtils.gzipCompressString(profileString);
-        } catch (IOException e) {
-            LOG.warn("Compress profile string failed, length: {}, reason: {}",
-                    profileString.length(), e.getMessage());
-        }
         return element;
     }
 
-    private String generateProfileString(RuntimeProfile profile) {
+    private static byte[] compress(String profileString) {
+        try {
+            return CompressionUtils.gzipCompressString(profileString);
+        } catch (IOException e) {
+            LOG.warn("Compress profile string failed, length: {}, reason: {}",
+                    profileString.length(), e.getMessage());
+            return null;
+        }
+    }
+
+    private static String decompress(byte[] profileContent) {
+        if (profileContent == null) {
+            return null;
+        }
+        try {
+            return CompressionUtils.gzipDecompressString(profileContent);
+        } catch (IOException e) {
+            LOG.warn("Failed to deserialize profile: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    private static RuntimeProfile parse(byte[] profileContent) {
+        String profileString = decompress(profileContent);
+        return profileString == null ? null : RuntimeProfileParser.parseFrom(profileString);
+    }
+
+    private static String generateProfileString(RuntimeProfile profile) {
         if (profile == null) {
             return "";
         }
@@ -251,6 +389,31 @@ public class ProfileManager implements MemoryTrackable {
         String profileString = generateProfileString(profile);
         ProfileElement element = createElement(profile.getChildList().get(0).first, profileString);
         element.plan = plan;
+        publish(element, profileString);
+        return profileString;
+    }
+
+    /**
+     * Publishes the profile of a running query. topProfile is its top-level profile, Summary first, built for this
+     * report interval; the execution profile is built by running when the profile is read.
+     */
+    public void pushRunningProfile(ProfilingExecPlan plan, RuntimeProfile topProfile, RunningProfile running) {
+        running.setTopProfile(topProfile);
+        ProfileElement element = createHeaderElement(topProfile.getChildList().get(0).first);
+        element.plan = plan;
+        element.running = running;
+        // The load profile log records every published profile of a load, so it is built at once.
+        String profileString = isLoggedLoadProfile(element) ? running.profileString() : null;
+        publish(element, profileString);
+    }
+
+    private static boolean isLoggedLoadProfile(ProfileElement element) {
+        return Config.enable_print_load_profile_to_log && "Load".equals(element.infoStrings.get(QUERY_TYPE));
+    }
+
+    // profileString is the formatted profile of the element, used by the load profile log; null when the element
+    // is not logged.
+    private void publish(ProfileElement element, String profileString) {
         String queryId = element.infoStrings.get(ProfileManager.QUERY_ID);
         // check when push in, which can ensure every element in the list has QUERY_ID column,
         // so there is no need to check when remove element from list.
@@ -260,25 +423,26 @@ public class ProfileManager implements MemoryTrackable {
         }
 
         String removedQueryId = null;
+        ProfileElement replaced;
         writeLock.lock();
         try {
-            profileMap.put(queryId, element);
+            replaced = profileMap.put(queryId, element);
             if (profileMap.size() > Config.profile_info_reserved_num) {
                 removedQueryId = profileMap.keySet().iterator().next();
-                profileMap.remove(removedQueryId);
+                markRemoved(profileMap.remove(removedQueryId));
             }
         } finally {
             writeLock.unlock();
         }
 
+        if (replaced != null && replaced.running != element.running) {
+            markRemoved(replaced);
+        }
         LOG.debug("push profile for query: {}, remove profile for query: {}", queryId, removedQueryId);
 
-        if (Config.enable_print_load_profile_to_log
-                && "Load".equals(element.infoStrings.get(QUERY_TYPE))) {
+        if (isLoggedLoadProfile(element)) {
             PROFILE_LOG.info(GSON.toJson(buildLoadQueryDetail(element, profileString)));
         }
-
-        return profileString;
     }
 
     // Build a QueryDetail for a load profile so it is logged in the same single-line JSON shape as
@@ -369,7 +533,7 @@ public class ProfileManager implements MemoryTrackable {
     public void removeProfile(String queryId) {
         writeLock.lock();
         try {
-            profileMap.remove(queryId);
+            markRemoved(profileMap.remove(queryId));
         } finally {
             writeLock.unlock();
         }
@@ -378,29 +542,24 @@ public class ProfileManager implements MemoryTrackable {
     public void clearProfiles() {
         writeLock.lock();
         try {
+            profileMap.values().forEach(ProfileManager::markRemoved);
             profileMap.clear();
         } finally {
             writeLock.unlock();
         }
     }
 
-    public String getProfile(String queryId) {
-        ProfileElement element = new ProfileElement();
-        readLock.lock();
-        try {
-            element = profileMap.get(queryId);
-            if (element == null) {
-                return null;
-            }
-
-            return CompressionUtils.gzipDecompressString(element.profileContent);
-        } catch (IOException e) {
-            LOG.warn("Decompress profile content failed, length: {}, reason: {}",
-                    element.profileContent.length, e.getMessage());
-            return null;
-        } finally {
-            readLock.unlock();
+    // A running profile that is no longer in the map is not built at the end of its query.
+    private static void markRemoved(ProfileElement element) {
+        if (element != null && element.running != null) {
+            element.running.markReplaced();
         }
+    }
+
+    public String getProfile(String queryId) {
+        // The profile of a running query is built here, so it is built outside the lock of the map.
+        ProfileElement element = getProfileElement(queryId);
+        return element == null ? null : element.getProfileString();
     }
 
     public ProfileElement getProfileElement(String queryId) {

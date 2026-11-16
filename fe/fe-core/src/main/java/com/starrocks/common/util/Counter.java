@@ -42,15 +42,18 @@ import com.starrocks.thrift.TUnit;
 
 import java.util.List;
 import java.util.Objects;
-import java.util.Optional;
 
 // Counter means indicators field. The counter's name is key, the counter itself is value.  
 public class Counter {
     private volatile int type;
     private volatile TCounterStrategy strategy;
     private volatile long value;
-    private volatile Optional<Long> minValue = Optional.empty();
-    private volatile Optional<Long> maxValue = Optional.empty();
+    // A running query reports every counter with its min and max again and again, so they are kept as primitives
+    // and a report does not allocate. The value is written before the flag and read after it.
+    private volatile long minValue;
+    private volatile boolean hasMinValue;
+    private volatile long maxValue;
+    private volatile boolean hasMaxValue;
 
     public long getValue() {
         return value;
@@ -60,28 +63,40 @@ public class Counter {
         value = newValue;
     }
 
-    public Optional<Long> getMinValue() {
+    public boolean hasMinValue() {
+        return hasMinValue;
+    }
+
+    // Meaningful only when hasMinValue() is true.
+    public long getMinValue() {
         return minValue;
     }
 
-    public Optional<Long> getMaxValue() {
+    public boolean hasMaxValue() {
+        return hasMaxValue;
+    }
+
+    // Meaningful only when hasMaxValue() is true.
+    public long getMaxValue() {
         return maxValue;
     }
 
     public void setMinValue(long minValue) {
-        this.minValue = Optional.of(minValue);
+        this.minValue = minValue;
+        this.hasMinValue = true;
     }
 
     public void clearMinValue() {
-        this.minValue = Optional.empty();
+        this.hasMinValue = false;
     }
 
     public void setMaxValue(long maxValue) {
-        this.maxValue = Optional.of(maxValue);
+        this.maxValue = maxValue;
+        this.hasMaxValue = true;
     }
 
     public void clearMaxValue() {
-        this.maxValue = Optional.empty();
+        this.hasMaxValue = false;
     }
 
     public void update(long increment) {
@@ -165,21 +180,22 @@ public class Counter {
         long maxValue = Long.MIN_VALUE;
 
         for (Counter counter : counters) {
-            if (counter.getValue() < minValue) {
-                minValue = counter.getValue();
+            long value = counter.getValue();
+            if (value < minValue) {
+                minValue = value;
             }
-            if (counter.getMinValue().isPresent() && counter.getMinValue().get() < minValue) {
-                minValue = counter.getMinValue().get();
-            }
-
-            if (counter.getValue() > maxValue) {
-                maxValue = counter.getValue();
-            }
-            if (counter.getMaxValue().isPresent() && counter.getMaxValue().get() > maxValue) {
-                maxValue = counter.getMaxValue().get();
+            if (counter.hasMinValue() && counter.getMinValue() < minValue) {
+                minValue = counter.getMinValue();
             }
 
-            mergedValue += counter.getValue();
+            if (value > maxValue) {
+                maxValue = value;
+            }
+            if (counter.hasMaxValue() && counter.getMaxValue() > maxValue) {
+                maxValue = counter.getMaxValue();
+            }
+
+            mergedValue += value;
         }
 
         if (counters.get(0).isAvg()) {

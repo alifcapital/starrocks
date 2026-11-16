@@ -262,8 +262,6 @@ public class LoadLoadingTask extends LoadTask {
                 curCoordinator.collectProfileSync();
                 profile.addChild(curCoordinator.buildQueryProfile(true));
 
-                StringBuilder builder = new StringBuilder();
-                profile.prettyPrint(builder, "");
                 String profileContent = ProfileManager.getInstance().pushProfile(
                         loadPlanner.getExecPlan().getProfilingPlan(), profile);
                 if (context.getQueryDetail() != null) {

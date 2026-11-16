@@ -14,6 +14,7 @@
 package com.starrocks.common.util;
 
 import com.starrocks.common.Config;
+import com.starrocks.thrift.TUnit;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -150,5 +151,138 @@ public class ProfileManagerTest {
 
         manager.clearProfiles();
     }
-}
 
+    // A fake running query: every call of buildExecutionProfile builds the execution profile once more.
+    private static class CountingSource implements ProfileManager.RunningProfileSource {
+        long version = 1;
+        int builds = 0;
+        long rows = 10;
+
+        @Override
+        public long version() {
+            return version;
+        }
+
+        @Override
+        public RuntimeProfile buildExecutionProfile() {
+            builds++;
+            RuntimeProfile execution = new RuntimeProfile("Execution");
+            execution.addCounter("Rows", TUnit.UNIT, null).setValue(rows);
+            return execution;
+        }
+    }
+
+    // The profile of a running query is built when it is read, and once per report version.
+    @Test
+    public void testRunningProfileIsBuiltWhenRead() {
+        ProfileManager manager = ProfileManager.getInstance();
+        manager.clearProfiles();
+        CountingSource source = new CountingSource();
+        ProfileManager.RunningProfile running = new ProfileManager.RunningProfile(source);
+
+        manager.pushRunningProfile(null, buildRuntimeProfile("running-1", "Query"), running);
+        manager.pushRunningProfile(null, buildRuntimeProfile("running-1", "Query"), running);
+        assertEquals(0, source.builds, "publishing does not build the profile");
+        assertTrue(manager.hasProfile("running-1"));
+        assertEquals("running-1", manager.getProfileElement("running-1").infoStrings.get(ProfileManager.QUERY_ID));
+
+        String first = manager.getProfile("running-1");
+        assertTrue(first.contains("Summary:"), first);
+        assertTrue(first.contains("Rows: 10"), first);
+        assertEquals(first, manager.getProfile("running-1"));
+        assertEquals(1, source.builds, "the same report version is built once");
+
+        source.version = 2;
+        source.rows = 20;
+        assertTrue(manager.getProfile("running-1").contains("Rows: 20"));
+        assertEquals(2, source.builds);
+
+        // the profile object is a copy parsed from the text of the same version
+        RuntimeProfile profile = manager.getProfileElement("running-1").getRuntimeProfile();
+        assertEquals(20, profile.getChild("Execution").getCounter("Rows").getValue());
+        assertEquals(2, source.builds);
+        profile.getChild("Execution").getCounter("Rows").setValue(0);
+        assertTrue(manager.getProfile("running-1").contains("Rows: 20"));
+        manager.clearProfiles();
+    }
+
+    // At the end of a query without a final profile the running profile is built once more and keeps no source.
+    @Test
+    public void testDetachedRunningProfileKeepsTheLastProfile() {
+        ProfileManager manager = ProfileManager.getInstance();
+        manager.clearProfiles();
+        CountingSource source = new CountingSource();
+        ProfileManager.RunningProfile running = new ProfileManager.RunningProfile(source);
+        manager.pushRunningProfile(null, buildRuntimeProfile("running-2", "Query"), running);
+
+        source.rows = 30;
+        running.detach();
+        assertEquals(1, source.builds);
+        source.version = 5;
+        source.rows = 40;
+        String profileString = manager.getProfile("running-2");
+        assertTrue(profileString.contains("Rows: 30"), profileString);
+        assertEquals(30, manager.getProfileElement("running-2").getRuntimeProfile()
+                .getChild("Execution").getCounter("Rows").getValue());
+        assertEquals(1, source.builds, "a detached profile does not read the source");
+
+        // a final profile replaces the running one
+        manager.pushProfile(null, buildRuntimeProfile("running-2", "Query"));
+        assertFalse(manager.getProfile("running-2").contains("Rows:"));
+        manager.clearProfiles();
+    }
+
+    // A final profile replaces the running one, and the end of the query does not build the replaced one.
+    @Test
+    public void testReplacedRunningProfileIsNotBuiltAtTheEnd() {
+        ProfileManager manager = ProfileManager.getInstance();
+        manager.clearProfiles();
+        CountingSource source = new CountingSource();
+        ProfileManager.RunningProfile running = new ProfileManager.RunningProfile(source);
+        manager.pushRunningProfile(null, buildRuntimeProfile("running-3", "Load"), running);
+        manager.pushProfile(null, buildRuntimeProfile("running-3", "Load"));
+        running.detach();
+        assertEquals(0, source.builds);
+        assertFalse(manager.getProfile("running-3").contains("Rows:"));
+        manager.clearProfiles();
+    }
+
+    // A running profile removed from the cache, by a retry of the query or by eviction, is not built at the end.
+    @Test
+    public void testRemovedRunningProfileIsNotBuiltAtTheEnd() {
+        ProfileManager manager = ProfileManager.getInstance();
+        manager.clearProfiles();
+        CountingSource source = new CountingSource();
+        ProfileManager.RunningProfile running = new ProfileManager.RunningProfile(source);
+        manager.pushRunningProfile(null, buildRuntimeProfile("running-4", "Query"), running);
+        manager.removeProfile("running-4");
+        running.detach();
+        assertEquals(0, source.builds);
+        assertNull(manager.getProfile("running-4"));
+    }
+
+    // A failure to build leaves the last built profile to the readers.
+    @Test
+    public void testFailedBuildServesTheLastProfile() {
+        ProfileManager manager = ProfileManager.getInstance();
+        manager.clearProfiles();
+        CountingSource source = new CountingSource() {
+            @Override
+            public RuntimeProfile buildExecutionProfile() {
+                if (version > 1) {
+                    throw new IllegalStateException("broken profile");
+                }
+                return super.buildExecutionProfile();
+            }
+        };
+        ProfileManager.RunningProfile running = new ProfileManager.RunningProfile(source);
+        manager.pushRunningProfile(null, buildRuntimeProfile("running-5", "Query"), running);
+        String built = manager.getProfile("running-5");
+        assertTrue(built.contains("Rows: 10"), built);
+
+        source.version = 2;
+        source.rows = 11;
+        assertEquals(built, manager.getProfile("running-5"));
+        manager.clearProfiles();
+    }
+}
