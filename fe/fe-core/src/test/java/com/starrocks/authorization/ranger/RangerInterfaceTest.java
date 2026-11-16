@@ -15,7 +15,9 @@ package com.starrocks.authorization.ranger;
 
 import com.google.common.collect.Lists;
 import com.starrocks.authorization.AccessControlProvider;
+import com.starrocks.authorization.AccessController;
 import com.starrocks.authorization.AccessDeniedException;
+import com.starrocks.authorization.ColumnAccessKind;
 import com.starrocks.authorization.ColumnPrivilege;
 import com.starrocks.authorization.NativeAccessController;
 import com.starrocks.authorization.PrivilegeType;
@@ -69,6 +71,7 @@ import org.mockito.Mockito;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -374,6 +377,41 @@ public class RangerInterfaceTest {
         Assertions.assertEquals("refresh", controller.convertToAccessType(PrivilegeType.REFRESH));
         Assertions.assertEquals("drop", controller.convertToAccessType(PrivilegeType.DROP));
         Assertions.assertEquals("alter", controller.convertToAccessType(PrivilegeType.ALTER));
+    }
+
+    // The audit of a column check shows how the query used the column, with the StarRocks and the Hive Ranger
+    // services alike.
+    @Test
+    public void testColumnCheckPutsUsageIntoRequestData() throws Exception {
+        final List<String> requestData = new ArrayList<>();
+        new MockUp<RangerBasePlugin>() {
+            @Mock
+            RangerAccessResult isAccessAllowed(RangerAccessRequest request) {
+                requestData.add(request.getRequestData());
+                RangerAccessResult result = new RangerAccessResult(1, "starrocks",
+                        new RangerServiceDef(), new RangerAccessRequestImpl());
+                result.setIsAllowed(true);
+                return result;
+            }
+        };
+        ConnectContext ctx = new ConnectContext();
+        ctx.setCurrentUserIdentity(new UserIdentity("test_user", "%"));
+        ctx.setQueryId(UUIDUtil.genUUID());
+        ctx.setThreadLocalInfo();
+        String queryId = ctx.getQueryId().toString();
+        TableName tableName = new TableName("catalog", "db", "t");
+        EnumSet<ColumnAccessKind> usage = EnumSet.of(ColumnAccessKind.FILTER, ColumnAccessKind.PROJECTION);
+
+        for (AccessController controller : List.of(
+                new RangerStarRocksAccessController(), new RangerHiveAccessController("hive-service"))) {
+            requestData.clear();
+            controller.checkColumnAction(ctx, tableName, "c", PrivilegeType.SELECT, usage);
+            controller.checkColumnAction(ctx, tableName, "d", PrivilegeType.SELECT);
+            Assertions.assertEquals(List.of(
+                    "{\"queryId\":\"" + queryId + "\",\"usage\":[\"PROJECTION\",\"FILTER\"]}",
+                    "{\"queryId\":\"" + queryId + "\",\"usage\":[]}"), requestData,
+                    controller.getClass().getSimpleName());
+        }
     }
 
     @Test

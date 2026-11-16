@@ -16,6 +16,7 @@ package com.starrocks.authorization.ranger.hive;
 
 import com.google.common.collect.Maps;
 import com.starrocks.authorization.AccessDeniedException;
+import com.starrocks.authorization.ColumnAccessKind;
 import com.starrocks.authorization.PrivilegeType;
 import com.starrocks.authorization.ranger.RangerAccessController;
 import com.starrocks.catalog.Column;
@@ -23,6 +24,7 @@ import com.starrocks.catalog.TableName;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.sql.ast.expression.Expr;
 
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -77,13 +79,21 @@ public class RangerHiveAccessController extends RangerAccessController {
     @Override
     public void checkColumnAction(ConnectContext context, TableName tableName,
                                   String column, PrivilegeType privilegeType) throws AccessDeniedException {
+        checkColumnAction(context, tableName, column, privilegeType, EnumSet.noneOf(ColumnAccessKind.class));
+    }
+
+    // The usage goes into the requestData of the Ranger request, so the audit of a Hive catalog shows how the
+    // query used the column, as it does for a StarRocks catalog.
+    @Override
+    public void checkColumnAction(ConnectContext context, TableName tableName,
+                                  String column, PrivilegeType privilegeType,
+                                  EnumSet<ColumnAccessKind> usage) throws AccessDeniedException {
         hasPermission(RangerHiveResource.builder()
                         .setDatabase(tableName.getDb())
                         .setTable(tableName.getTbl())
                         .setColumn(column)
                         .build(),
-                context,
-                privilegeType);
+                context, privilegeType, usage);
     }
 
     @Override

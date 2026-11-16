@@ -295,10 +295,8 @@ public class ColumnPrivilege {
      * Column refs are tracked through Project / Aggregate / Window / Set / CTE-consume nodes so
      * that aliases and combined expressions resolve back to the originating (TableName, column).
      *
-     * Scope: this classifier feeds {@link RangerStarRocksAccessController}. Catalogs served by a
-     * different Ranger plugin (e.g. RangerHiveAccessController) only override the legacy
-     * {@code checkColumnAction} and therefore see an empty {@code usage} set in their audit
-     * payload — that's intentional, Hive Ranger has its own audit pipeline.
+     * The usage goes into the requestData of the Ranger column check, for the audit; it does not
+     * change the answer of Ranger.
      */
     public static class ColumnAccessCollector extends OptExpressionVisitor<Void, Void> {
         // Aggregates whose result rows expose the RAW input column values to the user.
