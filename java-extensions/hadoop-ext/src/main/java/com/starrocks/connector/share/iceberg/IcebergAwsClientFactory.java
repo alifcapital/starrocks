@@ -108,6 +108,10 @@ public class IcebergAwsClientFactory implements AwsClientFactory {
     private String glueExternalId;
     private String glueRegion;
     private String glueEndpoint;
+    // The HTTP pool of the catalog, or null for an HTTP client of each S3 and STS client's own.
+    private SharedS3HttpClient.PoolKey httpPoolKey;
+    private String httpPoolCatalog;
+    private String httpPoolSettingError;
 
     @Override
     public void initialize(Map<String, String> properties) {
@@ -149,15 +153,31 @@ public class IcebergAwsClientFactory implements AwsClientFactory {
         if (glueCatalogId != null) {
             this.awsProperties.setGlueCatalogId(glueCatalogId);
         }
+        // The FE checks the pool settings when a catalog is created; a bad value can still come from a REST catalog
+        // server, which can override them for a table, and then the clients do not share a pool.
+        httpPoolCatalog = properties.get(SharedS3HttpClient.POOL_CATALOG);
+        try {
+            httpPoolKey = SharedS3HttpClient.poolKey(properties);
+            httpPoolSettingError = null;
+        } catch (IllegalArgumentException e) {
+            httpPoolKey = null;
+            httpPoolSettingError = e.getMessage();
+        }
+    }
+
+    private SharedS3HttpClient.Pool httpPool() {
+        return SharedS3HttpClient.poolForClient(httpPoolKey, httpPoolCatalog, httpPoolSettingError);
     }
 
     private StsAssumeRoleCredentialsProvider getAssumeRoleCredentialsProvider(AwsCredentialsProvider baseCredentials,
                                                                               String iamRoleArn, String externalId,
                                                                               String region, String endpoint) {
         // Build sts client
-        StsClientBuilder stsClientBuilder = StsClient.builder()
-                .credentialsProvider(baseCredentials)
-                .httpClient(SharedS3HttpClient.get());
+        StsClientBuilder stsClientBuilder = StsClient.builder().credentialsProvider(baseCredentials);
+        SharedS3HttpClient.Pool pool = httpPool();
+        if (pool != null) {
+            stsClientBuilder.httpClient(pool.httpClient());
+        }
         if (!region.isEmpty()) {
             stsClientBuilder.region(Region.of(region));
         }
@@ -187,11 +207,14 @@ public class IcebergAwsClientFactory implements AwsClientFactory {
         AwsCredentialsProvider baseAWSCredentialsProvider =
                 getBaseAWSCredentialsProvider(s3UseAWSSDKDefaultBehavior, s3UseInstanceProfile, s3UseWebIdentityProfile,
                         s3AccessKey, s3SecretKey, s3SessionToken);
-        // The S3 client keeps the credentials, region and endpoint of this catalog; the connections come from the
-        // pool of the process, so a new client does not open a connection and make a TLS handshake.
-        S3ClientBuilder s3ClientBuilder = S3Client.builder()
-                .httpClient(SharedS3HttpClient.get())
-                .overrideConfiguration(c -> c.addMetricPublisher(SharedS3HttpClient.metricPublisher()));
+        // The S3 client keeps the credentials, region and endpoint of this table; the connections come from the
+        // pool of the catalog, so a new client does not open a connection and make a TLS handshake.
+        S3ClientBuilder s3ClientBuilder = S3Client.builder();
+        SharedS3HttpClient.Pool pool = httpPool();
+        if (pool != null) {
+            s3ClientBuilder.httpClient(pool.httpClient())
+                    .overrideConfiguration(c -> c.addMetricPublisher(pool.metrics()));
+        }
 
         if (!s3IamRoleArn.isEmpty()) {
             s3ClientBuilder.credentialsProvider(getAssumeRoleCredentialsProvider(baseAWSCredentialsProvider,

@@ -17,6 +17,7 @@ package com.starrocks.connector.iceberg;
 import com.google.common.base.Strings;
 import com.starrocks.common.Config;
 import com.starrocks.connector.exception.StarRocksConnectorException;
+import com.starrocks.connector.share.iceberg.SharedS3HttpClient;
 import org.apache.iceberg.util.PropertyUtil;
 
 import java.util.Map;
@@ -100,10 +101,34 @@ public class IcebergCatalogProperties {
     }
 
     private void init() {
+        validateS3HttpPoolProperties();
         initCatalogType();
         initIcebergMetadataCache();
         initThreadPoolNum();
         initDistributedPlanProperties();
+    }
+
+    // The size of the S3 HTTP pool of the catalog and the life of its connections (SharedS3HttpClient). A REST
+    // catalog takes its properties also with the prefix of custom properties, in upper or lower case. The pool is
+    // named by the connector, so a user cannot name it.
+    private void validateS3HttpPoolProperties() {
+        properties.forEach((key, value) -> {
+            String name = key.toLowerCase();
+            if (name.startsWith(ICEBERG_CUSTOM_PROPERTIES_PREFIX)) {
+                name = name.substring(ICEBERG_CUSTOM_PROPERTIES_PREFIX.length());
+            }
+            try {
+                if (name.equals(SharedS3HttpClient.MAX_CONNECTIONS)) {
+                    SharedS3HttpClient.parseMaxConnections(value);
+                } else if (name.equals(SharedS3HttpClient.CONNECTION_TIME_TO_LIVE_MS)) {
+                    SharedS3HttpClient.parseConnectionTimeToLiveMs(value);
+                } else if (name.equals(SharedS3HttpClient.POOL_CATALOG) || name.equals(SharedS3HttpClient.POOL_ID)) {
+                    throw new IllegalArgumentException(key + " is set by StarRocks and cannot be a catalog property");
+                }
+            } catch (IllegalArgumentException e) {
+                throw new StarRocksConnectorException("%s", e.getMessage());
+            }
+        });
     }
 
     private void initCatalogType() {

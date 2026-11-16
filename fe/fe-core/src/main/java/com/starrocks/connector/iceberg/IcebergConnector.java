@@ -41,6 +41,7 @@ import org.apache.logging.log4j.Logger;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 
 import static com.starrocks.connector.iceberg.IcebergCatalogProperties.ICEBERG_CATALOG_TYPE;
@@ -52,6 +53,8 @@ public class IcebergConnector implements Connector {
     private volatile Map<String, String> properties;
     private final HdfsEnvironment hdfsEnvironment;
     private final String catalogName;
+    // Names the S3 HTTP pool of this connector together with the catalog name; see nativeCatalogProperties.
+    private final String s3HttpPoolId = UUID.randomUUID().toString();
     private IcebergCatalog icebergNativeCatalog;
     private ExecutorService icebergJobPlanningExecutor;
     private ExecutorService backgroundJobPlanningExecutor;
@@ -93,8 +96,7 @@ public class IcebergConnector implements Connector {
     private IcebergCatalog buildIcebergNativeCatalog() {
         IcebergCatalogType nativeCatalogType = icebergCatalogProperties.getCatalogType();
         Configuration conf = hdfsEnvironment.getConfiguration();
-        // The pool is built when the first S3 client of any catalog is, so its size is set before a catalog exists.
-        SharedS3HttpClient.configure(Config.iceberg_s3_http_max_connections, Config.iceberg_s3_http_connection_ttl_seconds);
+        Map<String, String> properties = nativeCatalogProperties();
 
         if (Config.enable_iceberg_custom_worker_thread) {
             LOG.info("Default iceberg worker thread number changed " + Config.iceberg_worker_num_threads);
@@ -118,6 +120,25 @@ public class IcebergConnector implements Connector {
                 throw new StarRocksConnectorException("Property %s is missing or not supported now.",
                         ICEBERG_CATALOG_TYPE);
         }
+    }
+
+    // The S3 and STS clients of the catalog share one HTTP pool (SharedS3HttpClient). The native catalog gives these
+    // properties to the FileIO of every table, and they go with the FileIO to a CN, so the clients there share a
+    // pool of the catalog too. The pool is named by the catalog and an id that is not sent to a REST catalog server,
+    // so a server that overrides the properties of a table cannot name the pool of another catalog. The size of the
+    // pool and the life of a connection are the catalog properties of the same names, or the FE config.
+    private Map<String, String> nativeCatalogProperties() {
+        Map<String, String> nativeProperties = new HashMap<>(properties);
+        nativeProperties.put(SharedS3HttpClient.POOL_CATALOG, catalogName);
+        nativeProperties.put(SharedS3HttpClient.POOL_ID, s3HttpPoolId);
+        int maxConnections = Math.min(Math.max(1, Config.iceberg_s3_http_max_connections),
+                SharedS3HttpClient.MAX_CONNECTIONS_LIMIT);
+        long timeToLiveSeconds = Math.min(Math.max(0, Config.iceberg_s3_http_connection_ttl_seconds),
+                Long.MAX_VALUE / 1000);
+        nativeProperties.putIfAbsent(SharedS3HttpClient.MAX_CONNECTIONS, String.valueOf(maxConnections));
+        nativeProperties.putIfAbsent(SharedS3HttpClient.CONNECTION_TIME_TO_LIVE_MS,
+                String.valueOf(timeToLiveSeconds * 1000));
+        return nativeProperties;
     }
 
     @Override

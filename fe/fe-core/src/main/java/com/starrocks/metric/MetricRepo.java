@@ -495,38 +495,77 @@ public final class MetricRepo {
         }
     }
 
-    // The state of the HTTP pool that the S3 clients of all Iceberg catalogs share. A request that finds every
-    // connection taken waits, so the waits and the timeouts tell when the pool is too small.
-    private static void addIcebergS3PoolMetrics() {
-        SharedS3HttpClient.PoolMetrics pool = SharedS3HttpClient.metrics();
-        addLongGauge("iceberg_s3_http_pool_max", MetricUnit.NOUNIT, "connections of the shared S3 pool", () -> (long) pool.max());
-        addLongGauge("iceberg_s3_http_pool_leased", MetricUnit.NOUNIT, "connections in use", () -> (long) pool.leased());
-        addLongGauge("iceberg_s3_http_pool_available", MetricUnit.NOUNIT, "idle open connections",
+    // The state of the HTTP pool that the S3 clients of an Iceberg catalog share, labeled by the catalog. A request
+    // that finds every connection taken waits, so the waits and the timeouts tell when the pool is too small. Called
+    // for a catalog when it builds its first pool, which can be on any thread; the metrics of a dropped catalog stay.
+    private static void addIcebergS3PoolMetrics(SharedS3HttpClient.PoolMetrics pool) {
+        MetricLabel catalog = new MetricLabel("catalog", pool.catalog());
+        addGauge("iceberg_s3_http_pool_max", MetricUnit.CONNECTIONS, "connections the pool may open", catalog,
+                () -> (long) pool.max());
+        addGauge("iceberg_s3_http_pool_leased", MetricUnit.CONNECTIONS, "connections in use", catalog,
+                () -> (long) pool.leased());
+        addGauge("iceberg_s3_http_pool_available", MetricUnit.CONNECTIONS, "idle open connections", catalog,
                 () -> (long) pool.available());
-        addLongGauge("iceberg_s3_http_pool_pending", MetricUnit.NOUNIT, "requests waiting for a connection",
+        addGauge("iceberg_s3_http_pool_pending", MetricUnit.REQUESTS, "requests waiting for a connection", catalog,
                 () -> (long) pool.pending());
-        addLongGauge("iceberg_s3_http_acquires_total", MetricUnit.REQUESTS, "connections taken from the pool",
+        addCounter("iceberg_s3_http_acquires_total", MetricUnit.REQUESTS, "connections taken from the pool", catalog,
                 pool::acquires);
-        addLongGauge("iceberg_s3_http_acquire_wait_us_total", MetricUnit.MICROSECONDS,
-                "time requests waited for a connection", pool::acquireWaitMicros);
-        addLongGauge("iceberg_s3_http_slow_acquires_total", MetricUnit.REQUESTS,
-                "requests that waited 100 ms or longer for a connection", pool::slowAcquires);
-        addLongGauge("iceberg_s3_http_acquire_timeouts_total", MetricUnit.REQUESTS,
-                "requests that timed out waiting for a connection", pool::acquireTimeouts);
-        addLongGauge("iceberg_s3_api_calls_total", MetricUnit.REQUESTS, "S3 API calls", pool::apiCalls);
-        addLongGauge("iceberg_s3_api_call_failures_total", MetricUnit.REQUESTS, "failed S3 API calls",
+        addCounter("iceberg_s3_http_acquire_wait_us_total", MetricUnit.MICROSECONDS,
+                "time requests waited for a connection", catalog, pool::acquireWaitMicros);
+        addCounter("iceberg_s3_http_slow_acquires_total", MetricUnit.REQUESTS,
+                "requests that waited 100 ms or longer for a connection", catalog, pool::slowAcquires);
+        addCounter("iceberg_s3_http_acquire_timeouts_total", MetricUnit.REQUESTS,
+                "requests that timed out waiting for a connection, retries included", catalog, pool::acquireTimeouts);
+        addCounter("iceberg_s3_api_calls_total", MetricUnit.REQUESTS, "S3 API calls", catalog, pool::apiCalls);
+        addCounter("iceberg_s3_api_call_failures_total", MetricUnit.REQUESTS, "failed S3 API calls", catalog,
                 pool::failedApiCalls);
-        addLongGauge("iceberg_s3_api_retries_total", MetricUnit.REQUESTS, "retries of S3 API calls", pool::retries);
+        addCounter("iceberg_s3_api_retries_total", MetricUnit.REQUESTS, "retries of S3 API calls", catalog,
+                pool::retries);
     }
 
-    private static void addLongGauge(String name, MetricUnit unit, String description,
-                                     LongSupplier value) {
-        STARROCKS_METRIC_REGISTER.addMetric(new GaugeMetric<Long>(name, unit, description) {
+    // The S3 and STS clients of Iceberg catalogs that got an HTTP client of their own, by the reason, and the pools
+    // the process built, which it bounds.
+    private static void addIcebergS3UnpooledClientMetrics() {
+        for (SharedS3HttpClient.UnpooledReason reason : SharedS3HttpClient.UnpooledReason.values()) {
+            addCounter("iceberg_s3_http_clients_without_pool_total", MetricUnit.NOUNIT,
+                    "S3 and STS clients with an HTTP client of their own", new MetricLabel("reason", reason.label()),
+                    () -> SharedS3HttpClient.unpooledClients(reason));
+        }
+        addGauge("iceberg_s3_http_pools", MetricUnit.NOUNIT, "S3 HTTP pools the process built", null,
+                () -> (long) SharedS3HttpClient.poolCount());
+    }
+
+    // The label is null for none.
+    private static void addGauge(String name, MetricUnit unit, String description, MetricLabel label,
+                                 LongSupplier value) {
+        GaugeMetric<Long> metric = new GaugeMetric<Long>(name, unit, description) {
             @Override
             public Long getValue() {
                 return value.getAsLong();
             }
-        });
+        };
+        if (label != null) {
+            metric.addLabel(label);
+        }
+        STARROCKS_METRIC_REGISTER.addMetric(metric);
+    }
+
+    // A counter whose value another component keeps.
+    private static void addCounter(String name, MetricUnit unit, String description, MetricLabel label,
+                                   LongSupplier value) {
+        CounterMetric<Long> metric = new CounterMetric<Long>(name, unit, description) {
+            @Override
+            public void increase(Long delta) {
+                throw new UnsupportedOperationException(name + " is read from its source");
+            }
+
+            @Override
+            public Long getValue() {
+                return value.getAsLong();
+            }
+        };
+        metric.addLabel(label);
+        STARROCKS_METRIC_REGISTER.addMetric(metric);
     }
 
     public static synchronized void init() {
@@ -653,7 +692,8 @@ public final class MetricRepo {
         // capacity
         generateBackendsTabletMetrics();
 
-        addIcebergS3PoolMetrics();
+        SharedS3HttpClient.setMetricsListener(MetricRepo::addIcebergS3PoolMetrics);
+        addIcebergS3UnpooledClientMetrics();
 
         // journal id
         GaugeMetric<Long> maxJournalId = (GaugeMetric<Long>) new GaugeMetric<Long>(
