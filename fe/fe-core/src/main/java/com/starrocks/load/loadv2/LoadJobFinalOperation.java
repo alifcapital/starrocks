@@ -54,6 +54,10 @@ public class LoadJobFinalOperation extends TxnCommitAttachment implements Writab
         super(TransactionState.LoadJobSourceType.BATCH_LOAD_JOB);
         this.id = id;
         this.loadingStatus = loadingStatus;
+        // A job makes this operation when its load is over, to persist it; only totals are read from then on.
+        if (loadingStatus != null) {
+            loadingStatus.getLoadStatistic().collapseFragments();
+        }
         this.progress = progress;
         this.loadStartTimestamp = loadStartTimestamp;
         this.finishTimestamp = finishTimestamp;

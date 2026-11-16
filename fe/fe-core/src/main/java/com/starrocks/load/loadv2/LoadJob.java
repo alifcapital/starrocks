@@ -853,6 +853,10 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback
 
     public void unprotectReadEndOperation(LoadJobFinalOperation loadJobFinalOperation, boolean isReplay) {
         loadingStatus = loadJobFinalOperation.getLoadingStatus();
+        // An operation in the journal can hold a cell per fragment: a frontend that wrote it may not collapse them.
+        if (loadingStatus != null) {
+            loadingStatus.getLoadStatistic().collapseFragments();
+        }
         progress = loadJobFinalOperation.getProgress();
         loadStartTimestamp = loadJobFinalOperation.getLoadStartTimestamp();
         finishTimestamp = loadJobFinalOperation.getFinishTimestamp();

@@ -53,6 +53,7 @@ import com.starrocks.thrift.TUniqueId;
 import org.apache.commons.collections.map.HashedMap;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
@@ -368,6 +369,41 @@ public class EtlStatus implements Writable {
             // need to get a copy of relatedBackendIds, so that when we modify the "relatedBackendIds" in
             // allBackendIds, the list in unfinishedBackendIds will not be changed.
             unfinishedBackendIds.put(loadStr, Lists.newArrayList(relatedBackendIds));
+        }
+
+        // The column of the one cell that a load keeps when the counters of its fragments are summed.
+        static final String ALL_FRAGMENTS = "all";
+
+        // Sums the counters of the fragments of each load into one cell of that load. We call it when the job is
+        // over: from then on only the totals and the number of loads are read, and the job keeps its counters in
+        // memory, in the journal and in the image for days. With a cell per fragment instance and counter, the
+        // journal entry of a load and every replay of it grow with the number of fragment instances. The tables
+        // keep their format, so any frontend reads them as a load of one fragment. A report of a fragment that
+        // comes later finds no cell of its own and is ignored.
+        public synchronized void collapseFragments() {
+            collapseFragments(counterTbl);
+            collapseFragments(sinkBytesCounterTbl);
+            collapseFragments(sourceRowsCounterTbl);
+            collapseFragments(sourceBytesCounterTbl);
+            collapseFragments(filteredRowsCounterTbl);
+            collapseFragments(unselectedRowsCounterTbl);
+            collapseFragments(sourceScanBytesCounterTbl);
+        }
+
+        private static void collapseFragments(Table<String, String, Long> counters) {
+            for (String load : new ArrayList<>(counters.rowKeySet())) {
+                Map<String, Long> fragments = counters.row(load);
+                if (fragments.size() == 1 && fragments.containsKey(ALL_FRAGMENTS)) {
+                    continue;
+                }
+                long sum = 0;
+                for (long value : fragments.values()) {
+                    sum += value;
+                }
+                // The row keeps its place: it does not become empty on the way.
+                counters.put(load, ALL_FRAGMENTS, sum);
+                fragments.keySet().removeIf(fragment -> !ALL_FRAGMENTS.equals(fragment));
+            }
         }
 
         public synchronized void removeLoad(TUniqueId loadId) {
