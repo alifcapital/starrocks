@@ -3263,6 +3263,23 @@ public class Config extends ConfigBase {
     public static int iceberg_worker_num_threads = Runtime.getRuntime().availableProcessors();
 
     /**
+     * The S3 and STS clients of all Iceberg catalogs share one HTTP connection pool. A request waits for a free
+     * connection when all of them are taken, so the pool must hold the requests that the planning, refresh and
+     * statistics threads make at the same time. Read when the pool is built on first use: a change takes effect
+     * after a restart.
+     */
+    @ConfField
+    public static int iceberg_s3_http_max_connections = 256;
+
+    /**
+     * Life of a connection of the shared S3 pool in seconds, 0 for no limit. A busy pool keeps its connections and
+     * the S3 addresses they were opened to; a limit makes it open new connections, which resolve the endpoint again.
+     * Read when the pool is built on first use.
+     */
+    @ConfField
+    public static long iceberg_s3_http_connection_ttl_seconds = 0;
+
+    /**
      * size of iceberg table refresh pool
      */
     @ConfField(mutable = true)

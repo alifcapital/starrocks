@@ -155,7 +155,9 @@ public class IcebergAwsClientFactory implements AwsClientFactory {
                                                                               String iamRoleArn, String externalId,
                                                                               String region, String endpoint) {
         // Build sts client
-        StsClientBuilder stsClientBuilder = StsClient.builder().credentialsProvider(baseCredentials);
+        StsClientBuilder stsClientBuilder = StsClient.builder()
+                .credentialsProvider(baseCredentials)
+                .httpClient(SharedS3HttpClient.get());
         if (!region.isEmpty()) {
             stsClientBuilder.region(Region.of(region));
         }
@@ -185,7 +187,11 @@ public class IcebergAwsClientFactory implements AwsClientFactory {
         AwsCredentialsProvider baseAWSCredentialsProvider =
                 getBaseAWSCredentialsProvider(s3UseAWSSDKDefaultBehavior, s3UseInstanceProfile, s3UseWebIdentityProfile,
                         s3AccessKey, s3SecretKey, s3SessionToken);
-        S3ClientBuilder s3ClientBuilder = S3Client.builder();
+        // The S3 client keeps the credentials, region and endpoint of this catalog; the connections come from the
+        // pool of the process, so a new client does not open a connection and make a TLS handshake.
+        S3ClientBuilder s3ClientBuilder = S3Client.builder()
+                .httpClient(SharedS3HttpClient.get())
+                .overrideConfiguration(c -> c.addMetricPublisher(SharedS3HttpClient.metricPublisher()));
 
         if (!s3IamRoleArn.isEmpty()) {
             s3ClientBuilder.credentialsProvider(getAssumeRoleCredentialsProvider(baseAWSCredentialsProvider,

@@ -29,6 +29,7 @@ import com.starrocks.connector.iceberg.jdbc.IcebergJdbcCatalog;
 import com.starrocks.connector.iceberg.procedure.IcebergProcedureRegistry;
 import com.starrocks.connector.iceberg.procedure.RegisterTableProcedure;
 import com.starrocks.connector.iceberg.rest.IcebergRESTCatalog;
+import com.starrocks.connector.share.iceberg.SharedS3HttpClient;
 import com.starrocks.credential.CloudConfiguration;
 import com.starrocks.credential.CloudConfigurationFactory;
 import com.starrocks.server.GlobalStateMgr;
@@ -92,6 +93,8 @@ public class IcebergConnector implements Connector {
     private IcebergCatalog buildIcebergNativeCatalog() {
         IcebergCatalogType nativeCatalogType = icebergCatalogProperties.getCatalogType();
         Configuration conf = hdfsEnvironment.getConfiguration();
+        // The pool is built when the first S3 client of any catalog is, so its size is set before a catalog exists.
+        SharedS3HttpClient.configure(Config.iceberg_s3_http_max_connections, Config.iceberg_s3_http_connection_ttl_seconds);
 
         if (Config.enable_iceberg_custom_worker_thread) {
             LOG.info("Default iceberg worker thread number changed " + Config.iceberg_worker_num_threads);
