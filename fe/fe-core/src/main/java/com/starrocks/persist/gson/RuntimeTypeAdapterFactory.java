@@ -38,9 +38,7 @@ package com.starrocks.persist.gson;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonElement;
-import com.google.gson.JsonObject;
 import com.google.gson.JsonParseException;
-import com.google.gson.JsonPrimitive;
 import com.google.gson.TypeAdapter;
 import com.google.gson.TypeAdapterFactory;
 import com.google.gson.internal.Streams;
@@ -49,6 +47,7 @@ import com.google.gson.stream.JsonReader;
 import com.google.gson.stream.JsonWriter;
 
 import java.io.IOException;
+import java.io.Writer;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -396,26 +395,189 @@ public final class RuntimeTypeAdapterFactory<T> implements TypeAdapterFactory {
                     throw new JsonParseException(
                             "cannot serialize " + srcType.getName() + "; did you forget to register a subtype?");
                 }
-                JsonObject jsonObject = delegate.toJsonTree(value).getAsJsonObject();
-
-                if (maintainType) {
-                    Streams.write(jsonObject, out);
-                    return;
-                }
-
-                JsonObject clone = new JsonObject();
-
-                if (jsonObject.has(typeFieldName)) {
-                    throw new JsonParseException("cannot serialize " + srcType.getName()
-                            + " because it already defines a field named " + typeFieldName);
-                }
-                clone.add(typeFieldName, new JsonPrimitive(label));
-
-                for (Map.Entry<String, JsonElement> e : jsonObject.entrySet()) {
-                    clone.add(e.getKey(), e.getValue());
-                }
-                Streams.write(clone, out);
+                TypeFieldWriter writer = new TypeFieldWriter(out, maintainType ? null : label, srcType);
+                delegate.write(writer, value);
+                writer.checkComplete();
             }
         }.nullSafe();
     }
+
+    // Writes an object of a subtype straight to the output and puts the type field first in it, where the reader
+    // looks for it. We expect many polymorphic objects in the image and the journal, nested in each other (a
+    // table, its partitions, the types of its columns), and building a JsonElement tree for each of them would copy
+    // every nested object again. The JSON is the one a tree would give: the type field, then the fields of the
+    // subtype in their order. As a tree does, it rejects a subtype that writes something other than an object, a
+    // field with the name of the type field, and NaN or an infinite number.
+    private final class TypeFieldWriter extends JsonWriter {
+        private final JsonWriter out;
+        // null when the subtype writes the type field itself
+        private final String label;
+        private final Class<?> srcType;
+        private int depth = 0;
+        private boolean begun = false;
+
+        TypeFieldWriter(JsonWriter out, String label, Class<?> srcType) {
+            super(UNWRITABLE_WRITER);
+            this.out = out;
+            this.label = label;
+            this.srcType = srcType;
+        }
+
+        void checkComplete() {
+            if (!begun || depth != 0) {
+                throw new IllegalStateException("Not a JSON Object: " + srcType.getName());
+            }
+        }
+
+        // A value is allowed only inside the object of the subtype.
+        private void beforeValue() {
+            if (!begun || depth == 0) {
+                throw new IllegalStateException("Not a JSON Object: " + srcType.getName());
+            }
+        }
+
+        @Override
+        public JsonWriter beginObject() throws IOException {
+            if (!begun) {
+                begun = true;
+                out.beginObject();
+                if (label != null) {
+                    out.name(typeFieldName).value(label);
+                }
+            } else {
+                beforeValue();
+                out.beginObject();
+            }
+            depth++;
+            return this;
+        }
+
+        @Override
+        public JsonWriter endObject() throws IOException {
+            out.endObject();
+            depth--;
+            return this;
+        }
+
+        @Override
+        public JsonWriter beginArray() throws IOException {
+            beforeValue();
+            out.beginArray();
+            depth++;
+            return this;
+        }
+
+        @Override
+        public JsonWriter endArray() throws IOException {
+            out.endArray();
+            depth--;
+            return this;
+        }
+
+        @Override
+        public JsonWriter name(String name) throws IOException {
+            beforeValue();
+            if (label != null && depth == 1 && typeFieldName.equals(name)) {
+                throw new JsonParseException("cannot serialize " + srcType.getName()
+                        + " because it already defines a field named " + typeFieldName);
+            }
+            out.name(name);
+            return this;
+        }
+
+        @Override
+        public JsonWriter value(String value) throws IOException {
+            beforeValue();
+            out.value(value);
+            return this;
+        }
+
+        @Override
+        public JsonWriter jsonValue(String value) throws IOException {
+            throw new UnsupportedOperationException("raw JSON in a subtype of " + baseType.getName());
+        }
+
+        @Override
+        public JsonWriter nullValue() throws IOException {
+            beforeValue();
+            out.nullValue();
+            return this;
+        }
+
+        @Override
+        public JsonWriter value(boolean value) throws IOException {
+            beforeValue();
+            out.value(value);
+            return this;
+        }
+
+        @Override
+        public JsonWriter value(Boolean value) throws IOException {
+            beforeValue();
+            out.value(value);
+            return this;
+        }
+
+        @Override
+        public JsonWriter value(double value) throws IOException {
+            beforeValue();
+            if (Double.isNaN(value) || Double.isInfinite(value)) {
+                throw new IllegalArgumentException("JSON forbids NaN and infinities: " + value);
+            }
+            out.value(value);
+            return this;
+        }
+
+        @Override
+        public JsonWriter value(long value) throws IOException {
+            beforeValue();
+            out.value(value);
+            return this;
+        }
+
+        @Override
+        public JsonWriter value(Number value) throws IOException {
+            beforeValue();
+            if (value != null) {
+                double d = value.doubleValue();
+                if (Double.isNaN(d) || Double.isInfinite(d)) {
+                    throw new IllegalArgumentException("JSON forbids NaN and infinities: " + value);
+                }
+            }
+            out.value(value);
+            return this;
+        }
+
+        @Override
+        public boolean isLenient() {
+            return false;
+        }
+
+        // The output is flushed by its owner, as it is when the subtype writes into a tree.
+        @Override
+        public void flush() {
+        }
+
+        @Override
+        public void close() throws IOException {
+            throw new UnsupportedOperationException("a subtype of " + baseType.getName() + " closed the writer");
+        }
+    }
+
+    private static final Writer UNWRITABLE_WRITER = new Writer() {
+        @Override
+        public void write(char[] buffer, int offset, int counter) {
+            throw new AssertionError();
+        }
+
+        @Override
+        public void flush() {
+            throw new AssertionError();
+        }
+
+        @Override
+        public void close() {
+            throw new AssertionError();
+        }
+    };
 }

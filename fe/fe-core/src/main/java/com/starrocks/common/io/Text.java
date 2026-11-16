@@ -45,7 +45,6 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
 import java.nio.charset.CharacterCodingException;
-import java.nio.charset.CharsetDecoder;
 import java.nio.charset.CharsetEncoder;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
@@ -312,37 +311,16 @@ public class Text implements Writable {
         return super.hashCode();
     }
 
+    // The String constructor replaces a malformed sequence with U+FFFD, as a REPLACE decoder does, and decodes
+    // ASCII into a compact String without the CharBuffer and the char array a CharsetDecoder makes. We expect a
+    // call for every journal entry, so the copies matter.
     public static String decode(byte[] utf8) throws CharacterCodingException {
-        return decode(ByteBuffer.wrap(utf8), true);
+        return new String(utf8, StandardCharsets.UTF_8);
     }
 
     public static String decode(byte[] utf8, int start, int length)
             throws CharacterCodingException {
-        return decode(ByteBuffer.wrap(utf8, start, length), true);
-    }
-
-    /**
-     * Converts the provided byte array to a String using the UTF-8 encoding. If
-     * <code>replace</code> is true, then malformed input is replaced with the
-     * substitution character, which is U+FFFD. Otherwise the method throws a
-     * MalformedInputException.
-     */
-    private static String decode(ByteBuffer utf8, boolean replace)
-            throws CharacterCodingException {
-        CharsetDecoder decoder = StandardCharsets.UTF_8.newDecoder()
-                .onMalformedInput(CodingErrorAction.REPORT)
-                .onUnmappableCharacter(CodingErrorAction.REPORT);
-        if (replace) {
-            decoder.onMalformedInput(java.nio.charset.CodingErrorAction.REPLACE);
-            decoder.onUnmappableCharacter(CodingErrorAction.REPLACE);
-        }
-        String str = decoder.decode(utf8).toString();
-        // set decoder back to its default value: REPORT
-        if (replace) {
-            decoder.onMalformedInput(CodingErrorAction.REPORT);
-            decoder.onUnmappableCharacter(CodingErrorAction.REPORT);
-        }
-        return str;
+        return new String(utf8, start, length, StandardCharsets.UTF_8);
     }
 
     /**

@@ -1102,7 +1102,7 @@ public class TaskManager implements MemoryTrackable {
         if (status.getState().isFinishState() && System.currentTimeMillis() > status.getExpireTime()) {
             return;
         }
-        LOG.debug("replayCreateTaskRun:" + status);
+        LOG.debug("replayCreateTaskRun: {}", status);
         final Constants.TaskRunState taskRunState = status.getState();
         switch (taskRunState) {
             case PENDING:
@@ -1149,7 +1149,7 @@ public class TaskManager implements MemoryTrackable {
     }
 
     public void replayUpdateTaskRun(TaskRunStatusChange statusChange) {
-        LOG.debug("replayUpdateTaskRun:" + statusChange);
+        LOG.debug("replayUpdateTaskRun: {}", statusChange);
         Constants.TaskRunState fromStatus = statusChange.getFromStatus();
         Constants.TaskRunState toStatus = statusChange.getToStatus();
         Long taskId = statusChange.getTaskId();

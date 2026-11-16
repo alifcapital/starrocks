@@ -14,17 +14,21 @@
 
 package com.starrocks.scheduler;
 
+import com.google.common.base.Strings;
 import com.google.gson.annotations.SerializedName;
 import com.starrocks.authentication.AuthenticationMgr;
 import com.starrocks.catalog.MaterializedView;
 import com.starrocks.catalog.UserIdentity;
+import com.starrocks.catalog.system.SystemTable;
 import com.starrocks.cluster.ClusterNamespace;
 import com.starrocks.common.io.Writable;
+import com.starrocks.common.util.LogUtil;
 import com.starrocks.common.util.PropertyAnalyzer;
 import com.starrocks.persist.gson.GsonPostProcessable;
 import com.starrocks.scheduler.persist.TaskSchedule;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.WarehouseManager;
+import com.starrocks.sql.optimizer.rule.transformation.materialization.MvUtils;
 
 import java.io.IOException;
 import java.util.Map;
@@ -60,6 +64,14 @@ public class Task implements Writable, GsonPostProcessable {
 
     @SerializedName("definition")
     private String definition;
+
+    // The definition as the status of a run shows it, with the definition it was made from. We expect a status for
+    // every run of the task, also when the journal is replayed, and the definition of a refresh can be long, so it
+    // is made once per definition.
+    private volatile DefinitionForStatus definitionForStatus;
+
+    private record DefinitionForStatus(String definition, String shown) {
+    }
 
     @SerializedName("postRun")
     private String postRun;
@@ -174,6 +186,23 @@ public class Task implements Writable, GsonPostProcessable {
 
     public void setDefinition(String definition) {
         this.definition = definition;
+    }
+
+    // The definition on one line, shrunk to MAX_FIELD_VARCHAR_LENGTH - 1 as TaskRunsSystemTable holds it; null for
+    // a task without a definition.
+    public String getDefinitionForStatus() {
+        String current = definition;
+        if (Strings.isNullOrEmpty(current)) {
+            return null;
+        }
+        DefinitionForStatus cached = definitionForStatus;
+        // The same String object is the same definition; another object is checked again, even if it is equal.
+        if (cached == null || cached.definition() != current) {
+            String query = LogUtil.removeLineSeparator(current);
+            cached = new DefinitionForStatus(current, MvUtils.shrinkToSize(query, SystemTable.MAX_FIELD_VARCHAR_LENGTH - 1));
+            definitionForStatus = cached;
+        }
+        return cached.shown();
     }
 
     public Map<String, String> getProperties() {

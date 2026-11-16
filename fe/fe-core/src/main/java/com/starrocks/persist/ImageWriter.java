@@ -20,6 +20,7 @@ import com.starrocks.persist.metablock.SRMetaBlockID;
 import com.starrocks.persist.metablock.SRMetaBlockWriter;
 import com.starrocks.persist.metablock.SRMetaBlockWriterV2;
 
+import java.io.BufferedWriter;
 import java.io.DataOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
@@ -47,7 +48,11 @@ public class ImageWriter {
     public void setOutputStream(OutputStream outputStream) {
         this.checkedOutputStream = new CheckedOutputStream(outputStream, new CRC32());
         this.dataOutputStream = new DataOutputStream(checkedOutputStream);
-        this.jsonWriter = new JsonWriter(new OutputStreamWriter(checkedOutputStream, StandardCharsets.UTF_8));
+        // JsonWriter writes every name, separator and value with its own call, and OutputStreamWriter allocates a
+        // char array and a CharBuffer for each call. The buffer turns them into one call per 64 KB. Each block
+        // writer flushes it when it closes, before the next block or the checksum.
+        this.jsonWriter = new JsonWriter(new BufferedWriter(
+                new OutputStreamWriter(checkedOutputStream, StandardCharsets.UTF_8), 64 * 1024));
     }
 
     public SRMetaBlockWriter getBlockWriter(SRMetaBlockID id, int numJson) throws SRMetaBlockException {

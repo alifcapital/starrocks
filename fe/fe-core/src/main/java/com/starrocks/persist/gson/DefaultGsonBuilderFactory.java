@@ -15,7 +15,6 @@
 package com.starrocks.persist.gson;
 
 import com.google.common.collect.Multimap;
-import com.google.common.collect.Table;
 import com.google.gson.GsonBuilder;
 import com.starrocks.catalog.ColumnId;
 import com.starrocks.common.Config;
@@ -56,7 +55,7 @@ public class DefaultGsonBuilderFactory implements IGsonBuilderFactory {
                 .addSerializationExclusionStrategy(new GsonUtils.HiddenAnnotationExclusionStrategy())
                 .addDeserializationExclusionStrategy(new GsonUtils.HiddenAnnotationExclusionStrategy())
                 .enableComplexMapKeySerialization()
-                .registerTypeHierarchyAdapter(Table.class, new GuavaTableAdapter())
+                .registerTypeAdapterFactory(new GuavaTableAdapter())
                 .registerTypeHierarchyAdapter(Multimap.class, new GuavaMultimapAdapter())
                 .registerTypeHierarchyAdapter(ColumnId.class, new ColumnIdAdapter())
                 .registerTypeHierarchyAdapter(Range.class, new RangeAdapter())
