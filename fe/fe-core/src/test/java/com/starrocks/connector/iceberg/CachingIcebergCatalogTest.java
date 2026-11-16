@@ -221,11 +221,15 @@ public class CachingIcebergCatalogTest {
             IcebergTableName key = new IcebergTableName("db", "tbl");
             tables.put(key, oldTable);
             Mockito.when(delegate.getCurrentMetadataLocation("db", "tbl")).thenReturn("new.json");
-            Mockito.when(delegate.getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl"))).thenReturn(candidate);
+            Mockito.when(delegate.getTableAtMetadataLocation(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl"),
+                    Mockito.eq("new.json"))).thenReturn(candidate);
 
             catalog.refreshTable("db", "tbl", new ConnectContext(), workers);
 
-            Mockito.verify(delegate).getTable(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl"));
+            // the table is read at the location Glue returned, without a second Glue request
+            Mockito.verify(delegate).getTableAtMetadataLocation(Mockito.any(), Mockito.eq("db"), Mockito.eq("tbl"),
+                    Mockito.eq("new.json"));
+            Mockito.verify(delegate, Mockito.never()).getTable(Mockito.any(), Mockito.any(), Mockito.any());
             Assertions.assertSame(candidate, tables.getIfPresent(key));
             Map<IcebergTableName, Long> loads = Deencapsulation.getField(catalog, "tableMetadataLoads");
             Assertions.assertEquals(1L, loads.get(key));

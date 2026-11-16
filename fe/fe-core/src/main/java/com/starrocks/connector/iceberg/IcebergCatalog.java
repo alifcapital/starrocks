@@ -157,6 +157,13 @@ public interface IcebergCatalog extends MemoryTrackable {
         return null;
     }
 
+    // The refresh loads a changed table with the location it got from getCurrentMetadataLocation. A catalog that
+    // can read the table at that location saves a second request to its metastore; the others load the table.
+    default Table getTableAtMetadataLocation(ConnectContext context, String dbName, String tableName,
+                                             String metadataLocation) throws StarRocksConnectorException {
+        return getTable(context, dbName, tableName);
+    }
+
     default boolean tableExists(ConnectContext context, String dbName, String tableName) throws StarRocksConnectorException {
         try {
             getTable(context, dbName, tableName);

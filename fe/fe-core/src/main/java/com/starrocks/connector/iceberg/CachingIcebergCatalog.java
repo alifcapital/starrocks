@@ -578,16 +578,19 @@ public class CachingIcebergCatalog implements IcebergCatalog {
                 return;
             }
             // Glue stores the metadata location of a table, so one Glue request tells whether the cached table is
-            // current, and the table is loaded only when it is not.
+            // current, and the table is loaded only when it is not, at the location Glue returned.
+            String catalogLocation = null;
             if (getIcebergCatalogType() == IcebergCatalogType.GLUE_CATALOG) {
-                String catalogLocation = catalogMetadataLocation(dbName, tableName);
+                catalogLocation = catalogMetadataLocation(dbName, tableName);
                 if (catalogLocation != null && catalogLocation.equals(metadataLocation(currentTable))) {
                     keepUnchangedTable(icebergTableName, currentTable, dbName, tableName, executorService, active);
                     tableMetadataLoads.merge(icebergTableName, 1L, Long::sum);
                     return;
                 }
             }
-            BaseTable updateTable = (BaseTable) delegate.getTable(ctx, dbName, tableName);
+            BaseTable updateTable = (BaseTable) (catalogLocation != null
+                    ? delegate.getTableAtMetadataLocation(ctx, dbName, tableName, catalogLocation)
+                    : delegate.getTable(ctx, dbName, tableName));
             if (updateTable == null) {
                 invalidateCache(icebergTableName);
                 return;

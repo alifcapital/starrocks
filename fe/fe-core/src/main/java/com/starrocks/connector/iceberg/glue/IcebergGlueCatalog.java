@@ -35,6 +35,7 @@ import org.apache.iceberg.CatalogUtil;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.SortOrder;
+import org.apache.iceberg.StarRocksMetastoreTables;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.aws.AwsClientFactories;
 import org.apache.iceberg.aws.AwsProperties;
@@ -89,6 +90,14 @@ public class IcebergGlueCatalog implements IcebergCatalog {
     @Override
     public Table getTable(ConnectContext context, String dbName, String tableName) throws StarRocksConnectorException {
         return delegate.loadTable(TableIdentifier.of(dbName, tableName));
+    }
+
+    // The location comes from getCurrentMetadataLocation, which made the Glue request and the checks of
+    // GlueTableOperations.doRefresh, so the table is read at that location without asking Glue again.
+    @Override
+    public Table getTableAtMetadataLocation(ConnectContext context, String dbName, String tableName,
+                                            String metadataLocation) throws StarRocksConnectorException {
+        return StarRocksMetastoreTables.loadAt(delegate, TableIdentifier.of(dbName, tableName), metadataLocation);
     }
 
     // We want the same answer the wrapped GlueCatalog would get when it loads the table, so this makes the Glue
