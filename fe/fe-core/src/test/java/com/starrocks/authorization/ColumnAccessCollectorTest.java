@@ -490,8 +490,7 @@ public class ColumnAccessCollectorTest {
     public void rankingTopNPartitionByClassifiedAsFilter() {
         // SELECT v4, rn FROM (SELECT v4, ROW_NUMBER() OVER (PARTITION BY v4 ORDER BY v5) rn FROM t1)
         //   WHERE rn <= 5
-        // is rewritten by RankingWindowFilterRule into LogicalTopNOperator with
-        // partitionByColumns=[v4], orderByElements=[v5]. Both should be FILTER.
+        // v4 and v5 are the PARTITION BY and ORDER BY of the window. Both should be FILTER.
         Map<String, EnumSet<ColumnAccessKind>> roles = run(
                 "SELECT v4 FROM (SELECT v4, ROW_NUMBER() OVER (PARTITION BY v4 ORDER BY v5) rn "
                         + "FROM piidb.t1) sub WHERE rn <= 5");
@@ -546,6 +545,25 @@ public class ColumnAccessCollectorTest {
      * Run a query through analysis and ColumnPrivilege.check, then return a map of
      * "{table}.{column}" → roles, sorted for deterministic assertion errors.
      */
+    // A WHERE above each consumer of a CTE that is used more than once filters on the column of the CTE.
+    @Test
+    public void predicateOfReusedCteConsumerIsFilter() {
+        Map<String, EnumSet<ColumnAccessKind>> roles = run(
+                "WITH c AS (SELECT v4, v5 FROM piidb.t1) "
+                        + "SELECT v4 FROM c WHERE v5 = 1 UNION ALL SELECT v4 FROM c WHERE v5 = 2");
+        assertTrue(roles.get("t1.v5").contains(ColumnAccessKind.FILTER), "t1.v5: " + roles.get("t1.v5"));
+        assertTrue(roles.get("t1.v4").contains(ColumnAccessKind.PROJECTION), "t1.v4: " + roles.get("t1.v4"));
+    }
+
+    // The columns a query names are checked even when the query returns no rows.
+    @Test
+    public void columnsUnderFalsePredicateOrLimitZeroAreChecked() {
+        assertEquals(EnumSet.of(ColumnAccessKind.PROJECTION),
+                run("SELECT v6 FROM piidb.t1 WHERE false").get("t1.v6"));
+        assertEquals(EnumSet.of(ColumnAccessKind.PROJECTION),
+                run("SELECT v6 FROM (SELECT * FROM piidb.t1 LIMIT 0) t").get("t1.v6"));
+    }
+
     private Map<String, EnumSet<ColumnAccessKind>> run(String sql) {
         try {
             QueryStatement stmt = (QueryStatement) UtFrameUtils.parseStmtWithNewParser(sql, ctx);

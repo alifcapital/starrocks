@@ -283,6 +283,13 @@ public class RuleSet {
             new PruneCTEConsumeColumnsRule()
     ));
 
+    // The column pruning of the privilege check: PRUNE_COLUMNS_RULES without the pruning of group by keys by unique
+    // and foreign keys, so the check sees the group by keys that the query has.
+    public static final Rule PRUNE_COLUMNS_FOR_COLUMN_ACCESS_RULES = new CombinationRule(RuleType.GP_PRUNE_COLUMNS,
+            PRUNE_COLUMNS_RULES.predecessorRules().stream()
+                    .filter(rule -> !(rule instanceof PruneUKFKGroupByKeysRule))
+                    .collect(ImmutableList.toImmutableList()));
+
     public static final Rule PUSH_DOWN_PREDICATE_RULES =
             new CombinationRule(RuleType.GP_PUSH_DOWN_PREDICATE, ImmutableList.of(
                     new CastToEmptyRule(),
@@ -305,6 +312,13 @@ public class RuleSet {
                     new MergeTwoFiltersRule(),
                     new PushDownPredicateCTEConsumeRule()
             ));
+
+    // The predicate pushdown of the privilege check: PUSH_DOWN_PREDICATE_RULES without the rule that replaces an
+    // operator under a false predicate with an empty one, so the columns under `WHERE false` are still checked.
+    public static final Rule PUSH_DOWN_PREDICATE_FOR_COLUMN_ACCESS_RULES =
+            new CombinationRule(RuleType.GP_PUSH_DOWN_PREDICATE, PUSH_DOWN_PREDICATE_RULES.predecessorRules().stream()
+                    .filter(rule -> !(rule instanceof CastToEmptyRule))
+                    .collect(ImmutableList.toImmutableList()));
 
     public static final Rule PUSH_DOWN_SUBQUERY_RULES =
             new CombinationRule(RuleType.GP_PUSH_DOWN_SUBQUERY, ImmutableList.of(

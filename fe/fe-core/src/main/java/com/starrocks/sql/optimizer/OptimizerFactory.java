@@ -54,6 +54,11 @@ public class OptimizerFactory {
         return initContext(context, columnRefFactory, new OptimizerOptions());
     }
 
+    // The optimizer of the privilege check, see QueryOptimizer.optimizeForColumnAccess.
+    public static QueryOptimizer createForColumnAccess(OptimizerContext context) {
+        return new QueryOptimizer(context);
+    }
+
     public static Optimizer create(OptimizerContext context) {
         if (context.getOptimizerOptions().isShortCircuit()) {
             return new ShortCircuitOptimizer(context);

@@ -145,9 +145,9 @@ public class StatementPlanner {
             // Whether planning will run off private snapshots is decided here, before the authorization
             // check, and when it will the snapshots are taken and the lock dropped first. The check is not
             // free for an external catalog that has an ExternalAccessController (Ranger et al.): to get the
-            // pruned column list, ColumnPrivilege.check runs a whole rule-based optimization, and that asks
-            // the connector for partitions, statistics and file lists. This lock protects none of that, so
-            // there is no reason for it to be held across those round trips.
+            // pruned column list, ColumnPrivilege.check builds and normalizes the plan of the query, and the
+            // access controller is asked once per column. This lock protects none of that, so there is no
+            // reason for it to be held across it.
             PlanningSnapshot snapshot = takePlanningSnapshotAndUnlock(stmt, session, plannerMetaLocker);
             if (snapshot != null && stmt instanceof QueryStatement) {
                 needWholePhaseLock = false;

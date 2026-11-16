@@ -14,6 +14,7 @@
 
 package com.starrocks.authorization;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Maps;
@@ -38,14 +39,13 @@ import com.starrocks.sql.ast.UpdateStmt;
 import com.starrocks.sql.ast.ViewRelation;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptExpressionVisitor;
-import com.starrocks.sql.optimizer.Optimizer;
 import com.starrocks.sql.optimizer.OptimizerFactory;
 import com.starrocks.sql.optimizer.OptimizerOptions;
+import com.starrocks.sql.optimizer.QueryOptimizer;
 import com.starrocks.sql.optimizer.Utils;
 import com.starrocks.sql.optimizer.base.ColumnRefFactory;
 import com.starrocks.sql.optimizer.base.ColumnRefSet;
 import com.starrocks.sql.optimizer.base.Ordering;
-import com.starrocks.sql.optimizer.base.PhysicalPropertySet;
 import com.starrocks.sql.optimizer.operator.Operator;
 import com.starrocks.sql.optimizer.operator.Projection;
 import com.starrocks.sql.optimizer.operator.logical.LogicalAggregationOperator;
@@ -64,7 +64,6 @@ import com.starrocks.sql.optimizer.operator.logical.LogicalWindowOperator;
 import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
-import com.starrocks.sql.optimizer.rule.RuleType;
 import com.starrocks.sql.optimizer.transformer.LogicalPlan;
 import com.starrocks.sql.optimizer.transformer.MVTransformerContext;
 import com.starrocks.sql.optimizer.transformer.RelationTransformer;
@@ -122,39 +121,8 @@ public class ColumnPrivilege {
         }
 
         Map<TableName, Map<String, EnumSet<ColumnAccessKind>>> scanColumns = new HashMap<>();
-        OptExpression optimizedPlan;
         if (!tableUsedExternalAccessController.isEmpty()) {
-            /*
-             * The column access privilege of the query need to use the pruned column list.
-             * Because the unused columns will not check the column access privilege.
-             * For example, the table contains two columns v1 and v2, and user u1 only has
-             * the access privilege to v1, the select v1 from (select * from tbl) t can be checked because v2 has been pruned.
-             */
-            ColumnRefFactory columnRefFactory = new ColumnRefFactory();
-            LogicalPlan logicalPlan;
-            MVTransformerContext mvTransformerContext = MVTransformerContext.of(context, true);
-            TransformerContext transformerContext = new TransformerContext(columnRefFactory, context, mvTransformerContext);
-            logicalPlan = new RelationTransformer(transformerContext).transformWithSelectLimit(stmt.getQueryRelation());
-
-            OptimizerOptions optimizerOptions = new OptimizerOptions(OptimizerOptions.OptimizerStrategy.RULE_BASED);
-            optimizerOptions.disableRule(RuleType.GP_SINGLE_TABLE_MV_REWRITE);
-            optimizerOptions.disableRule(RuleType.GP_MULTI_TABLE_MV_REWRITE);
-            optimizerOptions.disableRule(RuleType.GP_PRUNE_EMPTY_OPERATOR);
-            Optimizer optimizer =
-                    OptimizerFactory.create(OptimizerFactory.initContext(context, columnRefFactory, optimizerOptions));
-            optimizedPlan = optimizer.optimize(logicalPlan.getRoot(),
-                    new PhysicalPropertySet(), new ColumnRefSet(logicalPlan.getOutputColumn()));
-
-            ColumnAccessCollector collector =
-                    new ColumnAccessCollector(tableObjectToTableName, scanColumns);
-            optimizedPlan.getOp().accept(collector, optimizedPlan, null);
-            // The columns that flow out of the root of the plan are what the user actually sees in
-            // the result rows — mark them as PROJECTION. Everything else stays AGG_ARG/JOIN_KEY/FILTER.
-            // For UPDATE/DELETE the target table is in `excludeTables` and is therefore not audited,
-            // so synthetic "all-columns-of-target" projections in the rewritten plan do not pollute
-            // the audit. Read-side tables inside SET/WHERE subqueries still flow through the root
-            // output and correctly pick up PROJECTION — matches "user de facto read this column".
-            collector.markRootOutputProjection(logicalPlan.getOutputColumn());
+            scanColumns = collectColumnAccess(context, stmt, tableObjectToTableName);
         }
 
         for (Map.Entry<TableName, Table> entry : tableNameTableObj.entrySet()) {
@@ -218,6 +186,44 @@ public class ColumnPrivilege {
                 }
             }
         }
+    }
+
+    /**
+     * The columns of the tables of tableObjectToTableName that the query uses, with how it uses them.
+     *
+     * The column access privilege of the query need to use the pruned column list.
+     * Because the unused columns will not check the column access privilege.
+     * For example, the table contains two columns v1 and v2, and user u1 only has
+     * the access privilege to v1, the select v1 from (select * from tbl) t can be checked because v2 has been pruned.
+     * The plan is the one of QueryOptimizer.optimizeForColumnAccess: the query as it is written, normalized and
+     * with the unused columns pruned, without the rewrites of the optimizer that remove tables, columns or
+     * predicates.
+     */
+    static Map<TableName, Map<String, EnumSet<ColumnAccessKind>>> collectColumnAccess(
+            ConnectContext context, QueryStatement stmt, Map<Table, TableName> tableObjectToTableName) {
+        ColumnRefFactory columnRefFactory = new ColumnRefFactory();
+        MVTransformerContext mvTransformerContext = MVTransformerContext.of(context, true);
+        TransformerContext transformerContext = new TransformerContext(columnRefFactory, context, mvTransformerContext);
+        LogicalPlan logicalPlan =
+                new RelationTransformer(transformerContext).transformWithSelectLimit(stmt.getQueryRelation());
+
+        OptimizerOptions optimizerOptions = new OptimizerOptions(OptimizerOptions.OptimizerStrategy.RULE_BASED);
+        QueryOptimizer optimizer = OptimizerFactory.createForColumnAccess(
+                OptimizerFactory.initContext(context, columnRefFactory, optimizerOptions));
+        OptExpression plan = optimizer.optimizeForColumnAccess(logicalPlan.getRoot(),
+                new ColumnRefSet(logicalPlan.getOutputColumn()));
+
+        Map<TableName, Map<String, EnumSet<ColumnAccessKind>>> scanColumns = new HashMap<>();
+        ColumnAccessCollector collector = new ColumnAccessCollector(tableObjectToTableName, scanColumns);
+        plan.getOp().accept(collector, plan, null);
+        // The columns that flow out of the root of the plan are what the user actually sees in
+        // the result rows — mark them as PROJECTION. Everything else stays AGG_ARG/JOIN_KEY/FILTER.
+        // For UPDATE/DELETE the target table is in `excludeTables` and is therefore not audited,
+        // so synthetic "all-columns-of-target" projections in the rewritten plan do not pollute
+        // the audit. Read-side tables inside SET/WHERE subqueries still flow through the root
+        // output and correctly pick up PROJECTION — matches "user de facto read this column".
+        collector.markRootOutputProjection(logicalPlan.getOutputColumn());
+        return scanColumns;
     }
 
     /**
@@ -545,6 +551,9 @@ public class ColumnPrivilege {
                 applyRole(join.getPredicate(), ColumnAccessKind.JOIN_KEY);
             } else if (op instanceof LogicalFilterOperator) {
                 applyRole(((LogicalFilterOperator) op).getPredicate(), ColumnAccessKind.FILTER);
+            } else if (op instanceof LogicalCTEConsumeOperator) {
+                // A WHERE above a consumer of a CTE that is used more than once is pushed into the consumer.
+                applyRole(op.getPredicate(), ColumnAccessKind.FILTER);
             } else if (op instanceof LogicalScanOperator) {
                 // Pushed-down WHERE that the optimizer collapsed into the scan node.
                 applyRole(op.getPredicate(), ColumnAccessKind.FILTER);
@@ -800,7 +809,8 @@ public class ColumnPrivilege {
         }
     }
 
-    private static class TableNameCollector extends AstTraverser<Void, Void> {
+    @VisibleForTesting
+    static class TableNameCollector extends AstTraverser<Void, Void> {
         private final Map<TableName, Table> tableNameToTableObj;
         private final Map<Table, TableName> tableTableNameMap;
 

@@ -245,6 +245,56 @@ public class QueryOptimizer extends Optimizer {
     }
 
     /**
+     * The logical plan from which the privilege check reads the columns of a query and how the query uses them
+     * (see ColumnPrivilege). We want the columns as the query is written. So the plan gets the rewrites that only
+     * normalize it: CTEs are inlined as the planner inlines them and an unused CTE is dropped, subqueries become
+     * joins, predicates are pushed down, so a join condition is seen as one, and the columns that no operator needs
+     * are pruned. Nothing else runs: no statistics, no partition pruning and no other read of a connector, which
+     * would read the metadata of tables before the user is allowed to read them, and none of the rewrites that
+     * remove a table, an aggregation, a group by key by the unique and foreign keys, an operator under a false
+     * predicate or a LIMIT 0, which would make the privileges that a query needs depend on the optimizer.
+     */
+    public OptExpression optimizeForColumnAccess(OptExpression logicOperatorTree, ColumnRefSet requiredColumns) {
+        prepare(logicOperatorTree);
+        TaskContext rootTaskContext =
+                new TaskContext(context, new PhysicalPropertySet(), requiredColumns.clone(), Double.MAX_VALUE);
+        OptExpression tree = OptExpression.create(new LogicalTreeAnchorOperator(), logicOperatorTree);
+        deriveLogicalProperty(tree);
+        CTEContext cteContext = context.getCteContext();
+
+        scheduler.rewriteIterative(tree, rootTaskContext, new EliminateConstantCTERule());
+        CTEUtils.collectCteOperators(tree, context);
+        while (cteContext.hasInlineCTE()) {
+            scheduler.rewriteOnce(tree, rootTaskContext, RuleSet.INLINE_CTE_RULES);
+            CTEUtils.collectCteOperators(tree, context);
+        }
+
+        scheduler.rewriteIterative(tree, rootTaskContext, RuleSet.PUSH_DOWN_SUBQUERY_RULES);
+        scheduler.rewriteIterative(tree, rootTaskContext, RuleSet.SUBQUERY_EXTRACT_CORRELATION_PREDICATE_RULES);
+        scheduler.rewriteIterative(tree, rootTaskContext, RuleSet.SUBQUERY_REWRITE_TO_WINDOW_RULES);
+        scheduler.rewriteOnce(tree, rootTaskContext, new ExtractRangePredicateFromScalarApplyRule());
+        scheduler.rewriteIterative(tree, rootTaskContext, RuleSet.SUBQUERY_REWRITE_TO_JOIN_RULES);
+        scheduler.rewriteOnce(tree, rootTaskContext, new ApplyExceptionRule());
+        CTEUtils.collectCteOperators(tree, context);
+
+        scheduler.rewriteIterative(tree, rootTaskContext, RuleSet.PUSH_DOWN_PREDICATE_FOR_COLUMN_ACCESS_RULES);
+        // A large IN list becomes a join with its values, as in the plan that runs, so its column is a join key.
+        if (context.getColumnRefFactory().getLargeInPredicateCount() > 0) {
+            LargeInPredicateToJoinRule largeInPredicateToJoinRule = new LargeInPredicateToJoinRule();
+            scheduler.rewriteOnce(tree, rootTaskContext, largeInPredicateToJoinRule);
+            largeInPredicateToJoinRule.checkAllTransformed(context);
+        }
+        scheduler.rewriteIterative(tree, rootTaskContext, new MergeTwoProjectRule());
+        rootTaskContext.setRequiredColumns(requiredColumns.clone());
+        scheduler.rewriteOnce(tree, rootTaskContext, RuleSet.PRUNE_COLUMNS_FOR_COLUMN_ACCESS_RULES);
+        deriveLogicalProperty(tree);
+
+        OptExpression result = tree.getInputs().get(0);
+        new OptExpressionValidator().validate(result);
+        return result;
+    }
+
+    /**
      * Optimizer will transform and implement the logical operator based on
      * the {@see Rule}, then cost the physical operator, and finally find the
      * lowest cost physical operator tree
