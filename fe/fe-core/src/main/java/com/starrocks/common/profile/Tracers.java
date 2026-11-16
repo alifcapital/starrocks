@@ -179,6 +179,13 @@ public class Tracers {
         return (tracers.moduleMask & 1 << m.ordinal()) != 0;
     }
 
+    // Whether log(module, ...) on this thread reaches a real tracer. A caller checks it before it builds the
+    // function that makes the message, which log() would otherwise drop.
+    public static boolean isLogEnabled(Module module) {
+        Tracers tracers = THREAD_LOCAL.get();
+        return tracers.tracer(module, Mode.LOGS) != EMPTY_TRACER;
+    }
+
     public static void enableTraceModule(Module m) {
         if (m == null || m == Module.NONE) {
             return;

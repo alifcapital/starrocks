@@ -27,16 +27,28 @@ import java.util.List;
 import java.util.function.Function;
 
 public class OptimizerTraceUtil {
+    // With tracing off Tracers.log drops the function that builds the message, but the function and its argument
+    // array are made on every call, and logApplyRuleBefore/After and logRuleExhausted run for every rule the
+    // optimizer applies. So each method returns before it makes them when the trace would drop the message.
     public static void logOptExpression(String format, OptExpression optExpression) {
+        if (!Tracers.isLogEnabled(Tracers.Module.OPTIMIZER)) {
+            return;
+        }
         Tracers.log(Tracers.Module.OPTIMIZER, args -> String.format(format, optExpression.debugString()));
     }
 
     public static void logQueryStatement(String format, QueryStatement statement) {
+        if (!Tracers.isLogEnabled(Tracers.Module.ANALYZE)) {
+            return;
+        }
         Tracers.log(Tracers.Module.ANALYZE,
                 args -> String.format(format, statement.accept(new DebugRelationTracer(), "")));
     }
 
     public static void log(String format, Object... object) {
+        if (!Tracers.isLogEnabled(Tracers.Module.OPTIMIZER)) {
+            return;
+        }
         Tracers.log(Tracers.Module.OPTIMIZER, args -> String.format(format, object));
     }
 
@@ -63,6 +75,9 @@ public class OptimizerTraceUtil {
     }
 
     public static void logMVPrepare(String format, Object... object) {
+        if (!Tracers.isLogEnabled(Tracers.Module.MV)) {
+            return;
+        }
         Tracers.log(Tracers.Module.MV, input -> {
             String str = MessageFormatter.arrayFormat(format, object).getMessage();
             Object[] args = new Object[] {"GLOBAL", str};
@@ -107,7 +122,7 @@ public class OptimizerTraceUtil {
      * Safe log for MV module, ignore any exception during logging.
      */
     private static void traceLogMVSafe(Function<Object[], String> func, Object... args) {
-        if (!Tracers.isSetTraceModule(Tracers.Module.MV)) {
+        if (!Tracers.isLogEnabled(Tracers.Module.MV)) {
             return;
         }
         try {
@@ -218,6 +233,9 @@ public class OptimizerTraceUtil {
     }
 
     public static void logRuleExhausted(OptimizerContext ctx, Rule rule) {
+        if (!Tracers.isLogEnabled(Tracers.Module.OPTIMIZER)) {
+            return;
+        }
         Tracers.log(Tracers.Module.OPTIMIZER,
                 args -> String.format("[TRACE QUERY %s] RULE %s exhausted \n", ctx.getQueryId(), rule));
     }
@@ -236,6 +254,9 @@ public class OptimizerTraceUtil {
 
     public static void logApplyRuleBefore(OptimizerContext ctx, Rule rule,
                                           OptExpression oldExpression) {
+        if (!Tracers.isLogEnabled(Tracers.Module.OPTIMIZER)) {
+            return;
+        }
         Tracers.log(Tracers.Module.OPTIMIZER, args -> {
             StringBuilder sb = new StringBuilder();
             int ruleDepth = calculateRuleDepth(rule.getPattern());
@@ -246,6 +267,9 @@ public class OptimizerTraceUtil {
     }
 
     public static void logApplyRuleAfter(Rule rule, List<OptExpression> newExpressions) {
+        if (!Tracers.isLogEnabled(Tracers.Module.OPTIMIZER)) {
+            return;
+        }
         Tracers.log(Tracers.Module.OPTIMIZER, args -> {
             StringBuilder sb = new StringBuilder();
             sb.append("\nNew Expression:");
