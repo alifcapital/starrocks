@@ -16,6 +16,7 @@ package org.apache.iceberg;
 
 import org.apache.iceberg.data.GenericRecord;
 import org.apache.iceberg.io.CloseableIterable;
+import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.Pair;
 import org.apache.iceberg.util.PartitionMap;
@@ -41,10 +42,19 @@ public final class IcebergPartitionStatsHelper {
     // a CloseableIterable) and resolves the stats schema for the table's current format version.
     public static PartitionMap<PartitionStats> readPartitionStatsFileAsMap(
             Table table, String statsFilePath, Types.StructType partitionType) {
+        return readPartitionStatsFileAsMap(table, statsFilePath, -1, partitionType);
+    }
+
+    // statsFileSize is the size the table metadata records for the file, or -1 when the caller does not have
+    // it. The Parquet reader needs the size to find the footer, and an unknown size costs a HEAD request.
+    public static PartitionMap<PartitionStats> readPartitionStatsFileAsMap(
+            Table table, String statsFilePath, long statsFileSize, Types.StructType partitionType) {
         Schema schema = PartitionStatsHandler.schema(partitionType, TableUtil.formatVersion(table));
         PartitionMap<PartitionStats> statsMap = PartitionMap.create(table.specs());
-        try (CloseableIterable<PartitionStats> iter =
-                     PartitionStatsHandler.readPartitionStatsFile(schema, table.io().newInputFile(statsFilePath))) {
+        InputFile statsFile = statsFileSize > 0
+                ? table.io().newInputFile(statsFilePath, statsFileSize)
+                : table.io().newInputFile(statsFilePath);
+        try (CloseableIterable<PartitionStats> iter = PartitionStatsHandler.readPartitionStatsFile(schema, statsFile)) {
             for (PartitionStats stats : iter) {
                 statsMap.put(stats.specId(), stats.partition(), stats);
             }

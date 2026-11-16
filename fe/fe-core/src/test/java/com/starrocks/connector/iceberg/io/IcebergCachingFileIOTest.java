@@ -30,6 +30,7 @@ import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.OutputFile;
 import org.apache.iceberg.io.ResolvingFileIO;
+import org.apache.iceberg.io.SeekableInputStream;
 import org.apache.iceberg.util.SerializableSupplier;
 import org.apache.iceberg.util.SerializationUtil;
 import org.junit.jupiter.api.Assertions;
@@ -642,4 +643,84 @@ public class IcebergCachingFileIOTest {
         Assertions.assertEquals(0, a.useCount.get(), "useCount should reach 0 after close");
     }
 
+    // A local file that counts the requests for its length: on S3 each of them is a HEAD request.
+    private static final class LengthCountingInputFile implements InputFile {
+        private final InputFile file;
+        private final AtomicInteger lengthRequests;
+
+        private LengthCountingInputFile(InputFile file, AtomicInteger lengthRequests) {
+            this.file = file;
+            this.lengthRequests = lengthRequests;
+        }
+
+        @Override
+        public long getLength() {
+            lengthRequests.incrementAndGet();
+            return file.getLength();
+        }
+
+        @Override
+        public SeekableInputStream newStream() {
+            return file.newStream();
+        }
+
+        @Override
+        public String location() {
+            return file.location();
+        }
+
+        @Override
+        public boolean exists() {
+            return file.exists();
+        }
+    }
+
+    @Test
+    public void testStreamWithoutContentCacheDoesNotAskForLength() throws IOException {
+        writeIcebergMetaTestFile();
+        AtomicInteger lengthRequests = new AtomicInteger();
+        new MockUp<ResolvingFileIO>() {
+            @Mock
+            public InputFile newInputFile(String location) {
+                return new LengthCountingInputFile(Files.localInput("/tmp/0001.metadata.json"), lengthRequests);
+            }
+        };
+        IcebergCachingFileIO cachingFileIO = new IcebergCachingFileIO();
+        cachingFileIO.setConf(new Configuration());
+        cachingFileIO.initialize(new HashMap<>());
+
+        // iceberg_metadata_cache_max_entry_size is 0 by default, so the content cache keeps no file
+        try (SeekableInputStream stream = cachingFileIO.newInputFile("s3://bucket/t/metadata/v1.json").newStream()) {
+            Assertions.assertEquals(39, stream.readAllBytes().length);
+        }
+        Assertions.assertEquals(0, lengthRequests.get());
+    }
+
+    @Test
+    public void testKnownLengthReachesWrappedFile() {
+        writeIcebergMetaTestFile();
+        AtomicInteger lengthRequests = new AtomicInteger();
+        List<Long> passedLengths = new ArrayList<>();
+        new MockUp<ResolvingFileIO>() {
+            @Mock
+            public InputFile newInputFile(String location) {
+                return new LengthCountingInputFile(Files.localInput("/tmp/0001.metadata.json"), lengthRequests);
+            }
+
+            @Mock
+            public InputFile newInputFile(String location, long length) {
+                passedLengths.add(length);
+                return Files.localInput("/tmp/0001.metadata.json");
+            }
+        };
+        IcebergCachingFileIO cachingFileIO = new IcebergCachingFileIO();
+        cachingFileIO.setConf(new Configuration());
+        cachingFileIO.initialize(new HashMap<>());
+
+        InputFile manifest = cachingFileIO.newInputFile("s3://bucket/t/metadata/m0.avro", 39L);
+        Assertions.assertEquals("s3://bucket/t/metadata/m0.avro", manifest.location());
+        Assertions.assertEquals(39, manifest.getLength());
+        Assertions.assertEquals(List.of(39L), passedLengths);
+        Assertions.assertEquals(0, lengthRequests.get());
+    }
 }

@@ -64,7 +64,7 @@ public final class IcebergPartitionStatsProvider {
         Types.StructType partitionType = Partitioning.partitionType(nativeTable);
         try {
             PartitionMap<PartitionStats> statsMap = IcebergPartitionStatsHelper.readPartitionStatsFileAsMap(
-                    nativeTable, plan.statsFile().path(), partitionType);
+                    nativeTable, plan.statsFile().path(), plan.statsFile().fileSizeInBytes(), partitionType);
             if (plan.mode() == PartitionStatsPlan.Mode.INCREMENTAL) {
                 PartitionMap<PartitionStats> delta = IcebergPartitionStatsHelper.computeStatsFromManifests(
                         nativeTable, plan.incrementalManifests(), partitionType);

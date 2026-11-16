@@ -247,6 +247,21 @@ public class IcebergCachingFileIO implements FileIO, HadoopConfigurable {
         }
     }
 
+    // Iceberg passes the length it knows from the metadata: of a manifest, a data file or a delete file. On an
+    // object store the wrapped file asks for an unknown length with a HEAD request, so we give it the known one.
+    @Override
+    public InputFile newInputFile(String path, long length) {
+        try {
+            String normalizedPath = normalizeAzurePath(path);
+            setPathConf(normalizedPath);
+            return new CachingInputFile(fileContentCache, wrappedIO.newInputFile(normalizedPath, length), path);
+        } catch (StarRocksException e) {
+            String errorMessage = String.format("Failed to new input file for path: %s, properties: %s", path, properties);
+            LOG.error(errorMessage, e);
+            throw new StarRocksConnectorException(errorMessage, e);
+        }
+    }
+
     @Override
     public OutputFile newOutputFile(String path) {
         try {
@@ -790,6 +805,11 @@ public class IcebergCachingFileIO implements FileIO, HadoopConfigurable {
         @Override
         public SeekableInputStream newStream() {
             try {
+                // With iceberg_metadata_cache_max_entry_size = 0 the cache keeps no file. The length is then not
+                // needed, and on an object store asking for it is a HEAD request, so we open the file directly.
+                if (contentCache.maxContentLength() <= 0) {
+                    return wrappedInputFile.newStream();
+                }
                 // read-through cache if file length is less than or equal to maximum length allowed to cache.
                 // do not cache metadata json files because the name could be same, like "v1.metadata.json"
                 // when re-create table with same name.
