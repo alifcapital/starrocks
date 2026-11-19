@@ -73,11 +73,13 @@ public class StatisticSQLBuilder {
     // rather than NULL. The '' must be mapped back to NULL before the $type cast: the internal
     // statistics session inherits the global sql_mode, and under ERROR_IF_OVERFLOW casting '' to a
     // numeric/date type aborts the whole batched load instead of yielding NULL.
+    // A column with no value in any partition then aggregates to NULL. We fear that a reader of the result takes
+    // the undefined value under a NULL row for a real bound, so the query gives '' again, as the collection stores it.
     private static final String QUERY_FULL_STATISTIC_TEMPLATE =
             "SELECT cast(" + STATISTIC_DATA_VERSION_V2 + " as INT), $updateTime, db_id, table_id, column_name,"
                     + " sum(row_count), cast(sum(data_size) as bigint), hll_union_agg(ndv), sum(null_count), "
-                    + " cast(max(cast(nullif(max, '') as $type)) as string),"
-                    + " cast(min(cast(nullif(min, '') as $type)) as string),"
+                    + " ifnull(cast(max(cast(nullif(max, '') as $type)) as string), ''),"
+                    + " ifnull(cast(min(cast(nullif(min, '') as $type)) as string), ''),"
                     + " cast(avg(collection_size) as bigint)"
                     + " FROM " + StatsConstants.FULL_STATISTICS_TABLE_NAME
                     + " WHERE $predicate"
@@ -93,11 +95,13 @@ public class StatisticSQLBuilder {
 
     // The recreated external basic store has one canonical hash key per (table, partition, column).
     // TABLE summaries are materialized after collection; this aggregation is no longer a cache loader.
+    // A column with no value in any partition aggregates to NULL, and we fear that the summary stores the undefined
+    // value under a NULL row as a bound, so the query gives '' for it, as QUERY_FULL_STATISTIC_TEMPLATE does.
     private static final String QUERY_EXTERNAL_FULL_STATISTIC_V2_TEMPLATE =
             "SELECT cast(" + STATISTIC_EXTERNAL_QUERY_V2_VERSION + " as INT), column_name,"
                     + " sum(row_count), cast(sum(data_size) as bigint), hll_union_agg(ndv), sum(null_count), "
-                    + " cast(max(cast(nullif(max, '') as $type)) as string),"
-                    + " cast(min(cast(nullif(min, '') as $type)) as string),"
+                    + " ifnull(cast(max(cast(nullif(max, '') as $type)) as string), ''),"
+                    + " ifnull(cast(min(cast(nullif(min, '') as $type)) as string), ''),"
                     + " max(update_time)"
                     + " FROM " + StatsConstants.EXTERNAL_FULL_STATISTICS_TABLE_NAME
                     + " WHERE $predicate GROUP BY column_name";
