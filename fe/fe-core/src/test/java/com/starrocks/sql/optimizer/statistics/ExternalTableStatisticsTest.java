@@ -16,10 +16,15 @@ package com.starrocks.sql.optimizer.statistics;
 
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.Table;
+import com.starrocks.catalog.TableName;
 import com.starrocks.statistic.ColumnStatsMeta;
 import com.starrocks.statistic.StatsConstants;
 import com.starrocks.thrift.TStatisticData;
 import com.starrocks.type.IntegerType;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -34,6 +39,8 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class ExternalTableStatisticsTest {
+    private static final TableName NAME = new TableName("iceberg", "landing_db", "t");
+
     private Table table() {
         Table table = mock(Table.class);
         when(table.getName()).thenReturn("t");
@@ -62,7 +69,7 @@ class ExternalTableStatisticsTest {
     void columnWithoutMetadataIsUnknownButKeepsItsRawRows() {
         Table table = table();
         ExternalTableStatistics decoded = ExternalTableStatistics.decode(
-                ExternalTableStatistics.encode(List.of(row("first", 100)), table), table, Map.of());
+                ExternalTableStatistics.encode(List.of(row("first", 100)), table), table, NAME, Map.of());
         Assertions.assertTrue(decoded.summaries.get("first").estimated.isUnknown());
         Assertions.assertTrue(decoded.columns.get("first").isUnknown());
         Assertions.assertEquals(100, decoded.summaries.get("first").raw.getRowCount());
@@ -73,7 +80,7 @@ class ExternalTableStatisticsTest {
         Table table = table();
         TStatisticData first = row("first", 100);
         ExternalTableStatistics decoded = ExternalTableStatistics.decode(
-                ExternalTableStatistics.encode(List.of(first, row("другая\"колонка", 200)), table), table,
+                ExternalTableStatistics.encode(List.of(first, row("другая\"колонка", 200)), table), table, NAME,
                 fullMetadata("first", "другая\"колонка"));
         ColumnStatistic expected = ColumnBasicStatsCacheLoader.buildColumnStatistics(
                 first, "", "", "t", "first", IntegerType.BIGINT);
@@ -128,16 +135,16 @@ class ExternalTableStatisticsTest {
         }
         List<String> chunks = ExternalTableStatistics.encode(rows, table);
         Assertions.assertTrue(chunks.size() > 1);
-        var decoded = ExternalTableStatistics.decode(chunks, table, Map.of());
+        var decoded = ExternalTableStatistics.decode(chunks, table, NAME, Map.of());
         Assertions.assertEquals(3000, decoded.columns.size());
         List<String> duplicate = new ArrayList<>(chunks);
         duplicate.add(chunks.get(0));
         Assertions.assertThrows(IllegalArgumentException.class,
-                () -> ExternalTableStatistics.decode(duplicate, table, Map.of()));
+                () -> ExternalTableStatistics.decode(duplicate, table, NAME, Map.of()));
         Assertions.assertThrows(IllegalArgumentException.class, () -> ExternalTableStatistics.decode(
-                List.of(chunks.get(0).replace("\"version\":1", "\"version\":99")), table, Map.of()));
+                List.of(chunks.get(0).replace("\"version\":1", "\"version\":99")), table, NAME, Map.of()));
         Assertions.assertThrows(IllegalArgumentException.class, () -> ExternalTableStatistics.decode(
-                ExternalTableStatistics.encode(List.of(row("bad", -1)), table), table, Map.of()));
+                ExternalTableStatistics.encode(List.of(row("bad", -1)), table), table, NAME, Map.of()));
     }
 
     @Test
@@ -146,7 +153,7 @@ class ExternalTableStatisticsTest {
         var chunks = ExternalTableStatistics.encode(List.of(row("a", 100), row("b", 200)), table);
         when(table.getColumn("a")).thenReturn(new Column("a", IntegerType.INT));
         when(table.getColumn("b")).thenReturn(null);
-        Assertions.assertTrue(ExternalTableStatistics.decode(chunks, table, Map.of()).columns.isEmpty());
+        Assertions.assertTrue(ExternalTableStatistics.decode(chunks, table, NAME, Map.of()).columns.isEmpty());
     }
     @Test
     void typedBoundsAndSampleExtrapolationRemainUnchanged() {
@@ -167,7 +174,8 @@ class ExternalTableStatisticsTest {
                 java.util.Set.of(1L, 2L), 8);
         Map<String, ColumnStatsMeta> metadata = fullMetadata("ts", "text", "i");
         metadata.put("d", sample);
-        var decoded = ExternalTableStatistics.decode(ExternalTableStatistics.encode(rows, table), table, metadata);
+        var decoded = ExternalTableStatistics.decode(ExternalTableStatistics.encode(rows, table), table, NAME,
+                metadata);
         for (TStatisticData row : rows) {
             var expected = ColumnBasicStatsCacheLoader.buildColumnStatistics(row, "", "", "t", row.columnName,
                     types.get(row.columnName));
@@ -180,4 +188,36 @@ class ExternalTableStatisticsTest {
         Assertions.assertEquals(400, decoded.summaries.get("d").estimated.getRowCount());
     }
 
+    // Tables of one name live in many databases and catalogs, so we expect the warning about the stored bounds of a
+    // column to name the catalog and the database of the table, and a reader of the log to find that table.
+    @Test
+    void warningAboutAbnormalBoundsNamesTheWholeTable() {
+        Table table = table();
+        List<String> warnings = new ArrayList<>();
+        org.apache.logging.log4j.core.Logger logger =
+                (org.apache.logging.log4j.core.Logger) LogManager.getLogger(ColumnBasicStatsCacheLoader.class);
+        Level oldLevel = logger.getLevel();
+        AbstractAppender appender = new AbstractAppender("external-table-statistics-warnings", null, null) {
+            @Override
+            public void append(LogEvent event) {
+                if (event.getLevel() == Level.WARN) {
+                    warnings.add(event.getMessage().getFormattedMessage());
+                }
+            }
+        };
+        appender.start();
+        logger.addAppender(appender);
+        logger.setLevel(Level.WARN);
+        try {
+            ExternalTableStatistics.decode(
+                    ExternalTableStatistics.encode(List.of(row("c", 100).setMin("9").setMax("1")), table),
+                    table, NAME, Map.of());
+        } finally {
+            logger.removeAppender(appender);
+            logger.setLevel(oldLevel);
+            appender.stop();
+        }
+        String expected = "Min: 9.0, Max: 1.0 values abnormal for catalog : iceberg, db : landing_db, table : t, column : c";
+        Assertions.assertTrue(warnings.stream().anyMatch(warning -> warning.contains(expected)), warnings.toString());
+    }
 }

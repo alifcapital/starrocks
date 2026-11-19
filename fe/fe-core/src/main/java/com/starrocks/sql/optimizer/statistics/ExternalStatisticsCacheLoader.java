@@ -16,6 +16,7 @@ package com.starrocks.sql.optimizer.statistics;
 
 import com.github.benmanes.caffeine.cache.AsyncCacheLoader;
 import com.starrocks.catalog.Table;
+import com.starrocks.catalog.TableName;
 import com.starrocks.common.FeConstants;
 import com.starrocks.connector.statistics.StatisticsUtils;
 import com.starrocks.qe.ConnectContext;
@@ -105,6 +106,7 @@ public class ExternalStatisticsCacheLoader
                     var meta = GlobalStateMgr.getCurrentState().getAnalyzeMgr()
                             .getExternalTableBasicStatsMeta(name.get(0), name.get(1), name.get(2));
                     value = Optional.of(ExternalTableStatistics.decode(chunks, table,
+                            new TableName(name.get(0), name.get(1), name.get(2)),
                             meta == null ? Map.of() : meta.getColumnStatsMetaMap()));
                 }
                 return Map.of(ExternalStatisticsCacheKey.tableRow(uuid), value);

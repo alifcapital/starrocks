@@ -19,6 +19,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.starrocks.catalog.Table;
+import com.starrocks.catalog.TableName;
 import com.starrocks.common.Config;
 import com.starrocks.connector.statistics.ConnectorTableColumnStats;
 import com.starrocks.connector.statistics.StatisticsUtils;
@@ -106,7 +107,10 @@ public final class ExternalTableStatistics implements ExternalColumnStatistics {
         return root.toString();
     }
 
-    public static ExternalTableStatistics decode(List<String> chunks, Table table, Map<String, ColumnStatsMeta> metadata) {
+    // We want a warning about the stored statistics of a column to say which table it is, and tables of one name
+    // live in many databases and catalogs, so the caller gives the full name of the table.
+    public static ExternalTableStatistics decode(List<String> chunks, Table table, TableName tableName,
+                                                 Map<String, ColumnStatsMeta> metadata) {
         Map<String, ExternalColumnStatistics.Summary> values = new LinkedHashMap<>();
         for (String chunk : chunks) {
             JsonObject root = JsonParser.parseString(chunk).getAsJsonObject();
@@ -149,7 +153,7 @@ public final class ExternalTableStatistics implements ExternalColumnStatistics {
                     data.setUpdateTime(row.get(8).getAsString());
                 }
                 ColumnStatistic statistic = ColumnBasicStatsCacheLoader.buildColumnStatistics(
-                        data, "", "", table.getName(), name, type);
+                        data, tableName.getCatalog(), tableName.getDb(), tableName.getTbl(), name, type);
                 ConnectorTableColumnStats raw = new ConnectorTableColumnStats(statistic, data.rowCount, data.updateTime);
                 ConnectorTableColumnStats estimated = StatisticsUtils.estimateColumnStatistics(metadata.get(name), raw);
                 if (values.put(name, new ExternalColumnStatistics.Summary(raw, estimated, storedType)) != null) {
