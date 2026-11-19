@@ -40,6 +40,14 @@ const int STATISTIC_MULTI_COLUMN_VERSION = 12;
 const int STATISTIC_QUERY_MULTI_COLUMN_VERSION = 13;
 const int STATISTIC_PARTITION_VERSION_V2 = 20;
 
+// A nullable column leaves the value under a NULL row undefined. We fear that the reader of a statistic takes that
+// value for a real min or max, so a NULL bound is sent as '', as the statistics collection stores a column with no
+// value.
+template <LogicalType Type>
+static std::string bound_or_empty(const ColumnViewer<Type>& viewer, size_t row) {
+    return viewer.is_null(row) ? std::string() : viewer.value(row).to_string();
+}
+
 StatisticResultWriter::StatisticResultWriter(BufferControlBlock* sinker,
                                              const std::vector<ExprContext*>& output_expr_ctxs,
                                              starrocks::RuntimeProfile* parent_profile)
@@ -219,8 +227,8 @@ Status StatisticResultWriter::_fill_statistic_data_v1(int version, const Columns
     const auto* dataSizes = down_cast<const Int64Column*>(ColumnHelper::get_data_column(columns[6].get()));
     const auto* countDistincts = down_cast<const Int64Column*>(ColumnHelper::get_data_column(columns[7].get()));
     const auto* nullCounts = down_cast<const Int64Column*>(ColumnHelper::get_data_column(columns[8].get()));
-    const auto* maxColumn = down_cast<const BinaryColumn*>(ColumnHelper::get_data_column(columns[9].get()));
-    const auto* minColumn = down_cast<const BinaryColumn*>(ColumnHelper::get_data_column(columns[10].get()));
+    auto maxColumn = ColumnViewer<TYPE_VARCHAR>(columns[9]);
+    auto minColumn = ColumnViewer<TYPE_VARCHAR>(columns[10]);
 
     std::vector<TStatisticData> data_list;
     int num_rows = chunk->num_rows();
@@ -235,8 +243,8 @@ Status StatisticResultWriter::_fill_statistic_data_v1(int version, const Columns
         data_list[i].__set_dataSize(dataSizes->get(i).get_int64());
         data_list[i].__set_countDistinct(countDistincts->get(i).get_int64());
         data_list[i].__set_nullCount(nullCounts->get(i).get_int64());
-        data_list[i].__set_max(maxColumn->get_slice(i).to_string());
-        data_list[i].__set_min(minColumn->get_slice(i).to_string());
+        data_list[i].__set_max(bound_or_empty(maxColumn, i));
+        data_list[i].__set_min(bound_or_empty(minColumn, i));
     }
 
     result->result_batch.rows.resize(num_rows);
@@ -266,8 +274,8 @@ Status StatisticResultWriter::_fill_statistic_data_v2(int version, const Columns
     auto* dataSizes = down_cast<const Int64Column*>(ColumnHelper::get_data_column(columns[6].get()));
     auto* countDistincts = down_cast<const Int64Column*>(ColumnHelper::get_data_column(columns[7].get()));
     auto* nullCounts = down_cast<const Int64Column*>(ColumnHelper::get_data_column(columns[8].get()));
-    auto* maxColumn = down_cast<const BinaryColumn*>(ColumnHelper::get_data_column(columns[9].get()));
-    auto* minColumn = down_cast<const BinaryColumn*>(ColumnHelper::get_data_column(columns[10].get()));
+    auto maxColumn = ColumnViewer<TYPE_VARCHAR>(columns[9]);
+    auto minColumn = ColumnViewer<TYPE_VARCHAR>(columns[10]);
     auto* collectionSize = down_cast<const Int64Column*>(ColumnHelper::get_data_column(columns[11].get()));
 
     std::vector<TStatisticData> data_list;
@@ -283,8 +291,8 @@ Status StatisticResultWriter::_fill_statistic_data_v2(int version, const Columns
         data_list[i].__set_dataSize(dataSizes->get(i).get_int64());
         data_list[i].__set_countDistinct(countDistincts->get(i).get_int64());
         data_list[i].__set_nullCount(nullCounts->get(i).get_int64());
-        data_list[i].__set_max(maxColumn->get_slice(i).to_string());
-        data_list[i].__set_min(minColumn->get_slice(i).to_string());
+        data_list[i].__set_max(bound_or_empty(maxColumn, i));
+        data_list[i].__set_min(bound_or_empty(minColumn, i));
         data_list[i].__set_collectionSize(collectionSize->get(i).get_int64());
     }
 
@@ -424,8 +432,8 @@ Status StatisticResultWriter::_fill_full_statistic_data_v4(int version, const Co
         data_list[i].__set_dataSize(dataSizes.value(i));
         data_list[i].__set_hll(hll.value(i).to_string());
         data_list[i].__set_nullCount(nullCounts.value(i));
-        data_list[i].__set_max(max.value(i).to_string());
-        data_list[i].__set_min(min.value(i).to_string());
+        data_list[i].__set_max(bound_or_empty(max, i));
+        data_list[i].__set_min(bound_or_empty(min, i));
     }
 
     result->result_batch.rows.resize(num_rows);
@@ -467,8 +475,8 @@ Status StatisticResultWriter::_fill_full_statistic_data_v5(int version, const Co
         data_list[i].__set_dataSize(dataSizes.value(i));
         data_list[i].__set_hll(hll.value(i).to_string());
         data_list[i].__set_nullCount(nullCounts.value(i));
-        data_list[i].__set_max(max.value(i).to_string());
-        data_list[i].__set_min(min.value(i).to_string());
+        data_list[i].__set_max(bound_or_empty(max, i));
+        data_list[i].__set_min(bound_or_empty(min, i));
         data_list[i].__set_collectionSize(collection_size.value(i));
     }
 
@@ -607,8 +615,8 @@ Status StatisticResultWriter::_fill_full_statistic_data_external(int version, co
         data_list[i].__set_dataSize(dataSizes.value(i));
         data_list[i].__set_hll(hll.value(i).to_string());
         data_list[i].__set_nullCount(nullCounts.value(i));
-        data_list[i].__set_max(max.value(i).to_string());
-        data_list[i].__set_min(min.value(i).to_string());
+        data_list[i].__set_max(bound_or_empty(max, i));
+        data_list[i].__set_min(bound_or_empty(min, i));
     }
 
     result->result_batch.rows.resize(num_rows);
@@ -646,8 +654,8 @@ Status StatisticResultWriter::_fill_full_statistic_query_external(int version, c
         data_list[i].__set_dataSize(dataSizes.value(i));
         data_list[i].__set_countDistinct(countDistincts.value(i));
         data_list[i].__set_nullCount(nullCounts.value(i));
-        data_list[i].__set_max(maxColumn.value(i).to_string());
-        data_list[i].__set_min(minColumn.value(i).to_string());
+        data_list[i].__set_max(bound_or_empty(maxColumn, i));
+        data_list[i].__set_min(bound_or_empty(minColumn, i));
     }
 
     result->result_batch.rows.resize(num_rows);
@@ -686,8 +694,8 @@ Status StatisticResultWriter::_fill_full_statistic_query_external_v2(int version
         data_list[i].__set_dataSize(dataSizes.value(i));
         data_list[i].__set_countDistinct(countDistincts.value(i));
         data_list[i].__set_nullCount(nullCounts.value(i));
-        data_list[i].__set_max(maxColumn.value(i).to_string());
-        data_list[i].__set_min(minColumn.value(i).to_string());
+        data_list[i].__set_max(bound_or_empty(maxColumn, i));
+        data_list[i].__set_min(bound_or_empty(minColumn, i));
         data_list[i].__set_updateTime(updateTime.value(i).to_string());
     }
 
