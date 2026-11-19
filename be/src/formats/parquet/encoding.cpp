@@ -66,6 +66,10 @@ void Decoder::_truncate(Column* dst, size_t size) {
     }
 }
 
+size_t Decoder::_size(const Column* dst) {
+    return dst->size();
+}
+
 Status Decoder::_check_nulls_fit(const NullInfos& null_infos, const Column* dst, size_t count) const {
     if (UNLIKELY(null_infos.num_nulls > 0 && !dst->is_nullable())) {
         return Status::Corruption(strings::Substitute(

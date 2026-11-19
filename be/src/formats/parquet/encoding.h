@@ -136,6 +136,10 @@ protected:
     // column, and its has_null flag.
     static void _truncate(Column* dst, size_t size);
 
+    // Gives the number of rows of `dst`. This header knows Column only by its declaration, and a template may not use
+    // the members of an incomplete type, so `_append_or_rollback` takes the size through this function.
+    static size_t _size(const Column* dst);
+
     // Runs `append`, which adds the rows of a batch to `dst`, and gives `dst` back as it was when `append` returns an
     // error. We fear a page that is short or corrupt in the middle of a batch: the rows that were appended before
     // the error were not decoded, the offsets of a binary column may not match its bytes, and the next use of the
@@ -143,7 +147,7 @@ protected:
     // against the page before it changes the column. The position of the decoder is not part of this.
     template <typename Append>
     static Status _append_or_rollback(Column* dst, Append&& append) {
-        const size_t size = dst->size();
+        const size_t size = _size(dst);
         Status status = append();
         if (UNLIKELY(!status.ok())) {
             _truncate(dst, size);
