@@ -102,6 +102,7 @@ set(EXEC_FILES
         ./exec/pipeline/sink/memory_scratch_sink_operator_test.cpp
         ./exec/pipeline/limit_operator_test.cpp
         ./exec/pipeline/raw_values_source_operator_test.cpp
+        ./exec/pipeline/runtime_filter_merger_test.cpp
         ./exec/pipeline/nljoin_probe_operator_test.cpp
         ./exec/pipeline/local_bucket_shuffle_test.cpp
         ./exec/pipeline/local_shuffle_alignment_test.cpp
@@ -187,6 +188,8 @@ set(EXEC_FILES
         ./exprs/agg/window_test.cpp
         ./exprs/agg/agg_compressed_key_test.cpp
         ./exprs/agg/agg_state_functions_test.cpp
+        ./exprs/agg/stats_sketch_agg_test.cpp
+        ./exprs/stats_functions_test.cpp
         ./exprs/selected_collection_functions_test.cpp
         ./exprs/selected_functions_test.cpp
         ./exprs/selected_operators_test.cpp
