@@ -423,7 +423,7 @@ private:
                                              " must be a JSON array of strings");
                 }
                 std::string value_text{value_view};
-                Item v;
+                Item v{};
                 if constexpr (lt_is_string<LT>) {
                     v.assign(value_view.data(), value_view.size());
                 } else {
