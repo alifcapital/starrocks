@@ -91,6 +91,9 @@ public class BDBEnvironment {
     private static final int MEMORY_CACHE_PERCENT = 20;
     // wait at most 10 seconds after environment initialized for state change
     private static final int INITIAL_STATE_CHANGE_WAIT_SEC = 10;
+    // The role usually arrives a few milliseconds after the environment is opened, so we poll with a short step:
+    // a long step would add its full length to every FE start.
+    private static final long STATE_CHANGE_POLL_INTERVAL_MS = 20;
 
     public static final String STARROCKS_JOURNAL_GROUP = "PALO_JOURNAL_GROUP";
     private static final String BDB_DIR = "/bdb";
@@ -280,11 +283,9 @@ public class BDBEnvironment {
 
                 LOG.info("replicated environment is all set, wait for state change...");
                 // wait for master change, otherwise a ReplicaWriteException exception will be thrown
-                for (int j = 0; j < INITIAL_STATE_CHANGE_WAIT_SEC; j++) {
-                    if (FrontendNodeType.UNKNOWN != listener.getNewType()) {
-                        break;
-                    }
-                    Thread.sleep(1000);
+                long stateChangeDeadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(INITIAL_STATE_CHANGE_WAIT_SEC);
+                while (FrontendNodeType.UNKNOWN == listener.getNewType() && System.nanoTime() < stateChangeDeadlineNs) {
+                    Thread.sleep(STATE_CHANGE_POLL_INTERVAL_MS);
                 }
                 LOG.info("state change done, current role {}", listener.getNewType());
 
