@@ -287,6 +287,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 
 @IgnoreMemoryTrack
 public class GlobalStateMgr {
@@ -1248,6 +1249,15 @@ public class GlobalStateMgr {
     }
 
     public void initialize(String helpers) throws Exception {
+        initialize(helpers, null);
+    }
+
+    /**
+     * @param afterJournalReady runs once the journal is created and before the image is loaded, or is null. We want
+     *                          the start of what needs only the journal to overlap with the load of the image, and
+     *                          the caller decides what that is.
+     */
+    public void initialize(String helpers, Consumer<Journal> afterJournalReady) throws Exception {
         // must judge whether it is first time start here before initializing GlobalStateMgr.
         // Possibly remove clusterId and role to ensure that the system is not left in a half-initialized state.
         boolean isFirstTimeStart = nodeMgr.isVersionAndRoleFilesNotExist();
@@ -1279,6 +1289,9 @@ public class GlobalStateMgr {
 
             // 3. Load image first and replay edits
             initJournal();
+            if (afterJournalReady != null) {
+                afterJournalReady.accept(journal);
+            }
             loadImage(); // load image file
 
             // 4. create load and export job label cleaner thread

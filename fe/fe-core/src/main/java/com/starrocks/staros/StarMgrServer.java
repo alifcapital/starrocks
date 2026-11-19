@@ -44,7 +44,10 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class StarMgrServer {
     public static final String IMAGE_SUBDIR = "/starmgr"; // do not change this string!
@@ -58,6 +61,12 @@ public class StarMgrServer {
     private static long checkpointThreadId = -1;
     private String imageDir;
     private StateChangeExecution execution;
+
+    // Set by initializeInBackground() before the initialization starts, and never cleared: once it is done,
+    // awaitInitialized() returns at once.
+    private volatile CompletableFuture<Void> backgroundInitialization;
+    private volatile Thread initializationThread;
+    private final AtomicBoolean waitLogged = new AtomicBoolean();
 
     private static class SingletonHolder {
         private static final StarMgrServer INSTANCE = new StarMgrServer();
@@ -78,16 +87,36 @@ public class StarMgrServer {
             // only checkpoint thread it self will goes here.
             // so no need to care about thread safe.
             if (CHECKPOINT == null) {
+                SingletonHolder.INSTANCE.awaitBeforeUse();
                 CHECKPOINT = new StarMgrServer(SingletonHolder.INSTANCE.getJournalSystem().getJournal());
             }
             return CHECKPOINT;
         } else {
+            SingletonHolder.INSTANCE.awaitBeforeUse();
             return SingletonHolder.INSTANCE;
         }
     }
 
     public static StarMgrServer getServingState() {
+        SingletonHolder.INSTANCE.awaitBeforeUse();
         return SingletonHolder.INSTANCE;
+    }
+
+    /**
+     * For the callers that reach StarMgr without a StarMgrServer, like the client of StarOSAgent: they wait for
+     * the initialization like getCurrentState() does.
+     */
+    public static void awaitServingInitialized() {
+        SingletonHolder.INSTANCE.awaitBeforeUse();
+    }
+
+    /**
+     * The FE start waits here for the initialization and gets its failure. getCurrentState() logs the first caller that
+     * waits, to show a caller that reaches StarMgr before the start does; we do not want the wait of the start itself
+     * in that log, so the start waits here without getCurrentState().
+     */
+    public static void awaitStartInitialized() {
+        SingletonHolder.INSTANCE.awaitInitialized();
     }
 
     private StarManagerServer starMgrServer;
@@ -138,6 +167,69 @@ public class StarMgrServer {
     public void initialize(BDBEnvironment environment, String baseImageDir) throws IOException {
         StarOSBDBJEJournalSystem bdbJournalSystem = new StarOSBDBJEJournalSystem(environment);
         initializeImpl(bdbJournalSystem, baseImageDir);
+    }
+
+    /**
+     * We want the FE start to overlap the start of StarMgr with the load of the FE image, so this runs
+     * initialize() in its own thread. Everything that reaches StarMgr from now on waits for it, see
+     * awaitInitialized(): a caller that comes while StarMgr starts then sees the same StarMgr as a caller that
+     * comes after the start, and nothing depends on the order of the calls.
+     */
+    public void initializeInBackground(BDBEnvironment environment, String baseImageDir) {
+        initializeInBackground(() -> initialize(environment, baseImageDir));
+    }
+
+    @FunctionalInterface
+    public interface Initialization {
+        void run() throws Exception;
+    }
+
+    public void initializeInBackground(Initialization initialization) {
+        CompletableFuture<Void> done = new CompletableFuture<>();
+        Thread thread = new Thread(() -> {
+            try {
+                initialization.run();
+                done.complete(null);
+            } catch (Throwable t) {
+                done.completeExceptionally(t);
+            }
+        }, "starmgr-init");
+        thread.setDaemon(true);
+        initializationThread = thread;
+        // Published before the thread runs, so that no caller can pass awaitInitialized() before the initialization.
+        backgroundInitialization = done;
+        thread.start();
+    }
+
+    /**
+     * Waits until the initialization started by initializeInBackground() is over, and throws its failure. It
+     * returns at once when there is no such initialization, and in the initialization thread itself, which
+     * reaches StarMgr while it initializes it.
+     */
+    public void awaitInitialized() {
+        awaitInitialization(false);
+    }
+
+    // A caller that waits here reaches StarMgr before the FE start has waited for it. That is fine, but we want to
+    // see it in the log when it happens, so that a new caller in the early part of the start is noticed.
+    private void awaitBeforeUse() {
+        awaitInitialization(true);
+    }
+
+    private void awaitInitialization(boolean logWait) {
+        CompletableFuture<Void> initialization = backgroundInitialization;
+        if (initialization == null || Thread.currentThread() == initializationThread) {
+            return;
+        }
+        if (logWait && !initialization.isDone() && waitLogged.compareAndSet(false, true)) {
+            LOG.warn("Thread {} waits for StarMgr to finish its initialization", Thread.currentThread().getName(),
+                    new Exception("caller of the first wait"));
+        }
+        try {
+            initialization.join();
+        } catch (CompletionException e) {
+            throw new IllegalStateException("StarMgr failed to initialize", e.getCause());
+        }
     }
 
     private void initializeImpl(StarOSBDBJEJournalSystem bdbJournalSystem, String baseImageDir) throws IOException {

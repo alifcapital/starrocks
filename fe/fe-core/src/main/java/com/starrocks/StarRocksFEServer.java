@@ -77,6 +77,7 @@ import java.nio.channels.FileLock;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 public class StarRocksFEServer {
     private static final Logger LOG = LogManager.getLogger(StarRocksFEServer.class);
@@ -132,20 +133,32 @@ public class StarRocksFEServer {
             ExecuteEnv.setup();
 
             // init globalStateMgr
-            GlobalStateMgr.getCurrentState().initialize(cmdLineOpts.getHelpers());
+            // The run mode is read from the config when GlobalStateMgr is built, and we decide by it whether StarMgr
+            // starts with the journal. So GlobalStateMgr is built first: before that the run mode is always shared
+            // nothing, and a shared data FE would start without StarMgr.
+            GlobalStateMgr globalStateMgr = GlobalStateMgr.getCurrentState();
+            Consumer<Journal> startStarMgr = null;
+            if (RunMode.isSharedDataMode()) {
+                // StarMgr needs only the journal, so it starts while the image loads, and we wait for it below.
+                startStarMgr = journal -> {
+                    if (journal instanceof BDBJEJournal) {
+                        BDBEnvironment bdbEnvironment = ((BDBJEJournal) journal).getBdbEnvironment();
+                        StarMgrServer.getCurrentState()
+                                .initializeInBackground(bdbEnvironment, GlobalStateMgr.getImageDirPath());
+                    } else {
+                        LOG.error("journal type should be BDBJE for star mgr!");
+                        System.exit(-1);
+                    }
+                };
+            }
+            globalStateMgr.initialize(cmdLineOpts.getHelpers(), startStarMgr);
             // The Ranger policies load while the image loads. We want a failed load to fail the start, and the FE to
             // serve only with the policies loaded, so we wait for the load here.
-            GlobalStateMgr.getCurrentState().awaitDefaultAccessControl();
+            globalStateMgr.awaitDefaultAccessControl();
 
             if (RunMode.isSharedDataMode()) {
-                Journal journal = GlobalStateMgr.getCurrentState().getJournal();
-                if (journal instanceof BDBJEJournal) {
-                    BDBEnvironment bdbEnvironment = ((BDBJEJournal) journal).getBdbEnvironment();
-                    StarMgrServer.getCurrentState().initialize(bdbEnvironment, GlobalStateMgr.getImageDirPath());
-                } else {
-                    LOG.error("journal type should be BDBJE for star mgr!");
-                    System.exit(-1);
-                }
+                // A failure of the StarMgr start fails the FE start here.
+                StarMgrServer.awaitStartInitialized();
 
                 StateChangeExecutor.getInstance().registerStateChangeExecution(
                         StarMgrServer.getCurrentState().getStateChangeExecution());
