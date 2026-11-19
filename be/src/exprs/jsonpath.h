@@ -84,6 +84,9 @@ struct ArraySelectorSingle final : public ArraySelector {
 struct ArraySelectorWildcard final : public ArraySelector {
     ArraySelectorWildcard() { type = WILDCARD; }
 
+    // We want the virtual match of the base to stay visible here, as in the selectors that override it. The static
+    // match below hides every match of the base by its name, so we bring them back with a using-declaration.
+    using ArraySelector::match;
     static bool match(const std::string& input);
 
     void iterate(vpack::Slice array_slice, std::function<void(vpack::Slice)> callback) override;

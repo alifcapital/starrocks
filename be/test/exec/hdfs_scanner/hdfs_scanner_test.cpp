@@ -242,7 +242,7 @@ TEST_F(HdfsScannerTest, TestCacheSelectReaderReadPopulatesDataCache) {
         HdfsScannerStats app_stats;
         OpenFileOptions options{.fs = FileSystem::Default(),
                                 .file_path = default_parquet_file,
-                                .file_size = file_size,
+                                .file_size = static_cast<int64_t>(file_size),
                                 .fs_stats = fs_stats,
                                 .app_stats = &app_stats,
                                 .datacache_options = datacache_options};

@@ -284,7 +284,10 @@ static std::string get_timezone_offset_string(const google::LogMessageTime& time
     }
 
     // Slow path: recalculate and update cache
-    char tz_str[16] = "+0000";
+    // The offset of a time zone has at most two digits of hours, but the compiler only knows that the format prints
+    // two ints. We want snprintf never to cut the string, so the buffer holds the widest output of the format: a sign,
+    // two ints of up to 11 characters and the terminating zero.
+    char tz_str[24] = "+0000";
     int offset_hours = static_cast<int>(offset_seconds / 3600);
     int offset_mins = static_cast<int>((offset_seconds % 3600) / 60);
     if (offset_mins < 0) offset_mins = -offset_mins;

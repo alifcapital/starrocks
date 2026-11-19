@@ -69,7 +69,7 @@ public:
             // view (never view.data(), which would run strlen off the end of a non-NUL-terminated
             // load buffer).
             std::string_view view;
-            (void)value.raw_json().get(view);
+            [[maybe_unused]] auto error = value.raw_json().get(view);
             auto err_msg = strings::Substitute("Failed to convert simdjson value, json=$0, error=$1", view,
                                                simdjson::error_message(e.error()));
             return Status::DataQualityError(err_msg);

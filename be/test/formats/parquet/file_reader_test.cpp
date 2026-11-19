@@ -1235,7 +1235,9 @@ TEST_F(FileReaderTest, ExpectedRawRowsAreTheRawRowsOfAReaderThatIsReadToItsEnd) 
         auto reader = _create_file_reader(path);
         ASSERT_OK(reader->init(ctx));
         const int64_t expected = reader->expected_raw_rows();
-        if (expected_rows >= 0) EXPECT_EQ(expected_rows, expected);
+        if (expected_rows >= 0) {
+            EXPECT_EQ(expected_rows, expected);
+        }
         while (true) {
             auto chunk = _create_chunk();
             auto status = reader->get_next(&chunk);
@@ -3062,7 +3064,7 @@ TEST_F(FileReaderTest, TestStructSubfieldDictFilter) {
             ASSERT_EQ("{c0:'55',c_struct:{c0:'55',c1:'46'}}", chunk->get_column_by_slot_id(3)->debug_item(0));
             const auto& c_struct_struct = chunk->get_column_by_slot_id(3);
             expect_string_data_column(get_struct_field_column(c_struct_struct, "c0"));
-            const auto& c_struct = get_struct_field_column(c_struct_struct, "c_struct");
+            const ColumnPtr c_struct = get_struct_field_column(c_struct_struct, "c_struct");
             expect_string_data_column(get_struct_field_column(c_struct, "c0"));
             expect_string_data_column(get_struct_field_column(c_struct, "c1"));
         }

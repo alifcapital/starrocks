@@ -307,8 +307,14 @@ public:
 
     // Field offsets within CurrentThread, exposed for eBPF programs that locate
     // these fields via g_tls_thread_status_tpoff + g_tls_*_offset.
+    // CurrentThread is not standard-layout, and for such a type the standard leaves offsetof to the compiler, so GCC
+    // warns in every file that includes this header. GCC and Clang give the offset of the field, which is what the
+    // eBPF programs need, so we turn the warning off for these two functions.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winvalid-offsetof"
     static constexpr size_t query_id_offset() { return offsetof(CurrentThread, _query_id); }
     static constexpr size_t module_type_offset() { return offsetof(CurrentThread, _module_type); }
+#pragma GCC diagnostic pop
 
     void set_custom_coredump_msg(const std::string& custom_coredump_msg) { _custom_coredump_msg = custom_coredump_msg; }
 

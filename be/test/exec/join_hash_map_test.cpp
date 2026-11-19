@@ -1203,7 +1203,9 @@ TEST_F(JoinHashMapTest, LinearChainedPrefetchPreservesMatches) {
                     ASSERT_LT(j, build_keys.size());
                     ASSERT_LT(matches, build_keys.size()); // Detect a cyclic chain.
                     EXPECT_EQ(build_keys[j], probe_keys[i]);
-                    if (nullable) EXPECT_EQ(build_nulls[j], 0);
+                    if (nullable) {
+                        EXPECT_EQ(build_nulls[j], 0);
+                    }
                     ++matches;
                 }
                 EXPECT_EQ(matches, expected);

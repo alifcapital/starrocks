@@ -129,7 +129,7 @@ TEST_F(SelectedFunctionsTest, UnselectedRowsCannotRaiseErrors) {
     auto input = strings({"abc", nullptr, oversized.c_str(), "", "tail"});
     compare(ctx.get(), EncryptionFunctions::to_base64, EncryptionFunctions::to_base64_selected, {input});
     std::vector<uint32_t> invalid{2};
-    EXPECT_ANY_THROW(EncryptionFunctions::to_base64_selected(ctx.get(), {{input, &invalid}}, 1));
+    EXPECT_ANY_THROW((void)EncryptionFunctions::to_base64_selected(ctx.get(), {{input, &invalid}}, 1));
 
     auto text = strings({"abc123", nullptr, "unused", "", "xx456yy"});
     auto patterns = strings({"[0-9]+", "[a-z]+", "[", ".*", "456"});

@@ -681,7 +681,6 @@ TEST_F(LakeTabletManagerTest, create_tablet_with_range) {
 }
 
 TEST_F(LakeTabletManagerTest, create_tablet_with_range_null_values) {
-    auto fs = FileSystem::Default();
     auto tablet_id = next_id();
     auto schema_id = next_id();
 
@@ -758,7 +757,6 @@ TEST_F(LakeTabletManagerTest, create_tablet_with_range_rejects_min_max) {
 
 TEST_F(LakeTabletManagerTest, create_tablet_without_range) {
     // Test backward compatibility: create tablet without range
-    auto fs = FileSystem::Default();
     auto tablet_id = next_id();
     auto schema_id = next_id();
 

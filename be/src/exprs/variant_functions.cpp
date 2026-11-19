@@ -166,7 +166,6 @@ StatusOr<ColumnPtr> VariantFunctions::_do_variant_query(FunctionContext* context
 
 template <typename Inputs>
 StatusOr<ColumnPtr> VariantFunctions::variant_typeof_impl(FunctionContext* context, const Inputs& columns) {
-    const auto& variant_column = input_column(columns[0]);
     auto variant_viewer = FunctionColumnViewer<TYPE_VARIANT, Inputs>(columns[0]);
     size_t num_rows = input_num_rows(columns);
 

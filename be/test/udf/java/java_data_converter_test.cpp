@@ -293,7 +293,6 @@ TEST_F(DataConverterTest, decimal_roundtrip) {
 // BigDecimal values that exceed the target DECIMAL(p,s) range are either rejected (REPORT_ERROR
 // = default) or silently nulled out (OUTPUT_NULL), matching built-in decimal cast semantics.
 TEST_F(DataConverterTest, append_jvalue_decimal_overflow) {
-    auto& helper = JVMFunctionHelper::getInstance();
     TypeDescriptor tdesc = TypeDescriptor::create_decimalv3_type(TYPE_DECIMAL64, 5, 2); // max 999.99
 
     // Build a BigDecimal with a value that fits in BigDecimal but not in DECIMAL64(5,2).

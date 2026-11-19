@@ -619,7 +619,6 @@ TEST_F(VariantRowValueTest, ComplexObjectCopyMove) {
     EXPECT_EQ(*expected_json, *moved_json);
 
     // Verify the metadata and value are correctly bound
-    const VariantMetadata& meta = moved.get_metadata();
     const VariantValue& var = moved.get_value();
     EXPECT_EQ(VariantType::OBJECT, var.type());
 }
