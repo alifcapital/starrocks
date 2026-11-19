@@ -237,6 +237,10 @@ done
 # might be loaded instead of StarRocks' version (which uses the correct new paths
 # like org.apache.thrift.transport.layered.TFramedTransport).
 export CLASSPATH=${STARROCKS_HOME}/lib/fe-core-4.1.jar:${STARROCKS_HOME}/lib/starrocks-hadoop-ext.jar:${CLASSPATH}:${STARROCKS_HOME}/lib:${STARROCKS_HOME}/conf
+# The jars put at the front come again from the loop over lib/*.jar, and the loop leaves an empty entry. We want every
+# entry once: the JVM drops repeated entries when it writes an AppCDS archive and refuses the archive for a class path
+# that still has them. The first entry of a jar wins, so the classes that the JVM loads stay the same.
+CLASSPATH=$(echo "$CLASSPATH" | tr ':' '\n' | awk 'NF && !seen[$0]++' | paste -sd: -)
 
 pidfile=$PID_DIR/fe.pid
 
