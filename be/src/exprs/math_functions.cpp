@@ -603,19 +603,20 @@ StatusOr<ColumnPtr> MathFunctions::iceberg_bucket_timestamptz_datetime(FunctionC
 
 template <typename T>
 vector<uint8_t> MathFunctions::int_to_byte_array(T value) {
-    std::vector<uint8_t> byteArray(sizeof(value));
-    memcpy(byteArray.data(), &value, sizeof(value));
-    if (value < 0) {
-        value = ~value;
-    }
+    T magnitude = value < 0 ? ~value : value;
     int bitLength = 0;
-    while (value > 0) {
-        value >>= 1;
+    while (magnitude > 0) {
+        magnitude >>= 1;
         bitLength++;
     }
     // Convert the integer to its byte representation (Big Endian)
-    byteArray.resize(bitLength / 8 + 1);
-    std::reverse(byteArray.begin(), byteArray.end());
+    // We want the fewest bytes that hold the value in two's complement, the highest first. They are taken with shifts:
+    // GCC vectorizes a reverse of the copied bytes with stores wider than the array and warns about them.
+    const size_t size = bitLength / 8 + 1;
+    std::vector<uint8_t> byteArray(size);
+    for (size_t i = 0; i < size; i++) {
+        byteArray[size - 1 - i] = static_cast<uint8_t>(value >> (8 * i));
+    }
     return byteArray;
 }
 

@@ -144,9 +144,12 @@ struct PredicateFilterEvaluator {
             }
         }
         for (const auto& child : node.compound_children()) {
-            ASSIGN_OR_RETURN(auto range, child.visit(*this, Evaluator::ROWGROUP_ZONEMAP));
+            // The range of a child is used where it is, in its StatusOr: GCC warns that a std::optional moved out of
+            // a StatusOr may be destroyed uninitialized, and nothing needs the range after the merge.
+            auto range = child.visit(*this, Evaluator::ROWGROUP_ZONEMAP);
+            RETURN_IF_ERROR(range.status());
             combine(node_matches[child.id()]);
-            PredicateFilterEvaluatorUtils::merge_child_row_ranges<Type>(row_ranges, range, first, rows);
+            PredicateFilterEvaluatorUtils::merge_child_row_ranges<Type>(row_ranges, range.value(), first, rows);
         }
         node_matches[node.id()] = row_ranges.has_value() && row_ranges->span_size() == 0 ? ZoneMapMatch::NONE
                                   : visited && all_match                                 ? ZoneMapMatch::ALL
@@ -197,9 +200,10 @@ struct PredicateFilterEvaluator {
         }
 
         for (const auto& child : node.compound_children()) {
-            ASSIGN_OR_RETURN(auto cur_row_ranges_opt, child.visit(*this, Evaluator::PAGE_INDEX_ZONEMAP));
-            PredicateFilterEvaluatorUtils::merge_child_row_ranges<Type>(row_ranges, cur_row_ranges_opt, rg_first_row,
-                                                                        rg_num_rows);
+            auto cur_row_ranges_opt = child.visit(*this, Evaluator::PAGE_INDEX_ZONEMAP);
+            RETURN_IF_ERROR(cur_row_ranges_opt.status());
+            PredicateFilterEvaluatorUtils::merge_child_row_ranges<Type>(row_ranges, cur_row_ranges_opt.value(),
+                                                                        rg_first_row, rg_num_rows);
             if (row_ranges.has_value() && ((Type == CompoundNodeType::AND && row_ranges->span_size() == 0) ||
                                            (Type == CompoundNodeType::OR && row_ranges->span_size() == rg_num_rows)))
                 return row_ranges;
@@ -246,9 +250,10 @@ struct PredicateFilterEvaluator {
         }
 
         for (const auto& child : node.compound_children()) {
-            ASSIGN_OR_RETURN(auto cur_row_ranges_opt, child.visit(*this, Evaluator::BLOOM_FILTER));
-            PredicateFilterEvaluatorUtils::merge_child_row_ranges<Type>(row_ranges, cur_row_ranges_opt, rg_first_row,
-                                                                        rg_num_rows);
+            auto cur_row_ranges_opt = child.visit(*this, Evaluator::BLOOM_FILTER);
+            RETURN_IF_ERROR(cur_row_ranges_opt.status());
+            PredicateFilterEvaluatorUtils::merge_child_row_ranges<Type>(row_ranges, cur_row_ranges_opt.value(),
+                                                                        rg_first_row, rg_num_rows);
         }
         return row_ranges;
     }

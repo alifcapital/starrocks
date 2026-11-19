@@ -588,10 +588,9 @@ std::string timestamp::to_string_with_timezone(Timestamp timestamp, const cctz::
     time_point += std::chrono::microseconds(microseconds);
 
     // Format the timestamp with timezone using cctz
-    constexpr const char* base_format = use_iso8601_format ? "%Y-%m-%dT%H:%M:" : "%Y-%m-%d %H:%M:";
-    constexpr const char* time_format = ignore_microsecond ? "%S" : "%E*S";
-    constexpr auto tz_format = "%Ez";
-    const std::string format_str = std::string(base_format) + time_format + tz_format;
+    constexpr const char* format_str =
+            use_iso8601_format ? (ignore_microsecond ? "%Y-%m-%dT%H:%M:%S%Ez" : "%Y-%m-%dT%H:%M:%E*S%Ez")
+                               : (ignore_microsecond ? "%Y-%m-%d %H:%M:%S%Ez" : "%Y-%m-%d %H:%M:%E*S%Ez");
 
     return cctz::format(format_str, time_point, timezone);
 }
