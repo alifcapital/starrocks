@@ -133,6 +133,9 @@ public class StarRocksFEServer {
 
             // init globalStateMgr
             GlobalStateMgr.getCurrentState().initialize(cmdLineOpts.getHelpers());
+            // The Ranger policies load while the image loads. We want a failed load to fail the start, and the FE to
+            // serve only with the policies loaded, so we wait for the load here.
+            GlobalStateMgr.getCurrentState().awaitDefaultAccessControl();
 
             if (RunMode.isSharedDataMode()) {
                 Journal journal = GlobalStateMgr.getCurrentState().getJournal();

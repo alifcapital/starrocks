@@ -47,6 +47,9 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 
 import static com.starrocks.server.GlobalStateMgr.isCheckpointThread;
@@ -55,7 +58,12 @@ import static java.util.Locale.ENGLISH;
 public abstract class RangerAccessController extends ExternalAccessController implements AccessTypeConverter {
     private static final Logger LOG = LoggerFactory.getLogger(RangerAccessController.class);
     private static volatile boolean auditInitFailed = false;
-    protected final RangerBasePlugin rangerPlugin;
+
+    // Without a policy engine the plugin answers "no access", and the mask and row filter lookups answer "no mask"
+    // and "no filter". So nothing may read the plugin before init() is over: every use goes through plugin().
+    private final Plugin rawPlugin;
+    private final CompletableFuture<Void> initialized;
+    private final AtomicBoolean waitLogged = new AtomicBoolean();
 
     // Row filters and masks come from Ranger, per user and resource: any table may have one.
     @Override
@@ -64,17 +72,82 @@ public abstract class RangerAccessController extends ExternalAccessController im
     }
 
     public RangerAccessController(String serviceType, String serviceName) {
-        RangerPluginConfig rangerPluginContext = buildRangerPluginContext(serviceType, serviceName);
-        rangerPlugin = new Plugin(rangerPluginContext);
-        if (!isCheckpointThread()) {
-            // Audit first, so a broken audit config disables only audit; init() then skips it.
-            initAuditIfNeeded(rangerPlugin);
-            rangerPlugin.init(); // this will initialize policy engine and policy refresher
-        }
-        rangerPlugin.setResultProcessor(new RangerDefaultAuditHandler());
+        this(serviceType, serviceName, false);
+    }
 
-        LOG.info("Start Ranger plugin ({} - {}) success",
-                rangerPluginContext.getServiceType(), rangerPluginContext.getServiceName());
+    /**
+     * We want the FE start to overlap the load of the policies with other work, so with initInBackground the
+     * constructor returns before the policies are loaded. The load ends before plugin() or awaitInitialized()
+     * returns, and its failure is thrown from them. Without initInBackground the load is over when the
+     * constructor returns, and its failure is thrown by the constructor.
+     */
+    protected RangerAccessController(String serviceType, String serviceName, boolean initInBackground) {
+        RangerPluginConfig rangerPluginContext = buildRangerPluginContext(serviceType, serviceName);
+        Plugin plugin = new Plugin(rangerPluginContext);
+        rawPlugin = plugin;
+        // Whether this is a checkpoint instance depends on the calling thread, and the thread that loads the
+        // policies is never the checkpoint thread: so we ask here and give the answer to the task.
+        boolean loadPolicies = !isCheckpointThread();
+        if (loadPolicies) {
+            // Audit first, so a broken audit config disables only audit; init() then skips it.
+            // The audit factory is one for the JVM and takes the config of the first plugin that sets it up. We want
+            // that to be the plugin of the default catalog, which is built before the image loads, while the plugin of
+            // a catalog can be built during the image load. So the audit is set up here, in the thread that builds the
+            // controller, and only the policies load in the background.
+            initAuditIfNeeded(plugin);
+        }
+        Runnable init = () -> {
+            if (loadPolicies) {
+                plugin.init(); // this will initialize policy engine and policy refresher
+            }
+            plugin.setResultProcessor(new RangerDefaultAuditHandler());
+
+            LOG.info("Start Ranger plugin ({} - {}) success",
+                    rangerPluginContext.getServiceType(), rangerPluginContext.getServiceName());
+        };
+        if (initInBackground && loadPolicies) {
+            initialized = runInBackground("ranger-plugin-init-" + serviceType, init);
+        } else {
+            init.run();
+            initialized = CompletableFuture.completedFuture(null);
+        }
+    }
+
+    private static CompletableFuture<Void> runInBackground(String threadName, Runnable task) {
+        CompletableFuture<Void> done = new CompletableFuture<>();
+        Thread thread = new Thread(() -> {
+            try {
+                task.run();
+                done.complete(null);
+            } catch (Throwable t) {
+                done.completeExceptionally(t);
+            }
+        }, threadName);
+        thread.setDaemon(true);
+        thread.start();
+        return done;
+    }
+
+    /**
+     * Waits until the policies are loaded. It throws the failure of the load, so that a failed load is never
+     * mistaken for a plugin without policies.
+     */
+    public void awaitInitialized() {
+        if (!initialized.isDone() && waitLogged.compareAndSet(false, true)) {
+            LOG.warn("Thread {} waits for the Ranger plugin to load its policies",
+                    Thread.currentThread().getName(), new Exception("caller of the first wait"));
+        }
+        try {
+            initialized.join();
+        } catch (CompletionException e) {
+            throw new IllegalStateException("Ranger plugin failed to initialize", e.getCause());
+        }
+    }
+
+    /** The only way to reach the plugin: it returns after the policies are loaded. */
+    protected final RangerBasePlugin plugin() {
+        awaitInitialized();
+        return rawPlugin;
     }
 
     /**
@@ -117,7 +190,7 @@ public abstract class RangerAccessController extends ExternalAccessController im
     }
 
     public RangerBasePlugin getRangerPlugin() {
-        return rangerPlugin;
+        return plugin();
     }
 
     // RangerBasePlugin keeps its policy engine protected. We need it to read the tag policies. We
@@ -216,12 +289,13 @@ public abstract class RangerAccessController extends ExternalAccessController im
     }
 
     DataVersions dataVersions() {
-        return new DataVersions(rangerPlugin.getPoliciesVersion(), rangerPlugin.getTagsVersion(),
-                rangerPlugin.getRolesVersion(), rangerPlugin.getUserStoreVersion());
+        RangerBasePlugin current = plugin();
+        return new DataVersions(current.getPoliciesVersion(), current.getTagsVersion(),
+                current.getRolesVersion(), current.getUserStoreVersion());
     }
 
     boolean hasTimeDependentPolicies() {
-        return !(rangerPlugin instanceof Plugin plugin) || plugin.hasTimeDependentPolicies();
+        return !(plugin() instanceof Plugin current) || current.hasTimeDependentPolicies();
     }
 
     // The answer of tagPolicyMayAllow for one policy engine and policy version.
@@ -241,7 +315,7 @@ public abstract class RangerAccessController extends ExternalAccessController im
     protected boolean tagPolicyMayAllow() {
         try {
             RangerPolicyEngine engine =
-                    rangerPlugin instanceof Plugin plugin ? plugin.currentPolicyEngine() : null;
+                    plugin() instanceof Plugin current ? current.currentPolicyEngine() : null;
             if (engine == null) {
                 return true;
             }
@@ -298,7 +372,7 @@ public abstract class RangerAccessController extends ExternalAccessController im
         RangerStarRocksAccessRequest request =
                 RangerStarRocksAccessRequest.createAccessRequest(resource, user, groups, accessType);
 
-        RangerAccessResult result = rangerPlugin.evalDataMaskPolicies(request, null);
+        RangerAccessResult result = plugin().evalDataMaskPolicies(request, null);
         if (result != null && result.isMaskEnabled()) {
             String maskType = result.getMaskType();
             RangerServiceDef.RangerDataMaskTypeDef maskTypeDef = result.getMaskTypeDef();
@@ -330,7 +404,7 @@ public abstract class RangerAccessController extends ExternalAccessController im
                 accessType, null, () -> {
                     RangerStarRocksAccessRequest request =
                             RangerStarRocksAccessRequest.createAccessRequest(resource, user, groups, accessType);
-                    RangerAccessResult result = rangerPlugin.evalRowFilterPolicies(request, null);
+                    RangerAccessResult result = plugin().evalRowFilterPolicies(request, null);
                     if (result != null && result.isRowFilterEnabled()) {
                         return Optional.of(result.getFilterExpr());
                     } else {
@@ -380,7 +454,7 @@ public abstract class RangerAccessController extends ExternalAccessController im
         return decide(context, RangerDecisionCache.Kind.ACCESS, resource, user, groups, accessType, usage, () -> {
             RangerStarRocksAccessRequest request = RangerStarRocksAccessRequest.createAccessRequest(
                     resource, user, groups, accessType, usage);
-            RangerAccessResult result = rangerPlugin.isAccessAllowed(request);
+            RangerAccessResult result = plugin().isAccessAllowed(request);
             if (result == null) {
                 return new AccessDecision(false, false);
             }

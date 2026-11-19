@@ -544,6 +544,9 @@ public class GlobalStateMgr {
     private final SqlParser sqlParser;
     private final Analyzer analyzer;
     private final Authorizer authorizer;
+    // Waits until the access control of the default catalog is ready to decide. The Ranger controller loads
+    // its policies in the background, so that the FE start does other work meanwhile.
+    private final Runnable defaultAccessControlReady;
     private final DDLStmtExecutor ddlStmtExecutor;
     private final ShowExecutor showExecutor;
     private final ExecutorService queryDeployExecutor;
@@ -872,8 +875,11 @@ public class GlobalStateMgr {
         this.analyzer = new Analyzer(Analyzer.AnalyzerVisitor.getInstance());
         AccessControlProvider accessControlProvider;
         if (Config.access_control.equals("ranger")) {
-            accessControlProvider = new AccessControlProvider(new AuthorizerStmtVisitor(), new RangerStarRocksAccessController());
+            RangerStarRocksAccessController rangerController = RangerStarRocksAccessController.startingInBackground();
+            this.defaultAccessControlReady = rangerController::awaitInitialized;
+            accessControlProvider = new AccessControlProvider(new AuthorizerStmtVisitor(), rangerController);
         } else {
+            this.defaultAccessControlReady = () -> { };
             accessControlProvider = new AccessControlProvider(new AuthorizerStmtVisitor(), new NativeAccessController());
         }
         this.authorizer = new Authorizer(accessControlProvider);
@@ -1164,6 +1170,14 @@ public class GlobalStateMgr {
 
     public Authorizer getAuthorizer() {
         return authorizer;
+    }
+
+    /**
+     * Returns when the access control of the default catalog has loaded what it decides with, or throws the
+     * failure of that load. The FE start calls it before the FE leaves the start path.
+     */
+    public void awaitDefaultAccessControl() {
+        defaultAccessControlReady.run();
     }
 
     public DDLStmtExecutor getDdlStmtExecutor() {

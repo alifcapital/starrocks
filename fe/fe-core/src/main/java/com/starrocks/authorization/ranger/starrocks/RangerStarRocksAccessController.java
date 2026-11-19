@@ -48,6 +48,18 @@ public class RangerStarRocksAccessController extends RangerAccessController {
         super("starrocks", null);
     }
 
+    private RangerStarRocksAccessController(boolean initInBackground) {
+        super("starrocks", null, initInBackground);
+    }
+
+    /**
+     * The controller of the default catalog. The FE start does other work while it loads its policies, and
+     * waits for it with awaitInitialized().
+     */
+    public static RangerStarRocksAccessController startingInBackground() {
+        return new RangerStarRocksAccessController(true);
+    }
+
     @Override
     public void checkSystemAction(ConnectContext context, PrivilegeType privilegeType)
             throws AccessDeniedException {
@@ -149,7 +161,7 @@ public class RangerStarRocksAccessController extends RangerAccessController {
             if (tagPolicyMayAllow()) {
                 return true;
             }
-            RangerAuthContext authContext = rangerPlugin.getCurrentRangerAuthContext();
+            RangerAuthContext authContext = plugin().getCurrentRangerAuthContext();
             RangerSecurityZoneMatcher zoneMatcher = authContext == null ? null : authContext.getZoneMatcher();
             if (zoneMatcher == null) {
                 return true;
