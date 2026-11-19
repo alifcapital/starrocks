@@ -1475,6 +1475,59 @@ TEST_F(AggregateTest, test_percentile_cont_date_merge_empty_partial) {
     }
 }
 
+// A state gives the number of items it holds. merge copies that many items, so a state that holds fewer items than it
+// gives must be refused, not read past its end.
+TEST_F(AggregateTest, test_percentile_cont_merge_refuses_state_with_wrong_item_count) {
+    std::vector<TypeDescriptor> arg_types = {TypeDescriptor::from_logical_type(TYPE_DOUBLE),
+                                             TypeDescriptor::from_logical_type(TYPE_DOUBLE)};
+    auto return_type = TypeDescriptor::from_logical_type(TYPE_DOUBLE);
+    auto make_ctx = [&]() {
+        return std::unique_ptr<FunctionContext>(
+                FunctionContext::create_test_context(std::vector<TypeDescriptor>(arg_types), return_type));
+    };
+    const AggregateFunction* func = get_aggregate_function("percentile_cont", TYPE_DOUBLE, TYPE_DOUBLE, false);
+
+    auto data_column = DoubleColumn::create();
+    data_column->append(2.0);
+    data_column->append(3.0);
+    data_column->append(4.0);
+    auto rate_column = ColumnHelper::create_const_column<TYPE_DOUBLE>(0.25, 1);
+    std::vector<const Column*> raw_columns{data_column.get(), rate_column.get()};
+    auto update_ctx = make_ctx();
+    auto state = ManagedAggrState::create(ctx, func);
+    func->update_batch_single_state(update_ctx.get(), data_column->size(), raw_columns.data(), state->state());
+    auto serialized = BinaryColumn::create();
+    func->serialize_to_column(update_ctx.get(), state->state(), serialized.get());
+    const Slice good = serialized->get_slice(0);
+
+    // The state of the three items, its count of items set to 1000.
+    std::string more_than_held(good.data, good.size);
+    const size_t claimed = 1000;
+    memcpy(more_than_held.data() + sizeof(double), &claimed, sizeof(size_t));
+    // Only part of the header.
+    std::string short_header(good.data, sizeof(double) + 3);
+
+    for (const std::string& bad : {more_than_held, short_header}) {
+        auto merge_ctx = make_ctx();
+        auto bad_column = BinaryColumn::create();
+        bad_column->append(Slice(bad));
+        auto merged = ManagedAggrState::create(ctx, func);
+        func->merge(merge_ctx.get(), bad_column.get(), merged->state(), 0);
+        ASSERT_TRUE(merge_ctx->has_error());
+    }
+
+    // The state as it was serialized still merges, and gives what the state itself gives.
+    auto merge_ctx = make_ctx();
+    auto merged = ManagedAggrState::create(ctx, func);
+    func->merge(merge_ctx.get(), serialized.get(), merged->state(), 0);
+    ASSERT_FALSE(merge_ctx->has_error());
+    auto result = DoubleColumn::create();
+    func->finalize_to_column(merge_ctx.get(), merged->state(), result.get());
+    auto expected = DoubleColumn::create();
+    func->finalize_to_column(update_ctx.get(), state->state(), expected.get());
+    ASSERT_EQ(expected->get_data()[0], result->get_data()[0]);
+}
+
 TEST_F(AggregateTest, test_percentile_disc) {
     std::vector<TypeDescriptor> arg_types = {TypeDescriptor::from_logical_type(TYPE_DOUBLE),
                                              TypeDescriptor::from_logical_type(TYPE_DOUBLE)};

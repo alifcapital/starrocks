@@ -240,9 +240,22 @@ public:
         DCHECK(column->is_binary());
 
         const Slice slice = column->get(row_num).get_slice();
+        // The state holds the rate, the number of items and the items. We copy as many items as the state says it
+        // holds, and we fear a state that holds fewer: the copy would read past its end. So a number of items that
+        // does not match the size of the state is an error.
+        constexpr size_t header_size = sizeof(double) + sizeof(size_t);
+        if (UNLIKELY(slice.size < header_size)) {
+            ctx->set_error("Percentile state is shorter than its header");
+            return;
+        }
         double rate = *reinterpret_cast<double*>(slice.data);
         size_t items_size = *reinterpret_cast<size_t*>(slice.data + sizeof(double));
-        auto data_ptr = slice.data + sizeof(double) + sizeof(size_t);
+        if (UNLIKELY(items_size != (slice.size - header_size) / sizeof(InputCppType) ||
+                     (slice.size - header_size) % sizeof(InputCppType) != 0)) {
+            ctx->set_error("Percentile state does not hold the number of items it gives");
+            return;
+        }
+        auto data_ptr = slice.data + header_size;
         auto& grid = this->data(state).grid;
 
         typename PercentileStateTypes<LT>::ItemType vec;
